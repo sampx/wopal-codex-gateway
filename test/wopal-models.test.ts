@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { syncWopalModelConfigs } from '../src/wopal-models.js';
+import { syncWopalModelConfigs, updateWopalModelConfigs } from '../src/wopal-models.js';
 
 test('syncWopalModelConfigs imports all Codex-usable API models and skips embedding models', () => {
   const current = [
@@ -66,4 +66,38 @@ test('syncWopalModelConfigs keeps manually excluded models out of future syncs',
   const result = syncWopalModelConfigs(current, ['glm-5.3-flash-free', 'broken-model', 'kimi-k3'], ['broken-model']);
   assert.deepEqual(result.models.map((model) => model.name), ['glm-5.3-flash-free', 'kimi-k3']);
   assert.deepEqual(result.excluded, ['broken-model']);
+});
+
+
+test('updateWopalModelConfigs overrides existing model metadata and sync preserves it', () => {
+  const current = [
+    { name: 'deepseek-v4.1-flash', contextWindow: 262_144, vision: false, reasoning: true },
+    { name: 'kimi-k3', contextWindow: 262_144, vision: false, reasoning: true },
+  ];
+
+  const updated = updateWopalModelConfigs(current, ['wopal-ai/deepseek-v4.1-flash'], {
+    contextWindow: 1_000_000,
+  });
+
+  assert.deepEqual(updated.updated, ['deepseek-v4.1-flash']);
+  assert.deepEqual(updated.missing, []);
+  assert.deepEqual(updated.models[0], {
+    name: 'deepseek-v4.1-flash',
+    contextWindow: 1_000_000,
+    vision: false,
+    reasoning: true,
+  });
+  assert.deepEqual(updated.models[1], current[1]);
+
+  const synced = syncWopalModelConfigs(updated.models, ['deepseek-v4.1-flash', 'kimi-k3']);
+  assert.equal(synced.models[0]?.contextWindow, 1_000_000);
+});
+
+test('updateWopalModelConfigs reports unknown models without creating them', () => {
+  const current = [{ name: 'deepseek-v4.1-flash', contextWindow: 262_144 }];
+  const updated = updateWopalModelConfigs(current, ['missing-model'], { contextWindow: 1_000_000 });
+
+  assert.deepEqual(updated.updated, []);
+  assert.deepEqual(updated.missing, ['missing-model']);
+  assert.deepEqual(updated.models, current);
 });

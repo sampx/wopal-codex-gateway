@@ -76,6 +76,30 @@ export function addWopalModelConfigs(
   return { models, added, existing };
 }
 
+export interface UpdateWopalModelsResult {
+  models: ExternalModelConfig[];
+  updated: string[];
+  missing: string[];
+}
+
+export function updateWopalModelConfigs(
+  current: ExternalModelConfig[],
+  names: string[],
+  patch: Omit<ExternalModelConfig, 'name'>,
+): UpdateWopalModelsResult {
+  const requested = [...new Set(names.map(normalizeWopalModelName).filter(Boolean))];
+  const requestedSet = new Set(requested);
+  const existing = new Set(current.map((model) => model.name));
+  const updated = requested.filter((name) => existing.has(name));
+  const missing = requested.filter((name) => !existing.has(name));
+
+  return {
+    models: current.map((model) => requestedSet.has(model.name) ? { ...model, ...patch } : { ...model }),
+    updated,
+    missing,
+  };
+}
+
 export interface RemoveWopalModelsResult {
   models: ExternalModelConfig[];
   removed: string[];

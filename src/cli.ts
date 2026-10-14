@@ -5,7 +5,7 @@ import { installIntoCodex, refreshCatalog, restoreCodex } from './codex.js';
 import { getWopalApiKey, hasWopalApiKey, setWopalApiKeyInteractive } from './keychain.js';
 import { createGatewayServer } from './proxy.js';
 import { fetchWopalModels } from './wopal-api.js';
-import { addWopalModelConfigs, removeWopalModelConfigs, syncWopalModelConfigs } from './wopal-models.js';
+import { addWopalModelConfigs, removeWopalModelConfigs, syncWopalModelConfigs, updateWopalModelConfigs } from './wopal-models.js';
 import { installLaunchAgent, uninstallLaunchAgent } from './service.js';
 
 async function main(): Promise<void> {
@@ -133,6 +133,36 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'models' && subcommand === 'set') {
+    const config = await loadConfig();
+    const names = modelPositionals(rest, new Set(['--context-window']));
+    if (names.length === 0) throw new Error('Usage: wopal-codex-gateway models set <model...> [--context-window N] [--vision|--no-vision] [--reasoning|--no-reasoning]');
+    if (rest.includes('--vision') && rest.includes('--no-vision')) throw new Error('Choose only one of --vision or --no-vision');
+    if (rest.includes('--reasoning') && rest.includes('--no-reasoning')) throw new Error('Choose only one of --reasoning or --no-reasoning');
+
+    const patch: { contextWindow?: number; vision?: boolean; reasoning?: boolean } = {};
+    const contextWindow = numberOption(rest, '--context-window');
+    if (contextWindow !== undefined) patch.contextWindow = contextWindow;
+    if (rest.includes('--vision')) patch.vision = true;
+    if (rest.includes('--no-vision')) patch.vision = false;
+    if (rest.includes('--reasoning')) patch.reasoning = true;
+    if (rest.includes('--no-reasoning')) patch.reasoning = false;
+    if (Object.keys(patch).length === 0) throw new Error('models set requires at least one metadata option');
+
+    const updated = updateWopalModelConfigs(config.wopalAi.models, names, patch);
+    if (updated.missing.length > 0) throw new Error(`Model(s) not configured: ${updated.missing.join(', ')}. Run models sync or models add first.`);
+    config.wopalAi.models = updated.models;
+    await saveConfig(config);
+    const result = await refreshCatalog(config);
+    console.log(`Wopal AI model metadata updated: ${updated.updated.join(', ')}`);
+    for (const name of updated.updated) {
+      const model = updated.models.find((item) => item.name === name)!;
+      console.log(`  wopal-ai/${name}: context=${model.contextWindow ?? 262_144}, vision=${model.vision ?? false}, reasoning=${model.reasoning ?? true}`);
+    }
+    printCatalogResult(result);
+    return;
+  }
+
   if (command === 'models' && subcommand === 'remove') {
     const config = await loadConfig();
     const names = rest.filter((value) => !value.startsWith('--'));
@@ -238,7 +268,7 @@ function numberOption(args: string[], name: string): number | undefined {
 }
 
 function printHelp(): void {
-  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth test\n  auth status\n  models list\n  models sync\n  models add <model...> [--context-window 262144] [--vision] [--no-reasoning]\n  models remove <model...>\n  service install\n  service uninstall\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  unnamespaced model -> native ChatGPT/OpenAI\n`);
+  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth test\n  auth status\n  models list\n  models sync\n  models add <model...> [--context-window 262144] [--vision] [--no-reasoning]\n  models set <model...> [--context-window N] [--vision|--no-vision] [--reasoning|--no-reasoning]\n  models remove <model...>\n  service install\n  service uninstall\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  unnamespaced model -> native ChatGPT/OpenAI\n`);
 }
 
 main().catch((error) => {

@@ -28,6 +28,7 @@ Models and auth:
   models list        List models visible to the Wopal AI API key
   models sync        Import all Codex-usable Wopal AI models
   models add <name...>     Add one or more Wopal AI models locally
+  models set <name...>     Update context/vision/reasoning metadata
   models remove <name...>  Remove one or more Wopal AI models locally
   auth set           Store and validate the Wopal AI API key
   auth test          Validate the stored Wopal AI API key
@@ -136,12 +137,16 @@ case "$cmd" in
         run_cli models add "$@"
         echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
         ;;
+      set)
+        run_cli models set "$@"
+        echo "Restart/re-fork Codex sessions that already loaded this model catalog."
+        ;;
       remove)
         run_cli models remove "$@"
         echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
         ;;
       *)
-        die "usage: scripts/gateway models <list|sync|add|remove>"
+        die "usage: scripts/gateway models <list|sync|add|set|remove>"
         ;;
     esac
     ;;
