@@ -438,6 +438,61 @@ test('closing Codex websocket aborts an active third-party HTTP stream', async (
 });
 
 
+test('official websocket route tunnels arbitrary frames without parsing application payloads', async (t) => {
+  const officialServer = http.createServer();
+  const officialWss = attachWsServer(officialServer, (socket) => {
+    socket.on('message', (data, isBinary) => {
+      socket.send(data, { binary: isBinary });
+    });
+  });
+  const officialBase = await listen(officialServer);
+  t.after(async () => {
+    for (const socket of officialWss.clients) socket.terminate();
+    officialWss.close();
+    await closeServer(officialServer);
+  });
+
+  const gateway = createGatewayServer({
+    wopalAiBaseUrl: `${officialBase}/unused/v1`,
+    ollamaBaseUrl: `${officialBase}/unused-ollama`,
+    chatgptBaseUrl: `${officialBase}/chatgpt`,
+    openaiBaseUrl: `${officialBase}/openai/v1`,
+    getWopalApiKey: async () => 'unused',
+  });
+  const gatewayBase = await listen(gateway);
+  const client = new WebSocket(wsUrl(gatewayBase, '/v1/responses'), {
+    headers: {
+      authorization: 'Bearer chatgpt-token',
+      'ChatGPT-Account-ID': 'acct-test',
+      'x-codex-routing-hint': 'model=gpt-6.1-sol',
+    },
+  });
+  t.after(async () => { client.terminate(); await closeServer(gateway); });
+  await once(client, 'open');
+
+  const textReply = nextMessage(client);
+  client.send('this-is-not-json');
+  assert.equal(await textReply, 'this-is-not-json');
+
+  const binaryReply = new Promise<Buffer>((resolve, reject) => {
+    const onMessage = (data: WebSocket.RawData, isBinary: boolean) => {
+      cleanup();
+      if (!isBinary) reject(new Error('expected binary websocket message'));
+      else resolve(Buffer.from(data));
+    };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const cleanup = () => {
+      client.off('message', onMessage);
+      client.off('error', onError);
+    };
+    client.on('message', onMessage);
+    client.on('error', onError);
+  });
+  client.send(Buffer.from([0, 1, 2, 3]), { binary: true });
+  assert.deepEqual(await binaryReply, Buffer.from([0, 1, 2, 3]));
+  assert.equal(client.readyState, WebSocket.OPEN);
+});
+
 test('third-party websocket bridge forces HTTP streaming and keeps the socket reusable', async (t) => {
   const seenStreams: unknown[] = [];
   let calls = 0;
@@ -491,4 +546,70 @@ test('third-party websocket bridge forces HTTP streaming and keeps the socket re
   assert.deepEqual(seenStreams, [true, true]);
   assert.equal(calls, 2);
   assert.equal(client.readyState, WebSocket.OPEN);
+});
+
+
+test('one Codex websocket can route official to third-party and back to official', async (t) => {
+  const externalModels: string[] = [];
+  const externalServer = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+    externalModels.push(String(body.model));
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: {"type":"response.created","response":{"id":"ext-switch"}}\n\n');
+    res.end('data: {"type":"response.completed","response":{"id":"ext-switch"}}\n\n');
+  });
+  const externalBase = await listen(externalServer);
+  t.after(async () => closeServer(externalServer));
+
+  const officialModels: string[] = [];
+  const officialServer = http.createServer();
+  const officialWss = attachWsServer(officialServer, (socket) => {
+    socket.on('message', (data) => {
+      const body = JSON.parse(data.toString()) as Record<string, unknown>;
+      officialModels.push(String(body.model));
+      const id = `off-${officialModels.length}`;
+      socket.send(JSON.stringify({ type: 'response.created', response: { id } }));
+      socket.send(JSON.stringify({ type: 'response.completed', response: { id } }));
+    });
+  });
+  const officialBase = await listen(officialServer);
+  t.after(async () => {
+    for (const socket of officialWss.clients) socket.terminate();
+    officialWss.close();
+    await closeServer(officialServer);
+  });
+
+  const gateway = createGatewayServer({
+    wopalAiBaseUrl: `${externalBase}/v1`,
+    ollamaBaseUrl: `${externalBase}/ollama`,
+    chatgptBaseUrl: `${officialBase}/chatgpt`,
+    openaiBaseUrl: `${officialBase}/openai/v1`,
+    getWopalApiKey: async () => 'wopal-secret',
+  });
+  const gatewayBase = await listen(gateway);
+  const client = new WebSocket(wsUrl(gatewayBase, '/v1/responses'), {
+    headers: {
+      authorization: 'Bearer chatgpt-token',
+      'ChatGPT-Account-ID': 'acct-test',
+      'x-codex-routing-hint': 'model=gpt-6.1-sol',
+    },
+  });
+  t.after(async () => { client.terminate(); await closeServer(gateway); });
+  await once(client, 'open');
+
+  const sendCreate = async (model: string) => {
+    client.send(JSON.stringify({ type: 'response.create', model, input: [] }));
+    assert.equal((await nextJson(client)).type, 'response.created');
+    assert.equal((await nextJson(client)).type, 'response.completed');
+    assert.equal(client.readyState, WebSocket.OPEN);
+  };
+
+  await sendCreate('gpt-6.1-sol');
+  await sendCreate('wopal-ai/deepseek-v4.1-flash');
+  await sendCreate('gpt-6.1-sol');
+
+  assert.deepEqual(officialModels, ['gpt-6.1-sol', 'gpt-6.1-sol']);
+  assert.deepEqual(externalModels, ['deepseek-v4.1-flash']);
 });

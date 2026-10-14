@@ -143,9 +143,9 @@ function setupWebSocketConnection(
 
   const attachOfficial = (upstream: WebSocket) => {
     upstream.on('message', (data, isBinary) => {
-      if (closed || active?.kind !== 'official' || downstream.readyState !== WebSocket.OPEN) return;
+      if (closed || active?.kind === 'external' || downstream.readyState !== WebSocket.OPEN) return;
       downstream.send(data, { binary: isBinary });
-      if (!isBinary && isTerminalResponseEvent(data.toString())) active = undefined;
+      if (active?.kind === 'official' && !isBinary && isTerminalResponseEvent(data.toString())) active = undefined;
     });
     upstream.on('close', (code, reason) => {
       if (official === upstream) official = undefined;
@@ -260,10 +260,10 @@ function setupWebSocketConnection(
     messageChain = messageChain.then(async () => {
       if (closed) return;
       if (isBinary) {
-        if (active?.kind === 'official' && official?.readyState === WebSocket.OPEN) {
+        if (official?.readyState === WebSocket.OPEN && active?.kind !== 'external') {
           official.send(data, { binary: true });
         } else {
-          sendGatewayError(downstream, 'gateway_binary_frame_unsupported', 'binary frames require an active official route');
+          sendGatewayError(downstream, 'gateway_binary_frame_unsupported', 'binary frames require an official route');
         }
         return;
       }
@@ -273,7 +273,11 @@ function setupWebSocketConnection(
       try {
         payload = JSON.parse(text) as Record<string, unknown>;
       } catch {
-        sendGatewayError(downstream, 'gateway_invalid_json', 'websocket message is not valid JSON');
+        if (official?.readyState === WebSocket.OPEN && active?.kind !== 'external') {
+          official.send(text);
+        } else {
+          sendGatewayError(downstream, 'gateway_invalid_json', 'websocket message is not valid JSON');
+        }
         return;
       }
 
