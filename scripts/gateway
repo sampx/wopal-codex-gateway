@@ -61,13 +61,32 @@ codex_bin() {
 }
 
 reload_codex() {
-  local bin
+  local chatgpt_pid embedded_pid new_pid bin i
+
+  chatgpt_pid="$(pgrep -x ChatGPT | head -n1 || true)"
+  if [[ -n "$chatgpt_pid" ]]; then
+    embedded_pid="$(ps -axo pid=,ppid=,command= | awk -v p="$chatgpt_pid" '$2==p && $0 ~ /CodexCLI.*app-server/ && $0 !~ /managed-daemon/ {print $1; exit}')"
+    if [[ -n "$embedded_pid" ]]; then
+      kill -TERM "$embedded_pid"
+      for i in {1..40}; do
+        sleep 0.1
+        new_pid="$(ps -axo pid=,ppid=,command= | awk -v p="$chatgpt_pid" '$2==p && $0 ~ /CodexCLI.*app-server/ && $0 !~ /managed-daemon/ {print $1; exit}')"
+        if [[ -n "$new_pid" && "$new_pid" != "$embedded_pid" ]]; then
+          echo "ChatGPT embedded Codex app-server reloaded (pid $embedded_pid -> $new_pid)."
+          return 0
+        fi
+      done
+      echo "warning: ChatGPT embedded Codex app-server did not respawn; restart ChatGPT manually" >&2
+      return 1
+    fi
+  fi
+
   if ! bin="$(codex_bin)"; then
     echo "warning: Codex CLI not found; restart ChatGPT/Codex Desktop manually to reload the model catalog" >&2
     return 0
   fi
   "$bin" app-server daemon restart >/dev/null
-  echo "Codex app-server daemon reloaded."
+  echo "Codex managed app-server daemon reloaded (ChatGPT Desktop is not running)."
 }
 
 proxy_loaded() {
