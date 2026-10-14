@@ -7,7 +7,6 @@ LABEL="com.wopal.codex-gateway"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 HEALTH_URL="http://127.0.0.1:11435/_health"
-BUNDLED_CODEX="/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
 
 usage() {
   cat <<'USAGE'
@@ -18,22 +17,21 @@ Proxy service:
   stop               Stop the proxy service without changing Codex config
   restart            Restart the proxy service
   status             Show install/load/health status
-  reload             Restart proxy and reload the Codex app-server daemon
 
 Codex integration:
-  install            Install/enable the gateway in Codex and reload Codex daemon
+  install            Install/enable the gateway in Codex
   disable            Restore pre-install Codex config and unload the gateway
 
 Models and auth:
   models list        List models visible to the Wopal AI API key
-  models sync        Import all Codex-usable Wopal AI models and reload Codex daemon
+  models sync        Import all Codex-usable Wopal AI models
   auth set           Store and validate the Wopal AI API key
   auth test          Validate the stored Wopal AI API key
   auth status        Show whether a key is configured
 
 Low-level passthrough:
-  config ...         Run gateway config command, then refresh/reload as needed
-  catalog refresh    Rebuild model catalog and reload Codex daemon
+  config ...         Run gateway config command and refresh the catalog
+  catalog refresh    Rebuild model catalog
 USAGE
 }
 
@@ -48,46 +46,6 @@ run_cli() {
   node "$CLI" "$@"
 }
 
-codex_bin() {
-  if [[ -n "${CODEX_BIN:-}" && -x "$CODEX_BIN" ]]; then
-    printf '%s\n' "$CODEX_BIN"
-  elif [[ -x "$BUNDLED_CODEX" ]]; then
-    printf '%s\n' "$BUNDLED_CODEX"
-  elif command -v codex >/dev/null 2>&1; then
-    command -v codex
-  else
-    return 1
-  fi
-}
-
-reload_codex() {
-  local chatgpt_pid embedded_pid new_pid bin i
-
-  chatgpt_pid="$(pgrep -x ChatGPT | head -n1 || true)"
-  if [[ -n "$chatgpt_pid" ]]; then
-    embedded_pid="$(ps -axo pid=,ppid=,command= | awk -v p="$chatgpt_pid" '$2==p && $0 ~ /CodexCLI.*app-server/ && $0 !~ /managed-daemon/ {print $1; exit}')"
-    if [[ -n "$embedded_pid" ]]; then
-      kill -TERM "$embedded_pid"
-      for i in {1..40}; do
-        sleep 0.1
-        new_pid="$(ps -axo pid=,ppid=,command= | awk -v p="$chatgpt_pid" '$2==p && $0 ~ /CodexCLI.*app-server/ && $0 !~ /managed-daemon/ {print $1; exit}')"
-        if [[ -n "$new_pid" && "$new_pid" != "$embedded_pid" ]]; then
-          echo "ChatGPT embedded Codex app-server reloaded (pid $embedded_pid -> $new_pid)."
-          return 0
-        fi
-      done
-      echo "warning: ChatGPT embedded Codex app-server did not respawn; restart ChatGPT manually" >&2
-      return 1
-    fi
-  fi
-
-  if ! bin="$(codex_bin)"; then
-    echo "warning: Codex CLI not found; restart ChatGPT/Codex Desktop manually to reload the model catalog" >&2
-    return 0
-  fi
-  "$bin" app-server daemon restart >/dev/null
-  echo "Codex managed app-server daemon reloaded (ChatGPT Desktop is not running)."
-}
 
 proxy_loaded() {
   launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1
@@ -151,18 +109,13 @@ case "$cmd" in
   status)
     status_proxy
     ;;
-  reload)
-    stop_proxy
-    start_proxy
-    reload_codex
-    ;;
   install)
     run_cli codex install
-    reload_codex
+    echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
     ;;
   disable)
     run_cli codex restore
-    reload_codex
+    echo "Restart ChatGPT/Codex Desktop manually to reload the original configuration."
     ;;
   models)
     sub="${1:-}"
@@ -173,7 +126,7 @@ case "$cmd" in
         ;;
       sync)
         run_cli models sync "$@"
-        reload_codex
+        echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
         ;;
       *)
         die "usage: scripts/gateway models <list|sync>"
@@ -190,12 +143,12 @@ case "$cmd" in
       stop_proxy
       start_proxy
     fi
-    reload_codex
+    echo "Restart ChatGPT/Codex Desktop manually if model/catalog settings changed."
     ;;
   catalog)
     [[ "${1:-}" == refresh ]] || die "usage: scripts/gateway catalog refresh"
     run_cli catalog refresh
-    reload_codex
+    echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
     ;;
   help|-h|--help)
     usage
