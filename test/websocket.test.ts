@@ -127,7 +127,7 @@ test('official websocket route preserves handshake, request frame, and response 
   assert.equal(reasoningIncluded, 'true');
 });
 
-test('third-party turns close cleanly so the next official turn gets a fresh native websocket handshake', async (t) => {
+test('third-party bridge stays open while official routes preserve native websocket handshake', async (t) => {
   let externalCalls = 0;
   const externalModels: string[] = [];
   const externalAuth: string[] = [];
@@ -204,26 +204,22 @@ test('third-party turns close cleanly so the next official turn gets a fresh nat
   };
 
   const warmupClient = await connect('wopal-ai/glm-5.3-flash-free');
-  const warmupClose = once(warmupClient, 'close');
   warmupClient.send(JSON.stringify({
     type: 'response.create', model: 'wopal-ai/glm-5.3-flash-free', stream: true,
     input: [], generate: false,
   }));
   assert.deepEqual(await nextJson(warmupClient), { type: 'response.completed', response: { id: '' } });
-  const [warmupCloseCode] = await warmupClose;
-  assert.equal(warmupCloseCode, 1000);
+  assert.equal(warmupClient.readyState, WebSocket.OPEN);
   assert.equal(externalCalls, 0, 'warmup must not generate a third-party response');
 
   const externalClient = await connect('wopal-ai/glm-5.3-flash-free');
-  const externalClose = once(externalClient, 'close');
   externalClient.send(JSON.stringify({
     type: 'response.create', model: 'wopal-ai/glm-5.3-flash-free', stream: true, input: [],
   }));
   assert.equal((await nextJson(externalClient)).type, 'response.created');
   assert.equal((await nextJson(externalClient)).type, 'response.output_text.delta');
   assert.equal((await nextJson(externalClient)).type, 'response.completed');
-  const [externalCloseCode] = await externalClose;
-  assert.equal(externalCloseCode, 1000);
+  assert.equal(externalClient.readyState, WebSocket.OPEN);
   assert.deepEqual(externalModels, ['glm-5.3-flash-free']);
   assert.deepEqual(externalAuth, ['Bearer wopal-secret']);
   assert.equal(officialConnections, 0);
@@ -297,7 +293,6 @@ test('ollama websocket requests stay HTTP/SSE upstream and keep Ollama normaliza
   });
   t.after(async () => { client.terminate(); await closeServer(gateway); });
   await once(client, 'open');
-  const closePromise = once(client, 'close');
   client.send(JSON.stringify({
     type: 'response.create',
     model: 'ollama/test-model',
@@ -305,8 +300,7 @@ test('ollama websocket requests stay HTTP/SSE upstream and keep Ollama normaliza
     input: [{ type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'rules' }] }],
   }));
   assert.equal((await nextJson(client)).type, 'response.completed');
-  const [closeCode] = await closePromise;
-  assert.equal(closeCode, 1000);
+  assert.equal(client.readyState, WebSocket.OPEN);
   assert.equal(seen.model, 'test-model');
   const input = seen.input as Array<Record<string, unknown>>;
   assert.equal(input[0]?.role, 'system');
@@ -314,7 +308,7 @@ test('ollama websocket requests stay HTTP/SSE upstream and keep Ollama normaliza
   assert.equal(seenAccount, '');
 });
 
-test('third-party HTTP failure emits an error and closes websocket cleanly', async (t) => {
+test('third-party HTTP failure emits an error without dropping the websocket', async (t) => {
   const externalServer = http.createServer(async (req, res) => {
     for await (const _chunk of req) { /* consume request */ }
     res.writeHead(500, { 'content-type': 'application/json' });
@@ -336,13 +330,11 @@ test('third-party HTTP failure emits an error and closes websocket cleanly', asy
   });
   t.after(async () => { client.terminate(); await closeServer(gateway); });
   await once(client, 'open');
-  const closePromise = once(client, 'close');
-  client.send(JSON.stringify({ type: 'response.create', model: 'wopal-ai/failing-model', stream: true, input: [] }));
+  client.send(JSON.stringify({ type: 'response.create', model: 'wopal-ai/failing-model', input: [] }));
   const error = await nextJson(client);
   assert.equal(error.type, 'error');
   assert.equal((error.error as Record<string, unknown>).code, 'gateway_upstream_http_500');
-  const [closeCode] = await closePromise;
-  assert.equal(closeCode, 1000);
+  assert.equal(client.readyState, WebSocket.OPEN);
 });
 
 test('third-party terminal event aborts an upstream SSE connection that stays open', async (t) => {
@@ -369,14 +361,13 @@ test('third-party terminal event aborts an upstream SSE connection that stays op
   });
   t.after(async () => { client.terminate(); await closeServer(gateway); });
   await once(client, 'open');
-  const closePromise = once(client, 'close');
-  client.send(JSON.stringify({ type: 'response.create', model: 'wopal-ai/terminal-model', stream: true, input: [] }));
+  client.send(JSON.stringify({ type: 'response.create', model: 'wopal-ai/terminal-model', input: [] }));
   assert.equal((await nextJson(client)).type, 'response.completed');
-  await closePromise;
   await waitFor(() => upstreamClosed);
+  assert.equal(client.readyState, WebSocket.OPEN);
 });
 
-test('third-party response.interrupt aborts HTTP upstream and closes websocket cleanly', async (t) => {
+test('third-party response.interrupt aborts HTTP upstream without dropping websocket', async (t) => {
   let upstreamClosed = false;
   const externalServer = http.createServer(async (req, res) => {
     for await (const _chunk of req) { /* consume request */ }
@@ -403,13 +394,11 @@ test('third-party response.interrupt aborts HTTP upstream and closes websocket c
   client.send(JSON.stringify({ type: 'response.create', model: 'wopal-ai/slow-model', stream: true, input: [] }));
   assert.deepEqual(await nextJson(client), { type: 'response.created', response: { id: 'interrupt-me' } });
 
-  const closePromise = once(client, 'close');
   client.send(JSON.stringify({ type: 'response.interrupt', response_id: 'interrupt-me', mode: 'discard_partial_items' }));
   assert.deepEqual(await nextJson(client), { type: 'response.interrupt.accepted', response_id: 'interrupt-me' });
   assert.deepEqual(await nextJson(client), { type: 'response.completed', response: { id: 'interrupt-me' } });
-  const [closeCode] = await closePromise;
-  assert.equal(closeCode, 1000);
   await waitFor(() => upstreamClosed);
+  assert.equal(client.readyState, WebSocket.OPEN);
 });
 
 test('closing Codex websocket aborts an active third-party HTTP stream', async (t) => {
@@ -446,4 +435,60 @@ test('closing Codex websocket aborts an active third-party HTTP stream', async (
   await once(client, 'close');
   await waitFor(() => upstreamClosed);
   assert.equal(upstreamClosed, true);
+});
+
+
+test('third-party websocket bridge forces HTTP streaming and keeps the socket reusable', async (t) => {
+  const seenStreams: unknown[] = [];
+  let calls = 0;
+  const externalServer = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+    seenStreams.push(body.stream);
+    calls += 1;
+    const id = `persistent-${calls}`;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(`data: {"type":"response.created","response":{"id":"${id}"}}\n\n`);
+    res.write(`data: {"type":"response.output_text.delta","delta":"turn-${calls}"}\n\n`);
+    res.end(`data: {"type":"response.completed","response":{"id":"${id}"}}\n\n`);
+  });
+  const externalBase = await listen(externalServer);
+  t.after(async () => closeServer(externalServer));
+
+  const gateway = createGatewayServer({
+    wopalAiBaseUrl: `${externalBase}/v1`,
+    ollamaBaseUrl: `${externalBase}/ollama`,
+    chatgptBaseUrl: 'http://127.0.0.1:9/chatgpt',
+    openaiBaseUrl: 'http://127.0.0.1:9/openai/v1',
+    getWopalApiKey: async () => 'wopal-secret',
+  });
+  const gatewayBase = await listen(gateway);
+  const client = new WebSocket(wsUrl(gatewayBase, '/v1/responses'), {
+    headers: { 'x-codex-routing-hint': 'model=wopal-ai/test-model' },
+  });
+  t.after(async () => { client.terminate(); await closeServer(gateway); });
+  await once(client, 'open');
+
+  const create = () => client.send(JSON.stringify({
+    type: 'response.create',
+    model: 'wopal-ai/test-model',
+    input: [{ role: 'user', content: 'hello' }],
+    store: false,
+  }));
+
+  create();
+  assert.equal((await nextJson(client)).type, 'response.created');
+  assert.equal((await nextJson(client)).type, 'response.output_text.delta');
+  assert.equal((await nextJson(client)).type, 'response.completed');
+  assert.equal(seenStreams[0], true, 'WS response.create must become stream:true for HTTP/SSE upstream');
+  assert.equal(client.readyState, WebSocket.OPEN, 'completed third-party turn must not close the persistent websocket');
+
+  create();
+  assert.equal((await nextJson(client)).type, 'response.created');
+  assert.equal((await nextJson(client)).type, 'response.output_text.delta');
+  assert.equal((await nextJson(client)).type, 'response.completed');
+  assert.deepEqual(seenStreams, [true, true]);
+  assert.equal(calls, 2);
+  assert.equal(client.readyState, WebSocket.OPEN);
 });

@@ -215,13 +215,9 @@ function setupWebSocketConnection(
     }
 
     if (payload.generate === false) {
-      // Third-party backends are HTTP/SSE-only. Complete warmup with an empty id so Codex
-      // deliberately falls back to a full request instead of previous_response_id continuation.
-      sendTextThenClose(
-        downstream,
-        JSON.stringify({ type: 'response.completed', response: { id: '' } }),
-        'third-party warmup complete',
-      );
+      // Third-party backends do not have the WebSocket connection-local response cache.
+      // An empty id makes Codex send the next generated turn without chaining to this warmup.
+      downstream.send(JSON.stringify({ type: 'response.completed', response: { id: '' } }));
       return;
     }
 
@@ -255,11 +251,7 @@ function setupWebSocketConnection(
       : turn.responseId ?? '';
     if (downstream.readyState === WebSocket.OPEN) {
       downstream.send(JSON.stringify({ type: 'response.interrupt.accepted', response_id: responseId }));
-      sendTextThenClose(
-        downstream,
-        JSON.stringify({ type: 'response.completed', response: { id: responseId } }),
-        'third-party turn interrupted',
-      );
+      downstream.send(JSON.stringify({ type: 'response.completed', response: { id: responseId } }));
     }
     active = undefined;
   };
@@ -324,6 +316,9 @@ async function forwardExternalWebSocketTurn(
   delete outgoingPayload.type;
   delete outgoingPayload.generate;
   outgoingPayload.model = decision.upstreamModel;
+  // WebSocket response.create is inherently streaming and normally omits `stream`.
+  // HTTP Responses requires stream:true to emit the SSE events bridged back to Codex.
+  outgoingPayload.stream = true;
 
   let outboundBody: Buffer = Buffer.from(JSON.stringify(outgoingPayload));
   if (decision.provider === 'ollama') outboundBody = normalizeOllamaRequest(outboundBody);
@@ -353,7 +348,7 @@ async function forwardExternalWebSocketTurn(
     if (responseStatus < 200 || responseStatus >= 300) {
       response.resume();
       if (!turn.interrupted) {
-        sendGatewayErrorThenClose(
+        sendGatewayError(
           downstream,
           `gateway_upstream_http_${responseStatus}`,
           `third-party upstream returned HTTP ${responseStatus}`,
@@ -374,9 +369,6 @@ async function forwardExternalWebSocketTurn(
         downstream.send(data, (error) => {
           settle(Boolean(error) || kind !== 'response.completed');
           turn.controller.abort();
-          if (!error && downstream.readyState === WebSocket.OPEN) {
-            downstream.close(1000, 'third-party turn complete');
-          }
         });
         return;
       }
@@ -388,20 +380,20 @@ async function forwardExternalWebSocketTurn(
       decoder.end();
       if (turn.interrupted || settled) return;
       if (!turn.terminalSeen) {
-        sendGatewayErrorThenClose(downstream, 'gateway_stream_ended', 'third-party stream ended before a terminal response event');
+        sendGatewayError(downstream, 'gateway_stream_ended', 'third-party stream ended before a terminal response event');
         settle(true);
       }
     });
     response.on('error', (error) => {
       if (turn.interrupted || turn.controller.signal.aborted || settled) return;
-      sendGatewayErrorThenClose(downstream, 'gateway_upstream_stream_error', errorMessage(error));
+      sendGatewayError(downstream, 'gateway_upstream_stream_error', errorMessage(error));
       settle(true);
     });
   });
 
   upstream.on('error', (error) => {
     if (turn.interrupted || turn.controller.signal.aborted || settled) return;
-    sendGatewayErrorThenClose(downstream, 'gateway_upstream_request_error', errorMessage(error));
+    sendGatewayError(downstream, 'gateway_upstream_request_error', errorMessage(error));
     settle(true);
   });
   upstream.end(outboundBody);
@@ -567,21 +559,6 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
 function sendGatewayError(socket: WebSocket, code: string, message: string): void {
   if (socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({ type: 'error', error: { type: 'gateway_error', code, message } }));
-}
-
-function sendGatewayErrorThenClose(socket: WebSocket, code: string, message: string): void {
-  sendTextThenClose(
-    socket,
-    JSON.stringify({ type: 'error', error: { type: 'gateway_error', code, message } }),
-    'third-party turn failed',
-  );
-}
-
-function sendTextThenClose(socket: WebSocket, text: string, reason: string): void {
-  if (socket.readyState !== WebSocket.OPEN) return;
-  socket.send(text, (error) => {
-    if (!error && socket.readyState === WebSocket.OPEN) socket.close(1000, reason);
-  });
 }
 
 function isSendableCloseCode(code: number): boolean {
