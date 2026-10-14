@@ -4,6 +4,7 @@ import { activityLogPath, loadConfig, saveConfig } from './config.js';
 import { installIntoCodex, refreshCatalog, restoreCodex } from './codex.js';
 import { getWopalApiKey, hasWopalApiKey, setWopalApiKeyInteractive } from './keychain.js';
 import { createGatewayServer } from './proxy.js';
+import { fetchWopalModels } from './wopal-api.js';
 
 async function main(): Promise<void> {
   const [command, subcommand, ...rest] = process.argv.slice(2);
@@ -64,7 +65,20 @@ async function main(): Promise<void> {
 
   if (command === 'auth' && subcommand === 'set') {
     await setWopalApiKeyInteractive();
-    console.log('Wopal AI API key saved in macOS Keychain.');
+    try {
+      const { models, configured } = await validateStoredWopalKey();
+      console.log(`Wopal AI API key saved and validated: ${models.length} models available.`);
+      printConfiguredModelStatus(configured);
+    } catch (error) {
+      throw new Error(`Wopal AI API key saved in macOS Keychain, but validation failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return;
+  }
+
+  if (command === 'auth' && subcommand === 'test') {
+    const { models, configured } = await validateStoredWopalKey();
+    console.log(`Wopal AI API key validation succeeded: ${models.length} models available.`);
+    printConfiguredModelStatus(configured);
     return;
   }
 
@@ -95,6 +109,20 @@ async function main(): Promise<void> {
   throw new Error(`Unknown command: ${[command, subcommand].filter(Boolean).join(' ')}`);
 }
 
+async function validateStoredWopalKey(): Promise<{ models: string[]; configured: string[] }> {
+  const config = await loadConfig();
+  if (!config.wopalAi.baseUrl.trim()) throw new Error('Wopal AI base URL is not configured');
+  const models = await fetchWopalModels(config.wopalAi.baseUrl, await getWopalApiKey());
+  const available = new Set(models);
+  return { models, configured: config.wopalAi.models.filter((model) => available.has(model.name)).map((model) => model.name) };
+}
+
+function printConfiguredModelStatus(configured: string[]): void {
+  console.log(configured.length > 0
+    ? `Configured model(s) available: ${configured.join(', ')}`
+    : 'Warning: none of the configured Wopal AI models were returned by /models.');
+}
+
 function printCatalogResult(result: { native: number; wopalAi: number; ollama: number; ollamaWarning?: string }): void {
   console.log(`Model catalog: official=${result.native}, wopal-ai=${result.wopalAi}, ollama=${result.ollama}`);
   if (result.ollamaWarning) console.warn(`Ollama discovery warning: ${result.ollamaWarning}`);
@@ -122,7 +150,7 @@ function numberOption(args: string[], name: string): number | undefined {
 }
 
 function printHelp(): void {
-  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth status\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  all other models -> native ChatGPT/OpenAI\n`);
+  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth test\n  auth status\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  all other models -> native ChatGPT/OpenAI\n`);
 }
 
 main().catch((error) => {
