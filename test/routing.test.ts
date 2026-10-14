@@ -26,3 +26,10 @@ test('native models without ChatGPT account header use OpenAI API', () => {
     provider: 'openai', upstreamModel: 'gpt-6.1-sol'
   });
 });
+
+test('unknown namespaces never fall through to the official OpenAI route', () => {
+  assert.throws(
+    () => routeModel('other-provider/model', new Headers({ 'ChatGPT-Account-ID': 'account' })),
+    /unsupported model namespace/i,
+  );
+});

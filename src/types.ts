@@ -10,3 +10,12 @@ export interface GatewayConfig {
   wopalAi: { baseUrl: string; models: ExternalModelConfig[]; excludedModels: string[] };
   ollama: { baseUrl: string };
 }
+
+export interface GatewayServerOptions {
+  wopalAiBaseUrl: string;
+  ollamaBaseUrl: string;
+  chatgptBaseUrl?: string;
+  openaiBaseUrl?: string;
+  getWopalApiKey: () => Promise<string>;
+  activityLogPath?: string;
+}

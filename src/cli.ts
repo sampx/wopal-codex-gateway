@@ -238,7 +238,7 @@ function numberOption(args: string[], name: string): number | undefined {
 }
 
 function printHelp(): void {
-  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth test\n  auth status\n  models list\n  models sync\n  models add <model...> [--context-window 262144] [--vision] [--no-reasoning]\n  models remove <model...>\n  service install\n  service uninstall\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  all other models -> native ChatGPT/OpenAI\n`);
+  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth test\n  auth status\n  models list\n  models sync\n  models add <model...> [--context-window 262144] [--vision] [--no-reasoning]\n  models remove <model...>\n  service install\n  service uninstall\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  unnamespaced model -> native ChatGPT/OpenAI\n`);
 }
 
 main().catch((error) => {
