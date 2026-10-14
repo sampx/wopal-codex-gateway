@@ -1,15 +1,43 @@
 import { execFile } from 'node:child_process';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { stateDir } from './config.js';
 
 const execFileAsync = promisify(execFile);
-const LABEL = 'com.wopal.codex-gateway';
+export const LAUNCH_AGENT_LABEL = 'com.wopal.codex-gateway';
+const TEMPLATE_NAME = `${LAUNCH_AGENT_LABEL}.plist.template`;
 
 export function launchAgentPath(): string {
-  return join(homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`);
+  return join(homedir(), 'Library', 'LaunchAgents', `${LAUNCH_AGENT_LABEL}.plist`);
+}
+
+export function launchAgentTemplatePath(cliPath: string): string {
+  return resolve(dirname(cliPath), '..', 'launchd', TEMPLATE_NAME);
+}
+
+export interface LaunchAgentTemplateValues {
+  label: string;
+  nodePath: string;
+  cliPath: string;
+  logPath: string;
+  errorLogPath: string;
+}
+
+export function renderLaunchAgentPlist(template: string, values: LaunchAgentTemplateValues): string {
+  const replacements: Record<string, string> = {
+    '{{LABEL}}': values.label,
+    '{{NODE_PATH}}': values.nodePath,
+    '{{CLI_PATH}}': values.cliPath,
+    '{{LOG_PATH}}': values.logPath,
+    '{{ERROR_LOG_PATH}}': values.errorLogPath,
+  };
+  let rendered = template;
+  for (const [placeholder, value] of Object.entries(replacements)) {
+    rendered = rendered.replaceAll(placeholder, xml(value));
+  }
+  return rendered;
 }
 
 export async function installLaunchAgent(cliPath: string): Promise<void> {
@@ -18,12 +46,20 @@ export async function installLaunchAgent(cliPath: string): Promise<void> {
   await mkdir(stateDir(), { recursive: true, mode: 0o700 });
   const log = join(stateDir(), 'service.log');
   const errorLog = join(stateDir(), 'service-error.log');
-  const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key><string>${LABEL}</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>${xml(process.execPath)}</string>\n    <string>${xml(cliPath)}</string>\n    <string>serve</string>\n  </array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>StandardOutPath</key><string>${xml(log)}</string>\n  <key>StandardErrorPath</key><string>${xml(errorLog)}</string>\n</dict>\n</plist>\n`;
+  const templatePath = launchAgentTemplatePath(cliPath);
+  const template = await readFile(templatePath, 'utf8');
+  const plist = renderLaunchAgentPlist(template, {
+    label: LAUNCH_AGENT_LABEL,
+    nodePath: process.execPath,
+    cliPath,
+    logPath: log,
+    errorLogPath: errorLog,
+  });
   await writeFile(path, plist, { mode: 0o644 });
   const domain = `gui/${process.getuid?.() ?? 501}`;
   await execFileAsync('/bin/launchctl', ['bootout', domain, path]).catch(() => undefined);
   await execFileAsync('/bin/launchctl', ['bootstrap', domain, path]);
-  await execFileAsync('/bin/launchctl', ['kickstart', '-k', `${domain}/${LABEL}`]);
+  await execFileAsync('/bin/launchctl', ['kickstart', '-k', `${domain}/${LAUNCH_AGENT_LABEL}`]);
 }
 
 export async function uninstallLaunchAgent(): Promise<void> {

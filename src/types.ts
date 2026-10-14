@@ -7,6 +7,6 @@ export interface ExternalModelConfig {
 
 export interface GatewayConfig {
   listen: { host: string; port: number };
-  wopalAi: { baseUrl: string; models: ExternalModelConfig[] };
+  wopalAi: { baseUrl: string; models: ExternalModelConfig[]; excludedModels: string[] };
   ollama: { baseUrl: string };
 }

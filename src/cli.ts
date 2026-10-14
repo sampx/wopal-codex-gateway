@@ -5,7 +5,8 @@ import { installIntoCodex, refreshCatalog, restoreCodex } from './codex.js';
 import { getWopalApiKey, hasWopalApiKey, setWopalApiKeyInteractive } from './keychain.js';
 import { createGatewayServer } from './proxy.js';
 import { fetchWopalModels } from './wopal-api.js';
-import { syncWopalModelConfigs } from './wopal-models.js';
+import { addWopalModelConfigs, removeWopalModelConfigs, syncWopalModelConfigs } from './wopal-models.js';
+import { installLaunchAgent, uninstallLaunchAgent } from './service.js';
 
 async function main(): Promise<void> {
   const [command, subcommand, ...rest] = process.argv.slice(2);
@@ -48,6 +49,8 @@ async function main(): Promise<void> {
       const vision = rest.includes('--vision');
       const reasoning = !rest.includes('--no-reasoning');
       config.wopalAi.models = names.map((name) => ({ name, contextWindow, vision, reasoning }));
+      const explicit = new Set(names.map((name) => name.startsWith('wopal-ai/') ? name.slice('wopal-ai/'.length) : name));
+      config.wopalAi.excludedModels = config.wopalAi.excludedModels.filter((name) => !explicit.has(name));
     }
     await saveConfig(config);
     console.log(`Wopal AI configured: ${config.wopalAi.baseUrl || '(base URL not set)'}; models=${config.wopalAi.models.map((model) => `wopal-ai/${model.name}`).join(', ')}`);
@@ -99,13 +102,62 @@ async function main(): Promise<void> {
     const config = await loadConfig();
     if (!config.wopalAi.baseUrl.trim()) throw new Error('Wopal AI base URL is not configured');
     const available = await fetchWopalModels(config.wopalAi.baseUrl, await getWopalApiKey());
-    const synced = syncWopalModelConfigs(config.wopalAi.models, available);
+    const synced = syncWopalModelConfigs(config.wopalAi.models, available, config.wopalAi.excludedModels);
     config.wopalAi.models = synced.models;
     await saveConfig(config);
     const result = await refreshCatalog(config);
     console.log(`Wopal AI models synced: ${synced.models.length} Codex-usable model(s).`);
     if (synced.skipped.length > 0) console.log(`Skipped non-chat model(s): ${synced.skipped.join(', ')}`);
+    if (synced.excluded.length > 0) console.log(`Manually excluded model(s): ${synced.excluded.join(', ')}`);
     printCatalogResult(result);
+    return;
+  }
+
+  if (command === 'models' && subcommand === 'add') {
+    const config = await loadConfig();
+    const names = modelPositionals(rest, new Set(['--context-window']));
+    if (names.length === 0) throw new Error('Usage: wopal-codex-gateway models add <model...> [--context-window 262144] [--vision] [--no-reasoning]');
+    const added = addWopalModelConfigs(config.wopalAi.models, names, {
+      contextWindow: numberOption(rest, '--context-window') ?? 262_144,
+      vision: rest.includes('--vision'),
+      reasoning: !rest.includes('--no-reasoning'),
+    });
+    config.wopalAi.models = added.models;
+    const unexcluded = new Set([...added.added, ...added.existing]);
+    config.wopalAi.excludedModels = config.wopalAi.excludedModels.filter((name) => !unexcluded.has(name));
+    await saveConfig(config);
+    const result = await refreshCatalog(config);
+    if (added.added.length > 0) console.log(`Wopal AI model(s) added: ${added.added.join(', ')}`);
+    if (added.existing.length > 0) console.log(`Already configured: ${added.existing.join(', ')}`);
+    printCatalogResult(result);
+    return;
+  }
+
+  if (command === 'models' && subcommand === 'remove') {
+    const config = await loadConfig();
+    const names = rest.filter((value) => !value.startsWith('--'));
+    if (names.length === 0) throw new Error('Usage: wopal-codex-gateway models remove <model...>');
+    const removed = removeWopalModelConfigs(config.wopalAi.models, names);
+    config.wopalAi.models = removed.models;
+    config.wopalAi.excludedModels = [...new Set([...config.wopalAi.excludedModels, ...removed.removed, ...removed.missing])];
+    await saveConfig(config);
+    const result = await refreshCatalog(config);
+    if (removed.removed.length > 0) console.log(`Wopal AI model(s) removed: ${removed.removed.join(', ')}`);
+    if (removed.missing.length > 0) console.log(`Not configured, but excluded from future sync: ${removed.missing.join(', ')}`);
+    if (removed.removed.length > 0) console.log('Removed model(s) are excluded from future sync until explicitly added again.');
+    printCatalogResult(result);
+    return;
+  }
+
+  if (command === 'service' && subcommand === 'install') {
+    await installLaunchAgent(fileURLToPath(import.meta.url));
+    console.log('LaunchAgent installed and proxy started.');
+    return;
+  }
+
+  if (command === 'service' && subcommand === 'uninstall') {
+    await uninstallLaunchAgent();
+    console.log('LaunchAgent unloaded and removed.');
     return;
   }
 
@@ -163,6 +215,20 @@ function options(args: string[], name: string): string[] {
   return values;
 }
 
+
+function modelPositionals(args: string[], valueOptions: Set<string>): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (valueOptions.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (!arg.startsWith('--')) values.push(arg);
+  }
+  return values;
+}
+
 function numberOption(args: string[], name: string): number | undefined {
   const raw = option(args, name);
   if (raw === undefined) return undefined;
@@ -172,7 +238,7 @@ function numberOption(args: string[], name: string): number | undefined {
 }
 
 function printHelp(): void {
-  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth test\n  auth status\n  models list\n  models sync\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  all other models -> native ChatGPT/OpenAI\n`);
+  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth test\n  auth status\n  models list\n  models sync\n  models add <model...> [--context-window 262144] [--vision] [--no-reasoning]\n  models remove <model...>\n  service install\n  service uninstall\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  all other models -> native ChatGPT/OpenAI\n`);
 }
 
 main().catch((error) => {

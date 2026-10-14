@@ -16,7 +16,7 @@ export function codexGatewayCatalogPath(): string { return join(codexHome(), 'wo
 
 export const defaultConfig: GatewayConfig = {
   listen: { host: '127.0.0.1', port: DEFAULT_PORT },
-  wopalAi: { baseUrl: '', models: [{ name: 'qwen3-coder', contextWindow: 262_144, reasoning: true }] },
+  wopalAi: { baseUrl: '', models: [{ name: 'qwen3-coder', contextWindow: 262_144, reasoning: true }], excludedModels: [] },
   ollama: { baseUrl: 'http://127.0.0.1:11434' },
 };
 
@@ -25,7 +25,7 @@ export async function loadConfig(): Promise<GatewayConfig> {
     const saved = JSON.parse(await readFile(configPath(), 'utf8')) as Partial<GatewayConfig>;
     return {
       listen: { ...defaultConfig.listen, ...saved.listen },
-      wopalAi: { ...defaultConfig.wopalAi, ...saved.wopalAi, models: saved.wopalAi?.models ?? defaultConfig.wopalAi.models },
+      wopalAi: { ...defaultConfig.wopalAi, ...saved.wopalAi, models: saved.wopalAi?.models ?? defaultConfig.wopalAi.models, excludedModels: saved.wopalAi?.excludedModels ?? defaultConfig.wopalAi.excludedModels },
       ollama: { ...defaultConfig.ollama, ...saved.ollama },
     };
   } catch (error) {

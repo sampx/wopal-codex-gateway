@@ -17,6 +17,8 @@ Proxy service:
   stop               Stop the proxy service without changing Codex config
   restart            Restart the proxy service
   status             Show install/load/health status
+  service install    Install LaunchAgent autostart and start proxy
+  service uninstall  Unload and remove LaunchAgent autostart
 
 Codex integration:
   install            Install/enable the gateway in Codex
@@ -25,6 +27,8 @@ Codex integration:
 Models and auth:
   models list        List models visible to the Wopal AI API key
   models sync        Import all Codex-usable Wopal AI models
+  models add <name...>     Add one or more Wopal AI models locally
+  models remove <name...>  Remove one or more Wopal AI models locally
   auth set           Store and validate the Wopal AI API key
   auth test          Validate the stored Wopal AI API key
   auth status        Show whether a key is configured
@@ -63,7 +67,7 @@ wait_health() {
 }
 
 start_proxy() {
-  [[ -f "$PLIST" ]] || die "proxy is not installed; run 'scripts/gateway install' first"
+  [[ -f "$PLIST" ]] || die "proxy service is not installed; run 'scripts/gateway service install' (or full 'scripts/gateway install') first"
   if proxy_loaded; then
     launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null
   else
@@ -128,8 +132,33 @@ case "$cmd" in
         run_cli models sync "$@"
         echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
         ;;
+      add)
+        run_cli models add "$@"
+        echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
+        ;;
+      remove)
+        run_cli models remove "$@"
+        echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
+        ;;
       *)
-        die "usage: scripts/gateway models <list|sync>"
+        die "usage: scripts/gateway models <list|sync|add|remove>"
+        ;;
+    esac
+    ;;
+  service)
+    sub="${1:-}"
+    shift || true
+    case "$sub" in
+      install)
+        run_cli service install "$@"
+        wait_health || die "LaunchAgent installed but proxy health check failed: $HEALTH_URL"
+        echo "Proxy service is healthy: $HEALTH_URL"
+        ;;
+      uninstall)
+        run_cli service uninstall "$@"
+        ;;
+      *)
+        die "usage: scripts/gateway service <install|uninstall>"
         ;;
     esac
     ;;
