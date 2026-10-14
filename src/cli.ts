@@ -5,6 +5,7 @@ import { installIntoCodex, refreshCatalog, restoreCodex } from './codex.js';
 import { getWopalApiKey, hasWopalApiKey, setWopalApiKeyInteractive } from './keychain.js';
 import { createGatewayServer } from './proxy.js';
 import { fetchWopalModels } from './wopal-api.js';
+import { syncWopalModelConfigs } from './wopal-models.js';
 
 async function main(): Promise<void> {
   const [command, subcommand, ...rest] = process.argv.slice(2);
@@ -87,6 +88,27 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'models' && subcommand === 'list') {
+    const config = await loadConfig();
+    const models = await fetchWopalModels(config.wopalAi.baseUrl, await getWopalApiKey());
+    console.log(models.join('\n'));
+    return;
+  }
+
+  if (command === 'models' && subcommand === 'sync') {
+    const config = await loadConfig();
+    if (!config.wopalAi.baseUrl.trim()) throw new Error('Wopal AI base URL is not configured');
+    const available = await fetchWopalModels(config.wopalAi.baseUrl, await getWopalApiKey());
+    const synced = syncWopalModelConfigs(config.wopalAi.models, available);
+    config.wopalAi.models = synced.models;
+    await saveConfig(config);
+    const result = await refreshCatalog(config);
+    console.log(`Wopal AI models synced: ${synced.models.length} Codex-usable model(s).`);
+    if (synced.skipped.length > 0) console.log(`Skipped non-chat model(s): ${synced.skipped.join(', ')}`);
+    printCatalogResult(result);
+    return;
+  }
+
   if (command === 'catalog' && subcommand === 'refresh') {
     const result = await refreshCatalog(await loadConfig());
     printCatalogResult(result);
@@ -150,7 +172,7 @@ function numberOption(args: string[], name: string): number | undefined {
 }
 
 function printHelp(): void {
-  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth test\n  auth status\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  all other models -> native ChatGPT/OpenAI\n`);
+  console.log(`wopal-codex-gateway\n\nCommands:\n  config show\n  config wopal --base-url <url> [--model qwen3-coder] [--context-window 262144] [--vision] [--no-reasoning]\n  config ollama --base-url http://127.0.0.1:11434\n  auth set\n  auth test\n  auth status\n  models list\n  models sync\n  catalog refresh\n  codex install\n  codex restore\n  serve\n\nRouting:\n  wopal-ai/<model> -> Wopal AI / New API\n  ollama/<model>   -> local Ollama\n  all other models -> native ChatGPT/OpenAI\n`);
 }
 
 main().catch((error) => {

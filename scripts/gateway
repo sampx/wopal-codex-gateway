@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLI="$ROOT/dist/cli.js"
+LABEL="com.wopal.codex-gateway"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+DOMAIN="gui/$(id -u)"
+HEALTH_URL="http://127.0.0.1:11435/_health"
+BUNDLED_CODEX="/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/gateway <command>
+
+Proxy service:
+  start              Start the installed proxy service
+  stop               Stop the proxy service without changing Codex config
+  restart            Restart the proxy service
+  status             Show install/load/health status
+  reload             Restart proxy and reload the Codex app-server daemon
+
+Codex integration:
+  install            Install/enable the gateway in Codex and reload Codex daemon
+  disable            Restore pre-install Codex config and unload the gateway
+
+Models and auth:
+  models list        List models visible to the Wopal AI API key
+  models sync        Import all Codex-usable Wopal AI models and reload Codex daemon
+  auth set           Store and validate the Wopal AI API key
+  auth test          Validate the stored Wopal AI API key
+  auth status        Show whether a key is configured
+
+Low-level passthrough:
+  config ...         Run gateway config command, then refresh/reload as needed
+  catalog refresh    Rebuild model catalog and reload Codex daemon
+USAGE
+}
+
+die() { echo "error: $*" >&2; exit 1; }
+
+require_cli() {
+  [[ -f "$CLI" ]] || die "built CLI not found at $CLI; run 'pnpm build' first"
+}
+
+run_cli() {
+  require_cli
+  node "$CLI" "$@"
+}
+
+codex_bin() {
+  if [[ -n "${CODEX_BIN:-}" && -x "$CODEX_BIN" ]]; then
+    printf '%s\n' "$CODEX_BIN"
+  elif [[ -x "$BUNDLED_CODEX" ]]; then
+    printf '%s\n' "$BUNDLED_CODEX"
+  elif command -v codex >/dev/null 2>&1; then
+    command -v codex
+  else
+    return 1
+  fi
+}
+
+reload_codex() {
+  local bin
+  if ! bin="$(codex_bin)"; then
+    echo "warning: Codex CLI not found; restart ChatGPT/Codex Desktop manually to reload the model catalog" >&2
+    return 0
+  fi
+  "$bin" app-server daemon restart >/dev/null
+  echo "Codex app-server daemon reloaded."
+}
+
+proxy_loaded() {
+  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1
+}
+
+wait_health() {
+  local i
+  for i in {1..30}; do
+    if curl -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+start_proxy() {
+  [[ -f "$PLIST" ]] || die "proxy is not installed; run 'scripts/gateway install' first"
+  if proxy_loaded; then
+    launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null
+  else
+    launchctl bootstrap "$DOMAIN" "$PLIST"
+    launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null
+  fi
+  wait_health || die "proxy started but health check failed: $HEALTH_URL"
+  echo "Proxy running: $HEALTH_URL"
+}
+
+stop_proxy() {
+  if proxy_loaded; then
+    launchctl bootout "$DOMAIN/$LABEL"
+    echo "Proxy stopped."
+  else
+    echo "Proxy already stopped."
+  fi
+}
+
+status_proxy() {
+  local installed=no loaded=no healthy=no
+  [[ -f "$PLIST" ]] && installed=yes
+  proxy_loaded && loaded=yes
+  curl -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1 && healthy=yes
+  printf 'installed=%s loaded=%s healthy=%s\n' "$installed" "$loaded" "$healthy"
+  [[ "$loaded" == yes && "$healthy" == yes ]]
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  start)
+    start_proxy
+    ;;
+  stop)
+    stop_proxy
+    ;;
+  restart)
+    stop_proxy
+    start_proxy
+    ;;
+  status)
+    status_proxy
+    ;;
+  reload)
+    stop_proxy
+    start_proxy
+    reload_codex
+    ;;
+  install)
+    run_cli codex install
+    reload_codex
+    ;;
+  disable)
+    run_cli codex restore
+    reload_codex
+    ;;
+  models)
+    sub="${1:-}"
+    shift || true
+    case "$sub" in
+      list)
+        run_cli models list "$@"
+        ;;
+      sync)
+        run_cli models sync "$@"
+        reload_codex
+        ;;
+      *)
+        die "usage: scripts/gateway models <list|sync>"
+        ;;
+    esac
+    ;;
+  auth)
+    run_cli auth "$@"
+    ;;
+  config)
+    run_cli config "$@"
+    run_cli catalog refresh
+    if [[ -f "$PLIST" ]]; then
+      stop_proxy
+      start_proxy
+    fi
+    reload_codex
+    ;;
+  catalog)
+    [[ "${1:-}" == refresh ]] || die "usage: scripts/gateway catalog refresh"
+    run_cli catalog refresh
+    reload_codex
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "gateway": "node dist/cli.js"
+    "gateway": "node dist/cli.js",
+    "manage": "./scripts/gateway"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
