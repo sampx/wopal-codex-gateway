@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import http, { type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import https from 'node:https';
 import type { Duplex } from 'node:stream';
 import WebSocket, { WebSocketServer } from 'ws';
 import { normalizeOllamaRequest } from './ollama-normalize.js';
+import { logActivity } from './activity-log.js';
 import { routeModel, type Provider, type RouteDecision } from './routing.js';
 import type { GatewayServerOptions } from './types.js';
 import {
@@ -43,6 +45,8 @@ interface OfficialTurn {
   kind: 'official';
   provider: 'chatgpt' | 'openai';
   model: string;
+  turnId: string;
+  startedAt: number;
 }
 
 interface ExternalTurn {
@@ -53,6 +57,11 @@ interface ExternalTurn {
   responseId?: string;
   interrupted: boolean;
   terminalSeen: boolean;
+  turnId: string;
+  startedAt: number;
+  upstreamModel: string;
+  firstEventAt?: number;
+  connectionId: string;
 }
 
 type ActiveTurn = OfficialTurn | ExternalTurn;
@@ -129,6 +138,7 @@ function setupWebSocketConnection(
   stats: RouteStats,
   initialOfficial?: WebSocket,
 ): void {
+  const connectionId = randomUUID();
   let official = initialOfficial;
   let officialConnecting: Promise<WebSocket> | undefined;
   let active: ActiveTurn | undefined;
@@ -145,11 +155,28 @@ function setupWebSocketConnection(
     upstream.on('message', (data, isBinary) => {
       if (closed || active?.kind === 'external' || downstream.readyState !== WebSocket.OPEN) return;
       downstream.send(data, { binary: isBinary });
-      if (active?.kind === 'official' && !isBinary && isTerminalResponseEvent(data.toString())) active = undefined;
+      if (active?.kind === 'official' && !isBinary && isTerminalResponseEvent(data.toString())) {
+        const turn = active;
+        const terminalEvent = responseEventKind(data.toString());
+        void logActivity(options.activityLogPath, {
+          event: 'turn_terminal', connection_id: connectionId, turn_id: turn.turnId,
+          provider: turn.provider, client_model: turn.model, upstream_model: turn.model,
+          client_transport: 'websocket', upstream_transport: 'websocket',
+          terminal_event: terminalEvent, duration_ms: Date.now() - turn.startedAt,
+        });
+        active = undefined;
+      }
     });
     upstream.on('close', (code, reason) => {
       if (official === upstream) official = undefined;
       if (closed || active?.kind !== 'official') return;
+      const turn = active;
+      void logActivity(options.activityLogPath, {
+        event: 'turn_failed', connection_id: connectionId, turn_id: turn.turnId,
+        provider: turn.provider, client_model: turn.model, upstream_model: turn.model,
+        terminal_event: 'websocket_closed', error: `upstream_ws_close_${code}`,
+        duration_ms: Date.now() - turn.startedAt,
+      });
       active = undefined;
       stats.errors += 1;
       if (downstream.readyState === WebSocket.OPEN) {
@@ -196,7 +223,7 @@ function setupWebSocketConnection(
     }
 
     if (isOfficialProvider(decision.provider)) {
-      const officialTurn: OfficialTurn = { kind: 'official', provider: decision.provider, model };
+      const officialTurn: OfficialTurn = { kind: 'official', provider: decision.provider, model, turnId: randomUUID(), startedAt: Date.now() };
       active = officialTurn;
       try {
         const upstream = await ensureOfficial(
@@ -205,10 +232,20 @@ function setupWebSocketConnection(
         );
         if (closed || active !== officialTurn) return;
         recordStart(decision.provider, model);
+        void logActivity(options.activityLogPath, {
+          event: 'turn_started', connection_id: connectionId, turn_id: officialTurn.turnId,
+          provider: decision.provider, client_model: model, upstream_model: decision.upstreamModel,
+          client_transport: 'websocket', upstream_transport: 'websocket', request_started: new Date(officialTurn.startedAt).toISOString(),
+        });
         upstream.send(text);
       } catch (error) {
         if (active === officialTurn) active = undefined;
         stats.errors += 1;
+        void logActivity(options.activityLogPath, {
+          event: 'turn_failed', connection_id: connectionId, turn_id: officialTurn.turnId,
+          provider: officialTurn.provider, client_model: officialTurn.model, upstream_model: officialTurn.model,
+          error: errorMessage(error).slice(0, 240), duration_ms: Date.now() - officialTurn.startedAt,
+        });
         sendGatewayError(downstream, 'gateway_official_websocket_error', errorMessage(error));
       }
       return;
@@ -224,9 +261,25 @@ function setupWebSocketConnection(
     const externalTurn: ExternalTurn = {
       kind: 'external', provider: decision.provider, model,
       controller: new AbortController(), interrupted: false, terminalSeen: false,
+      turnId: randomUUID(), startedAt: Date.now(), upstreamModel: decision.upstreamModel, connectionId,
     };
     active = externalTurn;
     recordStart(decision.provider, model);
+    void logActivity(options.activityLogPath, {
+      event: 'turn_started', connection_id: connectionId, turn_id: externalTurn.turnId,
+      provider: decision.provider, client_model: model, upstream_model: decision.upstreamModel,
+      client_transport: 'websocket', upstream_transport: 'http-sse', request_started: new Date(externalTurn.startedAt).toISOString(),
+    });
+    if (decision.provider === 'ollama' && options.ollamaEnabled === false) {
+      void logActivity(options.activityLogPath, {
+        event: 'turn_failed', connection_id: connectionId, turn_id: externalTurn.turnId,
+        provider: decision.provider, client_model: model, upstream_model: decision.upstreamModel,
+        error: 'ollama_disabled', duration_ms: Date.now() - externalTurn.startedAt,
+      });
+      active = undefined;
+      sendGatewayError(downstream, 'gateway_ollama_disabled', 'Ollama integration is disabled');
+      return;
+    }
     void forwardExternalWebSocketTurn(
       downstream, request, text, payload,
       { provider: decision.provider as 'wopal-ai' | 'ollama', upstreamModel: decision.upstreamModel },
@@ -245,6 +298,11 @@ function setupWebSocketConnection(
 
     const turn = active;
     turn.interrupted = true;
+    void logActivity(options.activityLogPath, {
+      event: 'turn_interrupted', connection_id: connectionId, turn_id: turn.turnId,
+      provider: turn.provider, client_model: turn.model, upstream_model: turn.upstreamModel,
+      terminal_event: 'response.interrupt', duration_ms: Date.now() - turn.startedAt,
+    });
     turn.controller.abort();
     const responseId = typeof payload.response_id === 'string'
       ? payload.response_id
@@ -291,9 +349,18 @@ function setupWebSocketConnection(
     });
   });
 
-  downstream.on('close', () => {
+  downstream.on('close', (code, reason) => {
     closed = true;
-    if (active?.kind === 'external') active.controller.abort();
+    void logActivity(options.activityLogPath, { event: 'websocket_closed', connection_id: connectionId, code, reason: reason.toString().slice(0, 120) });
+    if (active?.kind === 'external') {
+      const turn = active;
+      void logActivity(options.activityLogPath, {
+        event: 'turn_aborted', connection_id: connectionId, turn_id: turn.turnId,
+        provider: turn.provider, client_model: turn.model, upstream_model: turn.upstreamModel,
+        error: 'downstream_websocket_closed', duration_ms: Date.now() - turn.startedAt,
+      });
+      turn.controller.abort();
+    }
     active = undefined;
     if (official?.readyState === WebSocket.OPEN || official?.readyState === WebSocket.CONNECTING) {
       official.close(1000, 'downstream closed');
@@ -330,7 +397,16 @@ async function forwardExternalWebSocketTurn(
   const headers = await buildOutboundHeaders(request.headers, decision.provider, body, outboundBody, options);
   headers['content-type'] = 'application/json';
   headers.accept = 'text/event-stream';
+  if (decision.provider === 'wopal-ai' && options.wopalRelayBaseUrl?.trim()) {
+    headers['x-wopal-connection-id'] = turn.connectionId;
+    headers['x-wopal-turn-id'] = turn.turnId;
+  }
   const target = resolveTarget(options, decision.provider, request.url ?? '/v1/responses');
+  void logActivity(options.activityLogPath, {
+    event: 'upstream_request', connection_id: turn.connectionId, turn_id: turn.turnId, provider: decision.provider,
+    client_model: turn.model, upstream_model: decision.upstreamModel,
+    upstream_url: `${target.protocol}//${target.host}${target.pathname}`, upstream_protocol: 'responses', retry_index: 0,
+  });
   if (turn.controller.signal.aborted) return;
 
   const client = target.protocol === 'https:' ? https : http;
@@ -349,8 +425,15 @@ async function forwardExternalWebSocketTurn(
     signal: turn.controller.signal,
   }, (response) => {
     responseStatus = response.statusCode ?? 502;
+    void logActivity(options.activityLogPath, { event: 'upstream_connected', connection_id: turn.connectionId, turn_id: turn.turnId, provider: decision.provider, upstream_status: responseStatus });
     if (responseStatus < 200 || responseStatus >= 300) {
       response.resume();
+      void logActivity(options.activityLogPath, {
+        event: 'turn_failed', connection_id: turn.connectionId, turn_id: turn.turnId,
+        provider: decision.provider, client_model: turn.model, upstream_model: decision.upstreamModel,
+        upstream_status: responseStatus, error: `upstream_http_${responseStatus}`,
+        duration_ms: Date.now() - turn.startedAt,
+      });
       if (!turn.interrupted) {
         sendGatewayError(
           downstream,
@@ -367,8 +450,21 @@ async function forwardExternalWebSocketTurn(
       if (turn.interrupted || settled || downstream.readyState !== WebSocket.OPEN) return;
       if (data === '[DONE]') return;
       const kind = responseEventKind(data);
+      if (turn.firstEventAt === undefined) {
+        turn.firstEventAt = Date.now();
+        void logActivity(options.activityLogPath, {
+          event: 'upstream_first_event', connection_id: turn.connectionId, turn_id: turn.turnId, provider: decision.provider,
+          first_event_ms: turn.firstEventAt - turn.startedAt, event_type: kind ?? 'unknown',
+        });
+      }
       if (kind === 'response.created') turn.responseId = responseEventId(data) ?? turn.responseId;
       if (kind && TERMINAL_RESPONSE_EVENTS.has(kind)) {
+        void logActivity(options.activityLogPath, {
+          event: 'turn_terminal', connection_id: turn.connectionId, turn_id: turn.turnId, provider: decision.provider,
+          client_model: turn.model, upstream_model: decision.upstreamModel, terminal_event: kind,
+          first_event_ms: turn.firstEventAt ? turn.firstEventAt - turn.startedAt : undefined,
+          duration_ms: Date.now() - turn.startedAt,
+        });
         turn.terminalSeen = true;
         downstream.send(data, (error) => {
           settle(Boolean(error) || kind !== 'response.completed');
@@ -384,12 +480,18 @@ async function forwardExternalWebSocketTurn(
       decoder.end();
       if (turn.interrupted || settled) return;
       if (!turn.terminalSeen) {
+        void logActivity(options.activityLogPath, { event: 'turn_failed', connection_id: turn.connectionId, turn_id: turn.turnId, provider: decision.provider, error: 'stream_ended_without_terminal', duration_ms: Date.now() - turn.startedAt });
         sendGatewayError(downstream, 'gateway_stream_ended', 'third-party stream ended before a terminal response event');
         settle(true);
       }
     });
     response.on('error', (error) => {
       if (turn.interrupted || turn.controller.signal.aborted || settled) return;
+      void logActivity(options.activityLogPath, {
+        event: 'upstream_error', connection_id: turn.connectionId, turn_id: turn.turnId,
+        provider: decision.provider, client_model: turn.model, upstream_model: decision.upstreamModel,
+        error: errorMessage(error).slice(0, 240), duration_ms: Date.now() - turn.startedAt,
+      });
       sendGatewayError(downstream, 'gateway_upstream_stream_error', errorMessage(error));
       settle(true);
     });
@@ -397,6 +499,7 @@ async function forwardExternalWebSocketTurn(
 
   upstream.on('error', (error) => {
     if (turn.interrupted || turn.controller.signal.aborted || settled) return;
+    void logActivity(options.activityLogPath, { event: 'upstream_error', connection_id: turn.connectionId, turn_id: turn.turnId, provider: decision.provider, error: errorMessage(error).slice(0, 240), duration_ms: Date.now() - turn.startedAt });
     sendGatewayError(downstream, 'gateway_upstream_request_error', errorMessage(error));
     settle(true);
   });

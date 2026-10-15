@@ -15,10 +15,12 @@ export async function refreshCatalog(config: GatewayConfig): Promise<CatalogRefr
   const native = await loadNativeCatalog(codexNativeCatalogPath());
   let ollamaModels: ExternalModelConfig[] = [];
   let ollamaWarning: string | undefined;
-  try {
-    ollamaModels = await discoverOllamaModels(config.ollama.baseUrl);
-  } catch (error) {
-    ollamaWarning = error instanceof Error ? error.message : String(error);
+  if (config.ollama.enabled) {
+    try {
+      ollamaModels = await discoverOllamaModels(config.ollama.baseUrl);
+    } catch (error) {
+      ollamaWarning = error instanceof Error ? error.message : String(error);
+    }
   }
   const catalog = buildCatalog(native, config.wopalAi.models, ollamaModels);
   await mkdir(dirname(codexGatewayCatalogPath()), { recursive: true });

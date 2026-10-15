@@ -1,17 +1,18 @@
-import { appendFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import https from 'node:https';
 import { gunzipSync, inflateSync, zstdDecompressSync } from 'node:zlib';
 import { normalizeOllamaRequest } from './ollama-normalize.js';
+import { logActivity } from './activity-log.js';
 import { routeModel, type Provider } from './routing.js';
 import type { GatewayServerOptions } from './types.js';
 import {
-  buildOutboundHeaders,
+  buildOutboundHeaders, buildWopalOriginHeaders,
   headersReader,
   HOP_BY_HOP,
   isLoopback,
   MAX_BODY_BYTES,
-  resolveTarget,
+  resolveTarget, resolveWopalOriginTarget,
   type BodyPair,
 } from './upstream.js';
 import { installWebSocketGateway, type RouteStats } from './websocket-proxy.js';
@@ -31,8 +32,43 @@ export function createGatewayServer(options: GatewayServerOptions): http.Server 
     }
     if (req.url === '/_health') return writeJson(res, 200, { ok: true });
     if (req.url === '/_status') return writeJson(res, 200, { ok: true, ...stats });
+    if (req.url?.startsWith('/_wopal/v1/')) {
+      const started = Date.now();
+      const connectionId = firstHeader(req.headers['x-wopal-connection-id']);
+      const turnId = firstHeader(req.headers['x-wopal-turn-id']);
+      let upstreamUrl: string | undefined;
+      try {
+        const body = await readBody(req);
+        const target = resolveWopalOriginTarget(options, req.url.slice('/_wopal'.length));
+        upstreamUrl = `${target.protocol}//${target.host}${target.pathname}`;
+        void logActivity(options.activityLogPath, {
+          event: 'wopal_origin_started', connection_id: connectionId, turn_id: turnId,
+          provider: 'wopal-ai-origin', upstream_url: upstreamUrl,
+          upstream_protocol: 'chat_completions', transport: 'http', request_started: new Date(started).toISOString(),
+        });
+        const headers = await buildWopalOriginHeaders(req.headers, body.decoded, options);
+        const status = await forward(req, res, target, headers, body.decoded);
+        void logActivity(options.activityLogPath, {
+          event: 'wopal_origin_completed', connection_id: connectionId, turn_id: turnId,
+          provider: 'wopal-ai-origin', method: req.method ?? 'GET', upstream_url: upstreamUrl,
+          upstream_protocol: 'chat_completions', status, transport: 'http', duration_ms: Date.now() - started,
+        });
+      } catch (error) {
+        const message = errorMessage(error);
+        const aborted = message === 'downstream connection closed';
+        void logActivity(options.activityLogPath, {
+          event: aborted ? 'wopal_origin_aborted' : 'wopal_origin_failed',
+          connection_id: connectionId, turn_id: turnId, provider: 'wopal-ai-origin',
+          upstream_url: upstreamUrl, upstream_protocol: 'chat_completions',
+          error: message.slice(0, 240), duration_ms: Date.now() - started,
+        });
+        if (!res.headersSent && !aborted) writeJson(res, 502, { error: message });
+      }
+      return;
+    }
 
     const started = Date.now();
+    const requestId = randomUUID();
     let provider: Provider = 'openai';
     let model = '';
     let status = 502;
@@ -41,6 +77,10 @@ export function createGatewayServer(options: GatewayServerOptions): http.Server 
       model = extractModel(body.decoded) ?? '';
       const decision = routeModel(model, headersReader(req.headers));
       provider = decision.provider;
+      if (provider === 'ollama' && options.ollamaEnabled === false) {
+        status = 404;
+        return writeJson(res, 404, { error: 'Ollama integration is disabled' });
+      }
 
       const target = resolveTarget(options, provider, req.url ?? '/');
       let outboundBody = provider === 'wopal-ai' || provider === 'ollama'
@@ -50,6 +90,10 @@ export function createGatewayServer(options: GatewayServerOptions): http.Server 
       const outboundHeaders = await buildOutboundHeaders(
         req.headers, provider, body, outboundBody, options,
       );
+      if (provider === 'wopal-ai' && options.wopalRelayBaseUrl?.trim()) {
+        outboundHeaders['x-wopal-connection-id'] = requestId;
+        outboundHeaders['x-wopal-turn-id'] = requestId;
+      }
 
       status = await forward(req, res, target, outboundHeaders, outboundBody);
       stats.total += 1;
@@ -62,8 +106,11 @@ export function createGatewayServer(options: GatewayServerOptions): http.Server 
       else res.destroy(error instanceof Error ? error : undefined);
     } finally {
       void logActivity(options.activityLogPath, {
+        event: 'http_request_completed', request_id: requestId,
+        connection_id: provider === 'wopal-ai' && options.wopalRelayBaseUrl?.trim() ? requestId : undefined,
+        turn_id: provider === 'wopal-ai' && options.wopalRelayBaseUrl?.trim() ? requestId : undefined,
         provider, model, method: req.method ?? 'GET', path: req.url ?? '/', status,
-        transport: 'http', durationMs: Date.now() - started,
+        transport: 'http', duration_ms: Date.now() - started,
       });
     }
   });
@@ -165,15 +212,10 @@ function writeJson(res: ServerResponse, status: number, payload: unknown): void 
   res.end(body);
 }
 
-async function logActivity(path: string | undefined, event: Record<string, unknown>): Promise<void> {
-  if (!path) return;
-  const fields = Object.entries(event)
-    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
-    .join(' ');
-  await appendFile(path, `${new Date().toISOString()} ${fields}\n`, { mode: 0o600 })
-    .catch(() => undefined);
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }

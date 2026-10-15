@@ -40,3 +40,8 @@ test('Ollama discovery excludes embedding-only models', async (t) => {
   const models = await discoverOllamaModels(`http://127.0.0.1:${address.port}`);
   assert.deepEqual(models.map((model) => model.name), ['coder:latest']);
 });
+
+test('catalog can omit Ollama models when integration is disabled', () => {
+  const catalog = buildCatalog(nativeCatalog, [{ name: 'qwen3-coder' }], []);
+  assert.equal(catalog.models.some((model: any) => String(model.slug).startsWith('ollama/')), false);
+});

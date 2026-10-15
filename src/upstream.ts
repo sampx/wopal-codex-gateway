@@ -49,9 +49,13 @@ export function resolveTarget(
   let suffix = incoming.pathname;
   switch (provider) {
     case 'wopal-ai':
-      if (!options.wopalAiBaseUrl.trim()) throw new Error('Wopal AI base URL is not configured');
-      baseUrl = options.wopalAiBaseUrl;
-      suffix = stripV1(suffix);
+      if (options.wopalRelayBaseUrl?.trim()) {
+        baseUrl = options.wopalRelayBaseUrl;
+      } else {
+        if (!options.wopalAiBaseUrl.trim()) throw new Error('Wopal AI base URL is not configured');
+        baseUrl = options.wopalAiBaseUrl;
+        suffix = stripV1(suffix);
+      }
       break;
     case 'ollama':
       baseUrl = options.ollamaBaseUrl;
@@ -85,10 +89,36 @@ export async function buildOutboundHeaders(
     if ((provider === 'wopal-ai' || provider === 'ollama') && name === 'content-encoding') continue;
     headers[name] = value;
   }
-  if (provider === 'wopal-ai') headers.authorization = `Bearer ${await options.getWopalApiKey()}`;
+  if (provider === 'wopal-ai') headers.authorization = `Bearer ${options.wopalRelayApiKey ?? await options.getWopalApiKey()}`;
   if ((provider === 'chatgpt' || provider === 'openai') && body.encoding) {
     headers['content-encoding'] = body.encoding;
   }
+  headers['content-length'] = String(outboundBody.length);
+  return headers;
+}
+
+
+export function resolveWopalOriginTarget(options: GatewayServerOptions, incomingUrl: string): URL {
+  if (!options.wopalAiBaseUrl.trim()) throw new Error('Wopal AI base URL is not configured');
+  const incoming = new URL(incomingUrl, 'http://127.0.0.1');
+  const target = new URL(options.wopalAiBaseUrl.endsWith('/') ? options.wopalAiBaseUrl : `${options.wopalAiBaseUrl}/`);
+  target.pathname = joinUrlPath(target.pathname, stripV1(incoming.pathname));
+  target.search = incoming.search;
+  return target;
+}
+
+export async function buildWopalOriginHeaders(
+  incoming: IncomingHttpHeaders,
+  outboundBody: Buffer,
+  options: GatewayServerOptions,
+): Promise<Record<string, string | string[]>> {
+  const headers: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(incoming)) {
+    if (value === undefined || HOP_BY_HOP.has(name) || WS_MANAGED_HEADERS.has(name)) continue;
+    if (EXTERNAL_SENSITIVE.has(name) || name === 'content-encoding') continue;
+    headers[name] = value;
+  }
+  headers.authorization = `Bearer ${await options.getWopalApiKey()}`;
   headers['content-length'] = String(outboundBody.length);
   return headers;
 }

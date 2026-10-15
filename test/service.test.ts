@@ -2,15 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { renderLaunchAgentPlist } from '../src/service.js';
 
-test('renderLaunchAgentPlist fills runtime paths and escapes XML', () => {
-  const template = '<plist>{{LABEL}}|{{NODE_PATH}}|{{CLI_PATH}}|{{LOG_PATH}}|{{ERROR_LOG_PATH}}</plist>';
+test('renderLaunchAgentPlist fills daemon paths and escapes XML', () => {
+  const template = '<plist>{{LABEL}}|{{PROGRAM_PATH}}|{{PROJECT_ROOT}}|{{LOG_PATH}}|{{ERROR_LOG_PATH}}</plist>';
   const rendered = renderLaunchAgentPlist(template, {
     label: 'com.wopal.codex-gateway',
-    nodePath: '/tmp/node & tools/node',
-    cliPath: '/tmp/project/dist/cli.js',
+    programPath: '/tmp/project/runtime/bin/wopal-codex-gatewayd',
+    projectRoot: '/tmp/project & tools',
     logPath: '/tmp/a<b.log',
     errorLogPath: '/tmp/error.log',
   });
 
-  assert.equal(rendered, '<plist>com.wopal.codex-gateway|/tmp/node &amp; tools/node|/tmp/project/dist/cli.js|/tmp/a&lt;b.log|/tmp/error.log</plist>');
+  assert.equal(rendered, '<plist>com.wopal.codex-gateway|/tmp/project/runtime/bin/wopal-codex-gatewayd|/tmp/project &amp; tools|/tmp/a&lt;b.log|/tmp/error.log</plist>');
 });

@@ -131,6 +131,8 @@ test('third-party bridge stays open while official routes preserve native websoc
   let externalCalls = 0;
   const externalModels: string[] = [];
   const externalAuth: string[] = [];
+  const externalTurnIds: string[] = [];
+  const externalConnectionIds: string[] = [];
   const externalServer = http.createServer(async (req, res) => {
     externalCalls += 1;
     const chunks: Buffer[] = [];
@@ -138,6 +140,8 @@ test('third-party bridge stays open while official routes preserve native websoc
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { model: string };
     externalModels.push(body.model);
     externalAuth.push(String(req.headers.authorization ?? ''));
+    externalTurnIds.push(String(req.headers['x-wopal-turn-id'] ?? ''));
+    externalConnectionIds.push(String(req.headers['x-wopal-connection-id'] ?? ''));
     const id = `ext-${externalCalls}`;
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.write(`data: {"type":"response.created","response":{"id":"${id}"}}\n\n`);
@@ -177,6 +181,7 @@ test('third-party bridge stays open while official routes preserve native websoc
 
   const gateway = createGatewayServer({
     wopalAiBaseUrl: `${externalBase}/v1`,
+    wopalRelayBaseUrl: externalBase,
     ollamaBaseUrl: `${externalBase}/ollama`,
     chatgptBaseUrl: `${officialBase}/chatgpt`,
     openaiBaseUrl: `${officialBase}/openai/v1`,
@@ -222,6 +227,8 @@ test('third-party bridge stays open while official routes preserve native websoc
   assert.equal(externalClient.readyState, WebSocket.OPEN);
   assert.deepEqual(externalModels, ['glm-5.3-flash-free']);
   assert.deepEqual(externalAuth, ['Bearer wopal-secret']);
+  assert.match(externalTurnIds[0] ?? '', /^[0-9a-f-]{36}$/i);
+  assert.match(externalConnectionIds[0] ?? '', /^[0-9a-f-]{36}$/i);
   assert.equal(officialConnections, 0);
 
   let handshakeModel = '';

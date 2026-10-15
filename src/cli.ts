@@ -1,12 +1,12 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { activityLogPath, loadConfig, saveConfig } from './config.js';
+import { loadConfig, projectRootDir, saveConfig } from './config.js';
 import { installIntoCodex, refreshCatalog, restoreCodex } from './codex.js';
 import { getWopalApiKey, hasWopalApiKey, setWopalApiKeyInteractive } from './keychain.js';
-import { createGatewayServer } from './proxy.js';
 import { fetchWopalModels } from './wopal-api.js';
 import { addWopalModelConfigs, removeWopalModelConfigs, syncWopalModelConfigs, updateWopalModelConfigs } from './wopal-models.js';
-import { installLaunchAgent, uninstallLaunchAgent } from './service.js';
+import { gatewayDaemonPath, installLaunchAgent, uninstallLaunchAgent } from './service.js';
 
 async function main(): Promise<void> {
   const [command, subcommand, ...rest] = process.argv.slice(2);
@@ -17,16 +17,15 @@ async function main(): Promise<void> {
   }
 
   if (command === 'serve') {
-    const config = await loadConfig();
-    const server = createGatewayServer({
-      wopalAiBaseUrl: config.wopalAi.baseUrl,
-      ollamaBaseUrl: config.ollama.baseUrl,
-      getWopalApiKey,
-      activityLogPath: activityLogPath(),
+    const child = spawn(gatewayDaemonPath(), ['--project-root', projectRootDir()], { stdio: 'inherit' });
+    const forwardSignal = (signal: NodeJS.Signals) => { if (!child.killed) child.kill(signal); };
+    process.once('SIGTERM', () => forwardSignal('SIGTERM'));
+    process.once('SIGINT', () => forwardSignal('SIGINT'));
+    const code = await new Promise<number>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (exitCode) => resolve(exitCode ?? 1));
     });
-    server.listen(config.listen.port, config.listen.host, () => {
-      console.log(`wopal-codex-gateway listening on http://${config.listen.host}:${config.listen.port}`);
-    });
+    if (code !== 0) throw new Error(`gateway daemon exited with code ${code}`);
     return;
   }
 
