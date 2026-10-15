@@ -89,10 +89,13 @@ func TestWopalWebsocketRemoteCompactionV2ClosedLoop(t *testing.T) {
 
 	first := map[string]any{
 		"type": "response.create", "model": model,
-		"input": []any{map[string]any{
-			"type": "message", "id": "u1", "role": "user",
-			"content": "PRECOMPACT_ONLY_MARKER. Remember ORCHID-7319.",
-		}},
+		"input": []any{
+			testWopalAdditionalTools(),
+			map[string]any{
+				"type": "message", "id": "u1", "role": "user",
+				"content": "PRECOMPACT_ONLY_MARKER. Remember ORCHID-7319.",
+			},
+		},
 		"tools": []any{map[string]any{"type": "function", "name": "lookup", "parameters": map[string]any{"type": "object"}}},
 	}
 	if err := conn.WriteJSON(first); err != nil {
@@ -161,7 +164,17 @@ func TestWopalWebsocketRemoteCompactionV2ClosedLoop(t *testing.T) {
 		t.Fatalf("summary request did not contain full history + summary prompt: %s", summaryJSON)
 	}
 	if _, exists := summaryRequest["tools"]; exists {
-		t.Fatalf("summary request should disable tools: %s", summaryJSON)
+		t.Fatalf("summary request should disable top-level tools: %s", summaryJSON)
+	}
+	if strings.Contains(string(summaryJSON), "additional_tools") || strings.Contains(string(summaryJSON), "open_url") {
+		t.Fatalf("summary request should not expose retained browser tools: %s", summaryJSON)
+	}
+	openedCapsule, err := openWopalCompactionCapsule(encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openedCapsule.Prefix) != 1 || !strings.Contains(string(openedCapsule.Prefix[0]), "open_url") {
+		t.Fatalf("compaction capsule did not retain browser tools: %#v", openedCapsule.Prefix)
 	}
 
 	firstReplayJSON, _ := json.Marshal(firstReplayRequest)
@@ -170,6 +183,9 @@ func TestWopalWebsocketRemoteCompactionV2ClosedLoop(t *testing.T) {
 	}
 	if !strings.Contains(string(firstReplayJSON), "ORCHID-7319") || !strings.Contains(string(firstReplayJSON), `"id":"u3"`) {
 		t.Fatalf("replayed summary/tail missing: %s", firstReplayJSON)
+	}
+	if strings.Count(string(firstReplayJSON), "additional_tools") != 1 || !strings.Contains(string(firstReplayJSON), "open_url") {
+		t.Fatalf("retained browser tools missing or duplicated after replay: %s", firstReplayJSON)
 	}
 	if strings.Contains(string(firstReplayJSON), `"type":"compaction"`) {
 		t.Fatalf("opaque compaction item reached chat-backed upstream: %s", firstReplayJSON)
@@ -183,5 +199,8 @@ func TestWopalWebsocketRemoteCompactionV2ClosedLoop(t *testing.T) {
 	}
 	if strings.Count(string(secondReplayJSON), "wopal_compaction_summary_") != 1 {
 		t.Fatalf("compaction summary duplicated on repeated replay: %s", secondReplayJSON)
+	}
+	if strings.Count(string(secondReplayJSON), "additional_tools") != 1 || !strings.Contains(string(secondReplayJSON), "open_url") {
+		t.Fatalf("retained browser tools missing or duplicated on repeated replay: %s", secondReplayJSON)
 	}
 }

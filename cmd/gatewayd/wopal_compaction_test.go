@@ -20,6 +20,29 @@ func testWopalCompactionItem(t *testing.T, id, summary string) map[string]any {
 	return map[string]any{"type": "compaction", "id": id, "encrypted_content": sealed}
 }
 
+func testWopalAdditionalTools() map[string]any {
+	return map[string]any{
+		"type": "additional_tools",
+		"role": "developer",
+		"tools": []any{map[string]any{
+			"type": "namespace", "name": "browser",
+			"tools": []any{map[string]any{
+				"type": "function", "name": "open_url", "description": "Open a URL in the built-in browser",
+				"parameters": map[string]any{"type": "object", "properties": map[string]any{"url": map[string]any{"type": "string"}}, "required": []any{"url"}},
+			}},
+		}},
+	}
+}
+
+func rawWopalAdditionalTools(t *testing.T) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(testWopalAdditionalTools())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func TestWopalCompactionCapsuleRoundTripAndTamperDetection(t *testing.T) {
 	configureWopalCompactionKey("unit-test-secret")
 	sealed, err := sealWopalCompactionCapsule(wopalCompactionCapsule{
@@ -27,19 +50,23 @@ func TestWopalCompactionCapsuleRoundTripAndTamperDetection(t *testing.T) {
 		ID:      "cmp-test",
 		Model:   "wopal-ai/deepseek-v4.1-flash-free",
 		Summary: "remember ORCHID-7319",
+		Prefix:  []json.RawMessage{rawWopalAdditionalTools(t)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(sealed, "ORCHID-7319") {
-		t.Fatal("sealed capsule leaked plaintext summary")
+	if strings.Contains(sealed, "ORCHID-7319") || strings.Contains(sealed, "open_url") {
+		t.Fatal("sealed capsule leaked plaintext state")
 	}
 	opened, err := openWopalCompactionCapsule(sealed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opened.ID != "cmp-test" || opened.Summary != "remember ORCHID-7319" {
+	if opened.ID != "cmp-test" || opened.Summary != "remember ORCHID-7319" || len(opened.Prefix) != 1 {
 		t.Fatalf("opened capsule = %#v", opened)
+	}
+	if !strings.Contains(string(opened.Prefix[0]), "open_url") {
+		t.Fatalf("retained tool prefix missing after capsule round trip: %s", opened.Prefix[0])
 	}
 
 	tampered := []byte(sealed)
@@ -90,6 +117,45 @@ func TestPrepareWopalTurnRestoresFreshCompactionReplay(t *testing.T) {
 	}
 	if body.Input[1]["id"] != "u2" {
 		t.Fatalf("tail item missing: %#v", body.Input[1])
+	}
+}
+
+func TestPrepareWopalTurnRestoresAdditionalToolsFromCompactionCapsule(t *testing.T) {
+	configureWopalCompactionKey("tool-replay-secret")
+	sealed, err := sealWopalCompactionCapsule(wopalCompactionCapsule{
+		Version: 1, ID: "cmp-tools", Model: "wopal-ai/deepseek-v4.1-flash-free",
+		Summary: "Continue the browser task.",
+		Prefix:  []json.RawMessage{rawWopalAdditionalTools(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := map[string]any{
+		"type": "response.create", "model": "wopal-ai/deepseek-v4.1-flash-free",
+		"previous_response_id": "resp-before-reconnect",
+		"input": []any{
+			map[string]any{"type": "compaction", "id": "cmp-tools", "encrypted_content": sealed},
+			map[string]any{"type": "message", "id": "u-tools", "role": "user", "content": "Open the page."},
+		},
+	}
+	prepared, err := prepareWopalWebsocketTurn(message, "wopal-ai/deepseek-v4.1-flash-free", wopalConversationState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(prepared.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Input) != 3 {
+		t.Fatalf("input len=%d want 3: %s", len(body.Input), prepared.body)
+	}
+	if body.Input[0]["type"] != "additional_tools" || !strings.Contains(string(prepared.body), "open_url") {
+		t.Fatalf("additional tools were not restored before the summary: %s", prepared.body)
+	}
+	if !strings.Contains(string(prepared.body), "Continue the browser task.") || body.Input[2]["id"] != "u-tools" {
+		t.Fatalf("summary/tail missing after tool replay: %s", prepared.body)
 	}
 }
 

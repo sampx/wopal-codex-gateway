@@ -451,7 +451,13 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	}
 
 	compactionID := "cmp_wopal_" + uuid.NewString()
-	capsule := wopalCompactionCapsule{Version: 1, ID: compactionID, Model: s.model, Summary: summary}
+	retainedPrefix, err := wopalCompactionRetainedPrefix(prepared.nextRequest)
+	if err != nil {
+		s.clearActive()
+		s.sendError(http.StatusInternalServerError, "gateway_compaction_prefix_failed", err.Error())
+		return
+	}
+	capsule := wopalCompactionCapsule{Version: 1, ID: compactionID, Model: s.model, Summary: summary, Prefix: retainedPrefix}
 	encryptedContent, err := sealWopalCompactionCapsule(capsule)
 	if err != nil {
 		s.clearActive()

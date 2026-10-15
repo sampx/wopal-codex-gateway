@@ -28,10 +28,11 @@ var (
 )
 
 type wopalCompactionCapsule struct {
-	Version int    `json:"v"`
-	ID      string `json:"id"`
-	Model   string `json:"model,omitempty"`
-	Summary string `json:"summary"`
+	Version int               `json:"v"`
+	ID      string            `json:"id"`
+	Model   string            `json:"model,omitempty"`
+	Summary string            `json:"summary"`
+	Prefix  []json.RawMessage `json:"prefix,omitempty"`
 }
 
 type wopalCompactionReplay struct {
@@ -130,6 +131,65 @@ func wopalCompactionSummaryMessage(capsule wopalCompactionCapsule) map[string]an
 	}
 }
 
+func isWopalCompactionRetainedItem(value any) bool {
+	item, ok := value.(map[string]any)
+	return ok && strings.TrimSpace(fmt.Sprint(item["type"])) == "additional_tools"
+}
+
+func wopalCompactionRetainedPrefix(requestRaw []byte) ([]json.RawMessage, error) {
+	var request struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(requestRaw, &request); err != nil {
+		return nil, fmt.Errorf("decode compaction source request: %w", err)
+	}
+	prefix := make([]json.RawMessage, 0, 1)
+	for _, raw := range request.Input {
+		var item map[string]any
+		if json.Unmarshal(raw, &item) != nil || strings.TrimSpace(fmt.Sprint(item["type"])) != "additional_tools" {
+			continue
+		}
+		prefix = append(prefix, json.RawMessage(append([]byte(nil), raw...)))
+	}
+	return prefix, nil
+}
+
+func wopalCompactionPrefixValues(prefix []json.RawMessage) ([]any, error) {
+	values := make([]any, 0, len(prefix))
+	for _, raw := range prefix {
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, fmt.Errorf("decode retained compaction prefix: %w", err)
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func wopalCompactionExpandedBase(capsule wopalCompactionCapsule) ([]any, error) {
+	base, err := wopalCompactionPrefixValues(capsule.Prefix)
+	if err != nil {
+		return nil, err
+	}
+	base = append(base, wopalCompactionSummaryMessage(capsule))
+	return base, nil
+}
+
+func withoutWopalCompactionRetainedItems(input any) any {
+	items, ok := input.([]any)
+	if !ok {
+		return input
+	}
+	filtered := make([]any, 0, len(items))
+	for _, value := range items {
+		if isWopalCompactionRetainedItem(value) {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	return filtered
+}
+
 func expandWopalCompactionReplayInput(input []any) (wopalCompactionReplay, error) {
 	replay := wopalCompactionReplay{
 		Expanded: make([]any, 0, len(input)),
@@ -154,7 +214,24 @@ func expandWopalCompactionReplayInput(input []any) (wopalCompactionReplay, error
 		}
 		replay.Found = true
 		replay.ID = capsule.ID
-		replay.Expanded = append(replay.Expanded, wopalCompactionSummaryMessage(capsule))
+		base, err := wopalCompactionExpandedBase(capsule)
+		if err != nil {
+			return wopalCompactionReplay{}, fmt.Errorf("unsupported_compaction_capsule: %w", err)
+		}
+		// A replay may itself carry an updated additional_tools item before the
+		// compaction capsule. Prefer the client's current declaration; otherwise
+		// restore the declaration sealed into the capsule.
+		hasCurrentTools := false
+		for _, existing := range replay.Expanded {
+			if isWopalCompactionRetainedItem(existing) {
+				hasCurrentTools = true
+				break
+			}
+		}
+		if hasCurrentTools && len(capsule.Prefix) > 0 {
+			base = base[len(capsule.Prefix):]
+		}
+		replay.Expanded = append(replay.Expanded, base...)
 	}
 	return replay, nil
 }
@@ -210,6 +287,7 @@ func prepareWopalCompactionSummaryTurn(message map[string]any, model string, sta
 	delete(body, "tool_choice")
 	delete(body, "parallel_tool_calls")
 	delete(body, "text")
+	body["input"] = withoutWopalCompactionRetainedItems(body["input"])
 	body["max_output_tokens"] = wopalCompactionMaxOutput
 	prepared.body, err = json.Marshal(body)
 	if err != nil {
@@ -223,7 +301,11 @@ func buildWopalCompactedStateRequest(summaryRequest []byte, capsule wopalCompact
 	if err := json.Unmarshal(summaryRequest, &request); err != nil {
 		return nil, fmt.Errorf("decode summary request: %w", err)
 	}
-	request["input"] = []any{wopalCompactionSummaryMessage(capsule)}
+	base, err := wopalCompactionExpandedBase(capsule)
+	if err != nil {
+		return nil, err
+	}
+	request["input"] = base
 	delete(request, "max_output_tokens")
 	delete(request, "previous_response_id")
 	request["stream"] = true
