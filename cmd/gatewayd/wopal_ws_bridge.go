@@ -69,6 +69,9 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activityLogger, model str
 		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
 			continue
 		}
+		if reconnectForWebsocketRouteChange(conn, routeWopal, payload, logger) {
+			return
+		}
 		var message map[string]any
 		if err := json.Unmarshal(payload, &message); err != nil {
 			s.sendError(http.StatusBadRequest, "gateway_invalid_json", "websocket message is not valid JSON")

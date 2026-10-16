@@ -92,6 +92,10 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 			}
 			return
 		}
+		if rewriteClientFrames && (messageType == websocket.TextMessage || messageType == websocket.BinaryMessage) &&
+			reconnectForWebsocketRouteChange(source, routeOfficial, payload, logger) {
+			return
+		}
 		if rewriteClientFrames && messageType == websocket.TextMessage &&
 			containsOfficialSanitizeMarker(payload) {
 			if rewritten, ok := sanitizeOfficialWebsocketFrame(payload); ok {
