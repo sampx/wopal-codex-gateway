@@ -92,11 +92,19 @@ func routingMiddlewareWithTargets(logger *activityLogger, chatgptTarget, openaiT
 		case routeOfficial:
 			provider := "openai"
 			proxy := openaiProxy
+			target := openaiTarget
 			if strings.TrimSpace(c.Request.Header.Get("ChatGPT-Account-ID")) != "" {
 				provider = "chatgpt"
 				proxy = chatgptProxy
+				target = chatgptTarget
 			}
 			logger.write(map[string]any{"event": "route_selected", "provider": provider, "model": model, "path": path})
+			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
+				c.Abort()
+				serveOfficialWebsocketBridge(c, logger, target)
+				return
+			}
+			rewriteOfficialRequestBody(c.Request, logger)
 			c.Abort()
 			proxy.ServeHTTP(c.Writer, c.Request)
 			return
