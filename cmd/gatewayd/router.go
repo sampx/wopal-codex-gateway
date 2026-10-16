@@ -53,6 +53,7 @@ func routingMiddleware(logger *activityLogger) gin.HandlerFunc {
 func routingMiddlewareWithTargets(logger *activityLogger, chatgptTarget, openaiTarget *url.URL) gin.HandlerFunc {
 	chatgptProxy := newOfficialReverseProxy(chatgptTarget, true, logger)
 	openaiProxy := newOfficialReverseProxy(openaiTarget, false, logger)
+	nativeReplay := &nativeCompactionBridge{chatgptTarget: chatgptTarget, openaiTarget: openaiTarget, logger: logger}
 
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -79,14 +80,18 @@ func routingMiddlewareWithTargets(logger *activityLogger, chatgptTarget, openaiT
 
 		switch classifyModel(model) {
 		case routeWopal:
-			c.Request.Header.Set("Authorization", "Bearer "+localAccessKey)
-			c.Request.Header.Del("ChatGPT-Account-ID")
 			logger.write(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": model, "path": path})
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
+				c.Set("native_compaction_bridge", nativeReplay)
 				c.Abort()
 				serveWopalWebsocketBridge(c, logger, model)
 				return
 			}
+			if c.Request.Method == http.MethodPost && !prepareWopalHTTP(c, logger, model, nativeReplay) {
+				return
+			}
+			c.Request.Header.Set("Authorization", "Bearer "+localAccessKey)
+			c.Request.Header.Del("ChatGPT-Account-ID")
 			c.Next()
 			return
 		case routeOfficial:
@@ -119,11 +124,9 @@ func routingMiddlewareWithTargets(logger *activityLogger, chatgptTarget, openaiT
 }
 
 func detectRequestModel(req *http.Request) (string, error) {
-	if hint := parseRoutingHintModel(req.Header.Get("X-Codex-Routing-Hint")); hint != "" {
-		return hint, nil
-	}
+	hint := parseRoutingHintModel(req.Header.Get("X-Codex-Routing-Hint"))
 	if req.Method == http.MethodGet || req.Body == nil {
-		return "", nil
+		return hint, nil
 	}
 	raw, err := io.ReadAll(io.LimitReader(req.Body, maxRoutingBodyBytes+1))
 	if err != nil {
@@ -144,7 +147,10 @@ func detectRequestModel(req *http.Request) (string, error) {
 	if err := json.Unmarshal(decoded, &payload); err != nil {
 		return "", fmt.Errorf("parse request body for routing: %w", err)
 	}
-	return strings.TrimSpace(payload.Model), nil
+	if model := strings.TrimSpace(payload.Model); model != "" {
+		return model, nil
+	}
+	return hint, nil
 }
 
 func decodeRoutingBody(raw []byte, encoding string) ([]byte, error) {

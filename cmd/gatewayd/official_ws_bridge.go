@@ -83,6 +83,14 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 	for {
 		messageType, payload, err := source.ReadMessage()
 		if err != nil {
+			fields := map[string]any{"event": "official_ws_closed", "client_to_upstream": rewriteClientFrames}
+			if closeErr, ok := err.(*websocket.CloseError); ok {
+				fields["code"] = closeErr.Code
+				fields["reason"] = closeErr.Text
+			} else {
+				fields["error"] = err.Error()
+			}
+			logger.write(fields)
 			if closeErr, ok := err.(*websocket.CloseError); ok {
 				_ = target.SetWriteDeadline(time.Now().Add(officialWebsocketWriteWait))
 				_ = target.WriteMessage(
@@ -96,7 +104,7 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 			reconnectForWebsocketRouteChange(source, routeOfficial, payload, logger) {
 			return
 		}
-		if rewriteClientFrames && messageType == websocket.TextMessage &&
+		if rewriteClientFrames && (messageType == websocket.TextMessage || messageType == websocket.BinaryMessage) &&
 			containsOfficialSanitizeMarker(payload) {
 			if rewritten, ok := sanitizeOfficialWebsocketFrame(payload); ok {
 				payload = rewritten

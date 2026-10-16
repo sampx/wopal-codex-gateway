@@ -26,9 +26,13 @@ const officialCompactionUnavailableContent = "The earlier part of this conversat
 // chat-completions translation; OpenAI reasoning items never use this prefix.
 const wopalReasoningIDPrefix = "rs_chatcmpl"
 
+func isWopalReasoningID(id string) bool {
+	return strings.HasPrefix(id, wopalReasoningIDPrefix) || strings.HasPrefix(id, "rs_cmb-")
+}
+
 func containsOfficialSanitizeMarker(payload []byte) bool {
 	return bytes.Contains(payload, []byte(wopalCompactionCapsulePrefix)) ||
-		bytes.Contains(payload, []byte(wopalReasoningIDPrefix))
+		bytes.Contains(payload, []byte(wopalReasoningIDPrefix)) || bytes.Contains(payload, []byte("rs_cmb-"))
 }
 
 func itemTypeOf(item map[string]any) string {
@@ -76,7 +80,7 @@ func sanitizeOfficialRequestInput(input []any) ([]any, int) {
 			continue
 		}
 		if itemTypeOf(item) == "reasoning" &&
-			strings.HasPrefix(reasoningItemID(item), wopalReasoningIDPrefix) {
+			isWopalReasoningID(reasoningItemID(item)) {
 			neutralized++
 			continue
 		}

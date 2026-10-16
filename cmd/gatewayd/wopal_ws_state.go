@@ -33,9 +33,7 @@ func prepareWopalWebsocketTurn(message map[string]any, model string, state wopal
 	if requestType != "response.create" && requestType != "response.append" {
 		return wopalPreparedTurn{}, fmt.Errorf("unsupported websocket request type: %s", requestType)
 	}
-	if strings.TrimSpace(fmt.Sprint(message["model"])) == "" {
-		message["model"] = model
-	}
+	inheritWopalRequestFields(message, state.lastRequest, model)
 	input, ok := message["input"].([]any)
 	if !ok {
 		return wopalPreparedTurn{}, fmt.Errorf("websocket request requires array field: input")
@@ -145,8 +143,8 @@ func normalizeWopalReplacement(message map[string]any, lastRequest []byte, model
 func inheritWopalRequestFields(message map[string]any, lastRequest []byte, model string) {
 	var previous map[string]any
 	_ = json.Unmarshal(lastRequest, &previous)
-	if strings.TrimSpace(fmt.Sprint(message["model"])) == "" {
-		if prior := strings.TrimSpace(fmt.Sprint(previous["model"])); prior != "" {
+	if strings.TrimSpace(stringOrEmpty(message["model"])) == "" {
+		if prior := strings.TrimSpace(stringOrEmpty(previous["model"])); prior != "" {
 			message["model"] = prior
 		} else {
 			message["model"] = model

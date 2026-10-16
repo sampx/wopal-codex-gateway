@@ -22,15 +22,17 @@ var wopalWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request)
 const maxWopalSessionStateBytes = 256 << 20
 
 type wopalWebsocketSession struct {
-	conn     *websocket.Conn
-	writeMu  sync.Mutex
-	activeMu sync.Mutex
-	stateMu  sync.Mutex
-	cancel   context.CancelFunc
-	state    wopalConversationState
-	logger   *activityLogger
-	model    string
-	request  *http.Request
+	conn         *websocket.Conn
+	writeMu      sync.Mutex
+	activeMu     sync.Mutex
+	stateMu      sync.Mutex
+	cancel       context.CancelFunc
+	state        wopalConversationState
+	logger       *activityLogger
+	model        string
+	request      *http.Request
+	nativeReplay *nativeCompactionBridge
+	emit         func([]byte) error
 }
 
 func isWebsocketUpgrade(req *http.Request) bool {
@@ -44,6 +46,9 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activityLogger, model str
 		return
 	}
 	s := &wopalWebsocketSession{conn: conn, logger: logger, model: model, request: c.Request.Clone(c.Request.Context())}
+	if bridge, ok := c.Get("native_compaction_bridge"); ok {
+		s.nativeReplay, _ = bridge.(*nativeCompactionBridge)
+	}
 	defer func() {
 		s.cancelActive()
 		released := s.releaseState()
@@ -102,13 +107,19 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activityLogger, model str
 	}
 }
 
-func (s *wopalWebsocketSession) prepareTurn(message map[string]any) (wopalPreparedTurn, error) {
+func (s *wopalWebsocketSession) prepareTurn(ctx context.Context, message map[string]any) (wopalPreparedTurn, error) {
+	if err := s.nativeReplay.expand(ctx, s.request, message); err != nil {
+		return wopalPreparedTurn{}, err
+	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	return prepareWopalWebsocketTurn(message, s.model, s.state)
 }
 
-func (s *wopalWebsocketSession) prepareCompactionTurn(message map[string]any) (wopalPreparedTurn, error) {
+func (s *wopalWebsocketSession) prepareCompactionTurn(ctx context.Context, message map[string]any) (wopalPreparedTurn, error) {
+	if err := s.nativeReplay.expand(ctx, s.request, message); err != nil {
+		return wopalPreparedTurn{}, err
+	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	return prepareWopalCompactionSummaryTurn(message, s.model, s.state)
@@ -146,7 +157,7 @@ func (s *wopalWebsocketSession) releaseState() int {
 }
 
 func (s *wopalWebsocketSession) handlePrewarm(message map[string]any) error {
-	prepared, err := s.prepareTurn(message)
+	prepared, err := s.prepareTurn(s.request.Context(), message)
 	if err != nil {
 		return err
 	}
@@ -168,7 +179,7 @@ func (s *wopalWebsocketSession) sendPrepareError(err error) {
 		return
 	}
 	if err != nil && strings.Contains(err.Error(), "unsupported_compaction_capsule") {
-		s.sendError(http.StatusConflict, "compaction_replay_unavailable", "compaction state cannot be restored by this gateway; resend the full conversation input")
+		s.sendError(http.StatusBadRequest, "compaction_replay_unavailable", "compaction state cannot be restored by this gateway; no conversation context was discarded")
 		return
 	}
 	if err != nil {
@@ -218,8 +229,11 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		return
 	}
 
-	prepared, err := s.prepareTurn(message)
+	prepared, err := s.prepareTurn(ctx, message)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		s.clearActive()
 		s.sendPrepareError(err)
 		return
@@ -326,8 +340,11 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 }
 
 func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnID string, started time.Time, message map[string]any) {
-	prepared, err := s.prepareCompactionTurn(message)
+	prepared, err := s.prepareCompactionTurn(ctx, message)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		s.clearActive()
 		s.sendPrepareError(err)
 		return
@@ -579,5 +596,8 @@ func (s *wopalWebsocketSession) sendJSON(value any) error {
 func (s *wopalWebsocketSession) sendRaw(payload []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if s.emit != nil {
+		return s.emit(payload)
+	}
 	return s.conn.WriteMessage(websocket.TextMessage, payload)
 }

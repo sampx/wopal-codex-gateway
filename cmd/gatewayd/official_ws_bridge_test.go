@@ -60,34 +60,39 @@ func TestOfficialWebsocketFrameSanitizesWopalItems(t *testing.T) {
 	request := map[string]any{
 		"type":  "response.create",
 		"model": "gpt-6.1-sol",
-		"input": []any{item, testWopalReasoningItem(), map[string]any{"type": "message", "role": "user", "content": "hi"}},
+		"input": []any{item, testWopalReasoningItem(), map[string]any{"type": "reasoning", "id": "rs_cmb-ws_0", "encrypted_content": ""}, map[string]any{"type": "message", "role": "user", "content": "hi"}},
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
-		t.Fatal(err)
-	}
+	for _, messageType := range []int{websocket.TextMessage, websocket.BinaryMessage} {
+		if err := conn.WriteMessage(messageType, payload); err != nil {
+			t.Fatal(err)
+		}
 
-	var frame string
-	select {
-	case frame = <-frames:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for upstream frame")
-	}
+		var frame string
+		select {
+		case frame = <-frames:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for upstream frame")
+		}
 
-	if strings.Contains(frame, wopalCompactionCapsulePrefix) {
-		t.Fatalf("upstream frame leaked Wopal capsule: %s", frame)
-	}
-	if strings.Contains(frame, wopalReasoningIDPrefix) {
-		t.Fatalf("upstream frame leaked Wopal reasoning id: %s", frame)
-	}
-	if !strings.Contains(frame, "remember WS-SUMMARY") {
-		t.Fatalf("upstream frame missing expanded summary: %s", frame)
-	}
-	if !strings.Contains(frame, `"role":"user"`) {
-		t.Fatalf("upstream frame lost the user message: %s", frame)
+		if strings.Contains(frame, wopalCompactionCapsulePrefix) {
+			t.Fatalf("upstream frame leaked Wopal capsule: %s", frame)
+		}
+		if strings.Contains(frame, wopalReasoningIDPrefix) {
+			t.Fatalf("upstream frame leaked Wopal reasoning id: %s", frame)
+		}
+		if strings.Contains(frame, "rs_cmb-") {
+			t.Fatalf("upstream frame leaked cmb reasoning: %s", frame)
+		}
+		if !strings.Contains(frame, "remember WS-SUMMARY") {
+			t.Fatalf("upstream frame missing expanded summary: %s", frame)
+		}
+		if !strings.Contains(frame, `"role":"user"`) {
+			t.Fatalf("upstream frame lost the user message: %s", frame)
+		}
 	}
 }
 
