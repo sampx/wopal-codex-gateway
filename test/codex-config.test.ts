@@ -9,7 +9,7 @@ test('install adds only gateway-owned root values and preserves existing config'
   assert.match(next, /model = "gpt-6\.1-sol"/);
   assert.match(next, /model_catalog_json = "\/Users\/sam\/\.codex\/wopal-codex-gateway-models\.json"/);
   assert.match(next, /openai_base_url = "http:\/\/127\.0\.0\.1:11435\/v1"/);
-  assert.match(next, /\[features\]\nmemories = true/);
+  assert.match(next, /\[features\]\nmemories = true\nguardian_reuse_parent_compaction = false/);
 });
 
 test('restore removes gateway values when they did not exist before install', () => {
@@ -32,4 +32,34 @@ test('restore resets model if the user selected a gateway model after install', 
   const restored = restoreGatewayConfig(switched, state);
   assert.match(restored, /^model = "gpt-6\.1-sol"/);
   assert.doesNotMatch(restored, /wopal-ai\/qwen3-coder/);
+});
+
+
+test('install disables Guardian parent checkpoint reuse without changing other feature values', () => {
+  const original = `model = "gpt-6.1-sol"\n\n[features]\nmemories = true\nguardian_reuse_parent_compaction = true # user choice\ngoals = true\n`;
+  const state = captureRestoreState(original);
+  const installed = applyGatewayConfig(original, '/tmp/catalog.json', 'http://127.0.0.1:11435/v1');
+  assert.match(installed, /memories = true/);
+  assert.match(installed, /guardian_reuse_parent_compaction = false # user choice/);
+  assert.match(installed, /goals = true/);
+  assert.equal(restoreGatewayConfig(installed, state), original);
+});
+
+test('restore removes gateway-added Guardian reuse override when it was originally absent', () => {
+  const original = `model = "gpt-6.1-sol"\n\n[features]\nmemories = true\ngoals = true\n`;
+  const state = captureRestoreState(original);
+  const installed = applyGatewayConfig(original, '/tmp/catalog.json', 'http://127.0.0.1:11435/v1');
+  assert.match(installed, /guardian_reuse_parent_compaction = false/);
+  assert.equal(restoreGatewayConfig(installed, state), original);
+});
+
+test('restore state remains backward compatible with installations captured before Guardian management', () => {
+  const installed = applyGatewayConfig(clean, '/tmp/catalog.json', 'http://127.0.0.1:11435/v1');
+  const legacyState = {
+    model: { hadValue: true, value: 'gpt-6.1-sol' },
+    modelCatalogJson: { hadValue: false },
+    openaiBaseUrl: { hadValue: false },
+  };
+  const restored = restoreGatewayConfig(installed, legacyState);
+  assert.match(restored, /guardian_reuse_parent_compaction = false/);
 });
