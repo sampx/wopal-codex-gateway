@@ -58,7 +58,7 @@ proxy_loaded() {
 
 wait_health() {
   local i
-  for i in {1..30}; do
+  for i in {1..100}; do
     if curl -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1; then
       return 0
     fi
@@ -67,13 +67,28 @@ wait_health() {
   return 1
 }
 
+bootstrap_proxy() {
+  local i output code
+  for i in {1..30}; do
+    if output="$(launchctl bootstrap "$DOMAIN" "$PLIST" 2>&1)"; then
+      return 0
+    else
+      code=$?
+    fi
+    # A previous bootout can still be completing inside launchd.
+    [[ "$code" -eq 37 ]] || die "launchctl bootstrap failed (exit $code): $output"
+    sleep 0.1
+  done
+  die "launchctl bootstrap remained busy (exit $code): $output"
+}
+
 start_proxy() {
   [[ -f "$PLIST" ]] || die "proxy service is not installed; run 'scripts/gateway service install' (or full 'scripts/gateway install') first"
   if proxy_loaded; then
-    launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null
+    launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null || die "launchctl kickstart failed; service registration was preserved"
   else
-    launchctl bootstrap "$DOMAIN" "$PLIST"
-    launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null
+    # RunAtLoad starts the daemon during bootstrap; a second kickstart races it.
+    bootstrap_proxy
   fi
   wait_health || die "proxy started but health check failed: $HEALTH_URL"
   echo "Proxy running: $HEALTH_URL"
@@ -108,7 +123,6 @@ case "$cmd" in
     stop_proxy
     ;;
   restart)
-    stop_proxy
     start_proxy
     ;;
   status)
@@ -174,7 +188,6 @@ case "$cmd" in
     run_cli config "$@"
     run_cli catalog refresh
     if [[ -f "$PLIST" ]]; then
-      stop_proxy
       start_proxy
     fi
     echo "Restart ChatGPT/Codex Desktop manually if model/catalog settings changed."
