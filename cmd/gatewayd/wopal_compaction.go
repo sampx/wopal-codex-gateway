@@ -14,13 +14,21 @@ import (
 )
 
 const (
-	wopalCompactionCapsulePrefix = "wgcp1."
-	wopalCompactionMaxOutput     = 12000
+	wopalCompactionCapsulePrefix   = "wgcp1."
+	wopalCompactionMaxOutput       = 12000
+	wopalCompactionMinSummaryBytes = 8
+	dedicatedWopalCompactionModel  = "wopal-ai/deepseek-v4.1-flash"
 )
 
-const wopalCompactionPrompt = `Create a compact, self-contained continuation summary of the conversation above for another coding agent that will continue the same work.
+const wopalCompactionPrompt = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
 
-Preserve concrete facts that can affect future work: the user's goals and constraints, architecture and design decisions, exact paths/names/IDs/config values when relevant, changes already made, commands or tests and their outcomes, tool-call results that matter, current state, unresolved issues, and the next intended steps. Preserve important user preferences and prior authorizations that remain relevant. Do not invent facts. Do not call tools. Output only the continuation summary.`
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+
+For coding and agent work, preserve concrete details that can affect continuation: exact paths, names, IDs, and config values when relevant; changes already made; commands or tests and their outcomes; important tool-call results; current state; unresolved issues; and prior authorizations that remain relevant. Do not invent facts. Do not call tools. Output only the continuation summary. Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`
 
 var (
 	wopalCompactionKeyMu sync.RWMutex
@@ -273,6 +281,7 @@ func prepareWopalCompactionSummaryTurn(message map[string]any, model string, sta
 		"content": wopalCompactionPrompt,
 	})
 	request := cloneMessage(message)
+	request["model"] = model
 	request["input"] = filtered
 	request["max_output_tokens"] = wopalCompactionMaxOutput
 	prepared, err := prepareWopalWebsocketTurn(request, model, state)
@@ -310,6 +319,17 @@ func buildWopalCompactedStateRequest(summaryRequest []byte, capsule wopalCompact
 	delete(request, "previous_response_id")
 	request["stream"] = true
 	return json.Marshal(request)
+}
+
+func validateWopalCompactionSummary(summary string) error {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return fmt.Errorf("compaction model returned an empty summary")
+	}
+	if len(summary) < wopalCompactionMinSummaryBytes {
+		return fmt.Errorf("compaction model returned an abnormally short summary")
+	}
+	return nil
 }
 
 func extractWopalCompactionSummary(output []byte, streamedText string) string {

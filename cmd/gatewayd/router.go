@@ -86,6 +86,11 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 			c.Next()
 			return
 		}
+		if c.Request.Method == http.MethodPost && isGatewayCompactionRequest(c.Request, path) {
+			logger.write(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": dedicatedWopalCompactionModel, "path": path, "purpose": "compaction"})
+			_ = prepareWopalHTTP(c, logger, dedicatedWopalCompactionModel, nativeReplay)
+			return
+		}
 
 		switch classifyModel(model) {
 		case routeWopal:
@@ -124,7 +129,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 			logger.write(map[string]any{"event": "route_selected", "provider": provider, "model": model, "path": path})
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Abort()
-				serveOfficialWebsocketBridge(c, logger, target, quotaGuard, accountID, model)
+				serveOfficialWebsocketBridge(c, logger, target, quotaGuard, accountID, model, nativeReplay)
 				return
 			}
 			rewriteOfficialRequestBody(c.Request, logger)
@@ -139,6 +144,29 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 			c.Next()
 		}
 	}
+}
+
+func isGatewayCompactionRequest(req *http.Request, path string) bool {
+	if path == "/v1/responses/compact" {
+		return true
+	}
+	if req == nil || req.Body == nil || path != "/v1/responses" {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(req.Body, maxRoutingBodyBytes+1))
+	req.Body = io.NopCloser(bytes.NewReader(raw))
+	req.ContentLength = int64(len(raw))
+	if err != nil || len(raw) > maxRoutingBodyBytes {
+		return false
+	}
+	decoded, err := decodeRoutingBody(raw, req.Header.Get("Content-Encoding"))
+	if err != nil {
+		return false
+	}
+	var payload struct {
+		Input []any `json:"input"`
+	}
+	return json.Unmarshal(decoded, &payload) == nil && wopalInputHasCompactionTrigger(payload.Input)
 }
 
 func detectRequestModel(req *http.Request) (string, error) {

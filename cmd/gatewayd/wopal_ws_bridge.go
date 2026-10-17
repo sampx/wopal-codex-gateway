@@ -122,7 +122,7 @@ func (s *wopalWebsocketSession) prepareCompactionTurn(ctx context.Context, messa
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	return prepareWopalCompactionSummaryTurn(message, s.model, s.state)
+	return prepareWopalCompactionSummaryTurn(message, dedicatedWopalCompactionModel, s.state)
 }
 
 func validateWopalSessionStateSize(requestBytes, outputBytes int) error {
@@ -340,6 +340,7 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 }
 
 func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnID string, started time.Time, message map[string]any) {
+	compactionModel := dedicatedWopalCompactionModel
 	prepared, err := s.prepareCompactionTurn(ctx, message)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -354,14 +355,14 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	created := map[string]any{
 		"type": "response.created",
 		"response": map[string]any{
-			"id": responseID, "status": "in_progress", "model": s.model, "output": []any{},
+			"id": responseID, "status": "in_progress", "model": compactionModel, "output": []any{},
 		},
 	}
 	if err := s.sendJSON(created); err != nil {
 		return
 	}
 	s.logger.write(map[string]any{
-		"event": "compaction_started", "turn_id": turnID, "provider": "wopal-ai", "client_model": s.model,
+		"event": "compaction_started", "turn_id": turnID, "provider": "wopal-ai", "client_model": compactionModel,
 	})
 
 	target := "http://" + s.request.Host + "/v1/responses"
@@ -460,13 +461,13 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	}
 
 	summary := extractWopalCompactionSummary(finalOutput, streamedText.String())
-	if summary == "" {
+	if err := validateWopalCompactionSummary(summary); err != nil {
 		s.logger.write(map[string]any{
 			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
-			"reason": "empty_summary", "duration_ms": time.Since(started).Milliseconds(),
+			"reason": "invalid_summary", "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
-		s.sendError(http.StatusBadGateway, "gateway_compaction_empty", "compaction model returned an empty summary")
+		s.sendError(http.StatusBadGateway, "gateway_compaction_invalid_summary", err.Error())
 		return
 	}
 
@@ -477,7 +478,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 		s.sendError(http.StatusInternalServerError, "gateway_compaction_prefix_failed", err.Error())
 		return
 	}
-	capsule := wopalCompactionCapsule{Version: 1, ID: compactionID, Model: s.model, Summary: summary, Prefix: retainedPrefix}
+	capsule := wopalCompactionCapsule{Version: 1, ID: compactionID, Model: compactionModel, Summary: summary, Prefix: retainedPrefix}
 	encryptedContent, err := sealWopalCompactionCapsule(capsule)
 	if err != nil {
 		s.clearActive()
@@ -518,7 +519,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	completed := map[string]any{
 		"type": "response.completed",
 		"response": map[string]any{
-			"id": responseID, "status": "completed", "model": s.model,
+			"id": responseID, "status": "completed", "model": compactionModel,
 			"output": []any{item}, "usage": usage,
 		},
 	}

@@ -160,7 +160,7 @@ func TestWopalWebsocketRemoteCompactionV2ClosedLoop(t *testing.T) {
 	if strings.Contains(string(summaryJSON), "compaction_trigger") {
 		t.Fatalf("compaction trigger leaked to summary model: %s", summaryJSON)
 	}
-	if !strings.Contains(string(summaryJSON), "PRECOMPACT_ONLY_MARKER") || !strings.Contains(string(summaryJSON), "self-contained continuation summary") {
+	if !strings.Contains(string(summaryJSON), "PRECOMPACT_ONLY_MARKER") || !strings.Contains(string(summaryJSON), "CONTEXT CHECKPOINT COMPACTION") {
 		t.Fatalf("summary request did not contain full history + summary prompt: %s", summaryJSON)
 	}
 	if _, exists := summaryRequest["tools"]; exists {

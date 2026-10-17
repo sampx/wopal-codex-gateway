@@ -22,6 +22,12 @@ import (
 // Only the owning provider can read a native capsule. Convert it once into a
 // text continuation before sending the conversation to a third-party model.
 // The bounded cache contains no credentials; its keys include the auth scope.
+const nativeCompactionRestoreTimeout = 3 * time.Minute
+
+func nativeCompactionRestoreContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, nativeCompactionRestoreTimeout)
+}
+
 type nativeCompactionBridge struct {
 	chatgptTarget, openaiTarget *url.URL
 	mu                          sync.Mutex
@@ -136,7 +142,7 @@ func (b *nativeCompactionBridge) summarize(ctx context.Context, original *http.R
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	ctx, cancel := nativeCompactionRestoreContext(ctx)
 	defer cancel()
 	if original.Header.Get("ChatGPT-Account-ID") != "" {
 		return b.summarizeChatGPTWebsocket(ctx, original, model, body)

@@ -364,3 +364,56 @@ func TestSanitizeOfficialInputCoversAllCapsuleCarriers(t *testing.T) {
 		}
 	}
 }
+
+func TestOfficialSanitizerDropsLocalPreviousResponseAfterWopalCompaction(t *testing.T) {
+	configureWopalCompactionKey("previous-response-boundary-test")
+	item := testWopalCompactionItem(t, "cmp-local-response", "remember PORTABLE-77")
+	body, err := json.Marshal(map[string]any{
+		"model":                "gpt-6.1-sol",
+		"previous_response_id": "resp_wopal_compact_local_only",
+		"input":                []any{item, map[string]any{"type": "message", "role": "user", "content": "continue"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rewriteOfficialRequestBody(req, nil)
+	rewritten, _ := io.ReadAll(req.Body)
+	if bytes.Contains(rewritten, []byte("previous_response_id")) {
+		t.Fatalf("HTTP sanitizer kept local previous_response_id: %s", rewritten)
+	}
+	if !bytes.Contains(rewritten, []byte("PORTABLE-77")) {
+		t.Fatalf("HTTP sanitizer lost portable summary: %s", rewritten)
+	}
+
+	frame := append([]byte(nil), body...)
+	rewrittenFrame, ok := sanitizeOfficialWebsocketFrame(frame)
+	if !ok {
+		t.Fatal("websocket sanitizer did not rewrite Wopal compaction")
+	}
+	if bytes.Contains(rewrittenFrame, []byte("previous_response_id")) {
+		t.Fatalf("websocket sanitizer kept local previous_response_id: %s", rewrittenFrame)
+	}
+	if !bytes.Contains(rewrittenFrame, []byte("PORTABLE-77")) {
+		t.Fatalf("websocket sanitizer lost portable summary: %s", rewrittenFrame)
+	}
+}
+
+func TestOfficialSanitizerDropsLocalCompactionResponseIDWithoutCapsule(t *testing.T) {
+	body := []byte(`{"model":"gpt-6.1-sol","previous_response_id":"resp_wopal_compact_local_only","input":[{"type":"message","role":"user","content":"continue"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	rewriteOfficialRequestBody(req, nil)
+	rewritten, _ := io.ReadAll(req.Body)
+	if bytes.Contains(rewritten, []byte("resp_wopal_compact_")) {
+		t.Fatalf("HTTP sanitizer kept local compaction response id: %s", rewritten)
+	}
+
+	rewrittenFrame, ok := sanitizeOfficialWebsocketFrame(body)
+	if !ok {
+		t.Fatal("websocket sanitizer did not remove local compaction response id")
+	}
+	if bytes.Contains(rewrittenFrame, []byte("resp_wopal_compact_")) {
+		t.Fatalf("websocket sanitizer kept local compaction response id: %s", rewrittenFrame)
+	}
+}

@@ -8,6 +8,7 @@ A local gateway for using native ChatGPT/Codex models and third-party OpenAI-com
 - Routes `wopal-ai/<model>` to a configured OpenAI-compatible upstream.
 - Bridges Codex WebSocket traffic to third-party HTTP/SSE providers.
 - Preserves conversation state when switching model providers, including compaction compatibility handling.
+- Routes new compaction work through `wopal-ai/deepseek-v4.1-flash` and stores a portable gateway-owned `wgcp1` capsule instead of creating new OpenAI-native opaque compaction state.
 - Protects ChatGPT subscription quota before it is completely exhausted:
   - 5-hour (`300` minute) window: stop metered native inference at **98% used**.
   - Weekly (`10080` minute) window: stop metered native inference at **99% used**.
@@ -22,7 +23,7 @@ The daemon observes Codex rate-limit metadata returned by the native ChatGPT rou
 
 When a protected threshold is reached, metered native `/v1/responses` traffic is rejected locally with `official_quota_guard` instead of forwarding another inference request to ChatGPT. Existing native WebSocket sessions apply the same model-aware policy before each turn. `gpt-6-luna` and `codex-auto-review` are explicit recovery exceptions; native compaction restoration remains protected.
 
-`GET /_status` exposes the latest observed quota percentages and reset times without exposing account identifiers or credentials.
+`GET /_status` exposes the latest observed quota percentages and reset times without exposing account identifiers or credentials. Quota state is persisted under the Git-ignored `runtime/` directory using a hash of the ChatGPT account identifier, so protection survives daemon restarts without storing the raw account ID.
 
 ## Security and local state
 

@@ -394,3 +394,17 @@ func TestNativeHistoryFailureDoesNotForwardOrDiscardContext(t *testing.T) {
 		t.Fatalf("unrecoverable history returned retryable status %d", resp.StatusCode)
 	}
 }
+
+func TestNativeCompactionRestoreTimeoutAllowsSlowOfficialMaterialization(t *testing.T) {
+	started := time.Now()
+	ctx, cancel := nativeCompactionRestoreContext(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("native compaction restore context has no deadline")
+	}
+	got := deadline.Sub(started)
+	if got < 179*time.Second || got > 181*time.Second {
+		t.Fatalf("native compaction restore timeout = %s, want about 3m", got)
+	}
+}

@@ -24,7 +24,10 @@ const officialCompactionUnavailableContent = "The earlier part of this conversat
 
 // wopalReasoningIDPrefix identifies reasoning items minted by the Wopal
 // chat-completions translation; OpenAI reasoning items never use this prefix.
-const wopalReasoningIDPrefix = "rs_chatcmpl"
+const (
+	wopalReasoningIDPrefix          = "rs_chatcmpl"
+	wopalCompactionResponseIDPrefix = "resp_wopal_compact_"
+)
 
 func isWopalReasoningID(id string) bool {
 	return strings.HasPrefix(id, wopalReasoningIDPrefix) || strings.HasPrefix(id, "rs_cmb-")
@@ -32,7 +35,12 @@ func isWopalReasoningID(id string) bool {
 
 func containsOfficialSanitizeMarker(payload []byte) bool {
 	return bytes.Contains(payload, []byte(wopalCompactionCapsulePrefix)) ||
+		bytes.Contains(payload, []byte(wopalCompactionResponseIDPrefix)) ||
 		bytes.Contains(payload, []byte(wopalReasoningIDPrefix)) || bytes.Contains(payload, []byte("rs_cmb-"))
+}
+
+func hasWopalLocalPreviousResponseID(payload map[string]any) bool {
+	return strings.HasPrefix(strings.TrimSpace(stringOrEmpty(payload["previous_response_id"])), wopalCompactionResponseIDPrefix)
 }
 
 func itemTypeOf(item map[string]any) string {
@@ -51,6 +59,16 @@ func wopalEncryptedContent(item map[string]any) string {
 
 // sanitizeOfficialRequestInput rewrites request input items for the official
 // branch and reports how many gateway-issued items were neutralized.
+func inputHasWopalCompactionCapsule(input []any) bool {
+	for _, value := range input {
+		item, ok := value.(map[string]any)
+		if ok && strings.HasPrefix(wopalEncryptedContent(item), wopalCompactionCapsulePrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func sanitizeOfficialRequestInput(input []any) ([]any, int) {
 	requestHasTools := false
 	for _, value := range input {
@@ -155,11 +173,16 @@ func rewriteOfficialRequestBody(req *http.Request, logger *activityLogger) {
 	if !ok {
 		return
 	}
+	hadWopalCompaction := inputHasWopalCompactionCapsule(input)
+	hadLocalPreviousResponse := hasWopalLocalPreviousResponseID(payload)
 	expanded, neutralized := sanitizeOfficialRequestInput(input)
-	if neutralized == 0 {
+	if neutralized == 0 && !hadLocalPreviousResponse {
 		return
 	}
 	payload["input"] = expanded
+	if hadWopalCompaction || hadLocalPreviousResponse {
+		delete(payload, "previous_response_id")
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		logger.write(map[string]any{"event": "official_sanitizer_encode_failed", "error": err.Error()})
