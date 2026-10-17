@@ -65,7 +65,6 @@ func TestNativeCompactionRestoreStopsAfterCompletedEvent(t *testing.T) {
 	bridge := &nativeCompactionBridge{chatgptTarget: target, openaiTarget: target, summaries: make(map[[32]byte]string)}
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	req.Header.Set("Authorization", "Bearer official-token")
-	req.Header.Set("ChatGPT-Account-ID", "acct-test")
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	started := time.Now()
@@ -78,6 +77,64 @@ func TestNativeCompactionRestoreStopsAfterCompletedEvent(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed >= 200*time.Millisecond {
 		t.Fatalf("restore waited for stream EOF after completion: %s", elapsed)
+	}
+}
+
+func TestNativeCompactionRestoreUsesWebsocketForChatGPT(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "wopal-codex-gateway-models.json"), []byte(`{"models":[{"slug":"gpt-6.1-sol","visibility":"list","priority":1}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	var sawWebsocket atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !websocket.IsWebSocketUpgrade(r) {
+			http.Error(w, "chatgpt restore must use websocket", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path != "/backend-api/codex/responses" {
+			t.Errorf("restore path = %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer official-token" || r.Header.Get("ChatGPT-Account-ID") != "acct-test" {
+			t.Error("restore websocket lost official auth headers")
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		sawWebsocket.Store(true)
+		var message map[string]any
+		if err := conn.ReadJSON(&message); err != nil {
+			t.Error(err)
+			return
+		}
+		if message["type"] != "response.create" || message["model"] != "gpt-6.1-sol" {
+			t.Errorf("unexpected restore frame: %#v", message)
+		}
+		_ = conn.WriteJSON(map[string]any{"type": "response.output_text.delta", "delta": "restored over websocket"})
+		_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{
+			"id": "r1", "status": "completed", "output": []any{map[string]any{
+				"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "restored over websocket"}},
+			}},
+		}})
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL + "/backend-api/codex")
+	bridge := &nativeCompactionBridge{chatgptTarget: target, openaiTarget: target, summaries: make(map[[32]byte]string)}
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	req.Header.Set("Authorization", "Bearer official-token")
+	req.Header.Set("ChatGPT-Account-ID", "acct-test")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	summary, err := bridge.summarize(ctx, req, []any{map[string]any{"type": "compaction", "id": "cmp-native", "encrypted_content": "official-ciphertext"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != "restored over websocket" || !sawWebsocket.Load() {
+		t.Fatalf("summary=%q websocket=%v", summary, sawWebsocket.Load())
 	}
 }
 
@@ -106,14 +163,29 @@ func TestNativeCompactionModelSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 	var summaries atomic.Int32
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer official-token" || r.Header.Get("ChatGPT-Account-ID") != "acct-test" {
 			t.Error("native summary lost official auth")
 		}
+		if !websocket.IsWebSocketUpgrade(r) {
+			t.Error("native ChatGPT summary must use websocket")
+			http.Error(w, "websocket required", http.StatusUpgradeRequired)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
 		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body["model"] != "gpt-test-native" {
-			t.Errorf("summary model: %v", body["model"])
+		if err := conn.ReadJSON(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		if body["type"] != "response.create" || body["model"] != "gpt-test-native" {
+			t.Errorf("summary frame: %#v", body)
 		}
 		encoded, _ := json.Marshal(body)
 		if !bytes.Contains(encoded, []byte("official-ciphertext")) {
@@ -123,8 +195,11 @@ func TestNativeCompactionModelSwitch(t *testing.T) {
 			t.Error("summary must not execute tools")
 		}
 		summaries.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"native-summary\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Remember ORCHID-7319\"}]}]}}\n\n")
+		_ = conn.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{
+			"id": "native-summary", "status": "completed", "output": []any{map[string]any{
+				"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "Remember ORCHID-7319"}},
+			}},
+		}})
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL + "/backend-api/codex")

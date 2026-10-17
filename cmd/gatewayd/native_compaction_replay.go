@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // Only the owning provider can read a native capsule. Convert it once into a
@@ -130,14 +132,14 @@ func (b *nativeCompactionBridge) summarize(ctx context.Context, original *http.R
 	if err != nil {
 		return "", err
 	}
-	target := b.openaiTarget
-	if original.Header.Get("ChatGPT-Account-ID") != "" {
-		target = b.chatgptTarget
-	}
-	endpoint := *target
-	endpoint.Path = joinURLPath(target.Path, "responses")
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
+	if original.Header.Get("ChatGPT-Account-ID") != "" {
+		return b.summarizeChatGPTWebsocket(ctx, original, model, body)
+	}
+	target := b.openaiTarget
+	endpoint := *target
+	endpoint.Path = joinURLPath(target.Path, "responses")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -188,4 +190,98 @@ func (b *nativeCompactionBridge) summarize(ctx context.Context, original *http.R
 		return "", fmt.Errorf("official history restoration returned no continuation summary; no context was discarded")
 	}
 	return summary, nil
+}
+
+func (b *nativeCompactionBridge) summarizeChatGPTWebsocket(ctx context.Context, original *http.Request, model string, body []byte) (string, error) {
+	var message map[string]any
+	if err := json.Unmarshal(body, &message); err != nil {
+		return "", err
+	}
+	message["type"] = "response.create"
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return "", err
+	}
+
+	target := b.chatgptTarget
+	endpoint := url.URL{
+		Scheme:   target.Scheme,
+		Host:     target.Host,
+		Path:     joinURLPath(target.Path, "responses"),
+		RawQuery: target.RawQuery,
+	}
+	switch endpoint.Scheme {
+	case "http":
+		endpoint.Scheme = "ws"
+	case "https":
+		endpoint.Scheme = "wss"
+	}
+	header := original.Header.Clone()
+	for _, name := range []string{
+		"Connection", "Upgrade", "Sec-WebSocket-Key",
+		"Sec-WebSocket-Version", "Sec-WebSocket-Extensions", "Sec-WebSocket-Protocol",
+	} {
+		header.Del(name)
+	}
+	header.Set("X-Codex-Routing-Hint", "model="+model)
+	dialer := websocket.Dialer{
+		Subprotocols:     websocket.Subprotocols(original),
+		HandshakeTimeout: 15 * time.Second,
+		ReadBufferSize:   64 * 1024,
+		WriteBufferSize:  1 << 20,
+	}
+	conn, response, err := dialer.DialContext(ctx, endpoint.String(), header)
+	if err != nil {
+		if response != nil {
+			return "", fmt.Errorf("restore native compacted history websocket handshake returned HTTP %d: %w", response.StatusCode, err)
+		}
+		return "", fmt.Errorf("restore native compacted history websocket handshake: %w", err)
+	}
+	defer conn.Close()
+	if b.logger != nil {
+		b.logger.write(map[string]any{"event": "native_compaction_restore_connected", "transport": "websocket", "model": model})
+	}
+	deadline, ok := ctx.Deadline()
+	if ok {
+		_ = conn.SetWriteDeadline(deadline)
+		_ = conn.SetReadDeadline(deadline)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		return "", fmt.Errorf("restore native compacted history websocket write: %w", err)
+	}
+
+	collected := make([]json.RawMessage, 0, 8)
+	var text strings.Builder
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", fmt.Errorf("restore native compacted history websocket read: %w", err)
+		}
+		var event map[string]any
+		if json.Unmarshal(raw, &event) != nil {
+			continue
+		}
+		typeName := stringOrEmpty(event["type"])
+		if typeName == "response.output_item.done" {
+			if item := rawOutputItemFromEvent(raw); len(item) > 0 {
+				collected = append(collected, item)
+			}
+		}
+		switch typeName {
+		case "response.output_text.delta":
+			text.WriteString(stringOrEmpty(event["delta"]))
+		case "response.completed":
+			output, _ := responseOutputFromRawEvent(raw, collected)
+			summary := extractWopalCompactionSummary(output, text.String())
+			if summary == "" {
+				return "", fmt.Errorf("official history restoration returned no continuation summary; no context was discarded")
+			}
+			return summary, nil
+		case "error", "response.failed", "response.incomplete":
+			return "", fmt.Errorf("official history restoration did not complete; no context was discarded")
+		}
+	}
 }
