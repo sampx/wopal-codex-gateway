@@ -64,7 +64,7 @@ func run() error {
 		"event": "gateway_starting", "host": gateway.Listen.Host, "port": gateway.Listen.Port,
 		"wopal_models": len(gateway.WopalAI.Models), "ollama_enabled": false, "relay_port": nil,
 	})
-	quotaGuard := newOfficialQuotaGuard(logger)
+	quotaGuard := newOfficialQuotaGuardWithState(logger, filepath.Join(root, "runtime", "official-quota-state.json"), time.Now())
 
 	builder := cliproxy.NewBuilder().
 		WithConfig(cliConfig).

@@ -1,9 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,14 +34,126 @@ type officialQuotaAccountState struct {
 }
 
 type officialQuotaGuard struct {
-	mu            sync.RWMutex
-	accounts      map[string]officialQuotaAccountState
-	latestAccount string
-	logger        *activityLogger
+	mu              sync.RWMutex
+	accounts        map[string]officialQuotaAccountState
+	latestAccount   string
+	persistencePath string
+	logger          *activityLogger
+}
+
+type officialQuotaPersistedState struct {
+	Version       int                                  `json:"version"`
+	Accounts      map[string]officialQuotaAccountState `json:"accounts,omitempty"`
+	LatestAccount string                               `json:"latest_account,omitempty"`
 }
 
 func newOfficialQuotaGuard(logger *activityLogger) *officialQuotaGuard {
 	return &officialQuotaGuard{accounts: make(map[string]officialQuotaAccountState), logger: logger}
+}
+
+func newOfficialQuotaGuardWithState(logger *activityLogger, statePath string, now time.Time) *officialQuotaGuard {
+	guard := newOfficialQuotaGuard(logger)
+	guard.persistencePath = strings.TrimSpace(statePath)
+	guard.loadPersisted(now)
+	return guard
+}
+
+func quotaAccountKey(accountID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(accountID)))
+	return hex.EncodeToString(sum[:])
+}
+
+func activeQuotaState(state officialQuotaAccountState, now time.Time) (officialQuotaAccountState, bool) {
+	if state.FiveHour != nil && !now.Before(state.FiveHour.ResetAt) {
+		state.FiveHour = nil
+	}
+	if state.Weekly != nil && !now.Before(state.Weekly.ResetAt) {
+		state.Weekly = nil
+	}
+	return state, state.FiveHour != nil || state.Weekly != nil
+}
+
+func (g *officialQuotaGuard) loadPersisted(now time.Time) {
+	if g == nil || g.persistencePath == "" {
+		return
+	}
+	raw, err := os.ReadFile(g.persistencePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			g.logger.write(map[string]any{"event": "official_quota_state_load_failed", "error": err.Error()})
+		}
+		return
+	}
+	var persisted officialQuotaPersistedState
+	if json.Unmarshal(raw, &persisted) != nil || persisted.Version != 1 {
+		g.logger.write(map[string]any{"event": "official_quota_state_load_failed", "error": "invalid persisted quota state"})
+		return
+	}
+	for key, state := range persisted.Accounts {
+		if active, ok := activeQuotaState(state, now); ok {
+			g.accounts[key] = active
+		}
+	}
+	if _, ok := g.accounts[persisted.LatestAccount]; ok {
+		g.latestAccount = persisted.LatestAccount
+	}
+	if g.latestAccount == "" {
+		for key := range g.accounts {
+			g.latestAccount = key
+			break
+		}
+	}
+	if len(g.accounts) > 0 {
+		g.logger.write(map[string]any{"event": "official_quota_state_restored"})
+	}
+}
+
+func (g *officialQuotaGuard) persist(now time.Time) {
+	if g == nil || g.persistencePath == "" {
+		return
+	}
+	g.mu.RLock()
+	accounts := make(map[string]officialQuotaAccountState, len(g.accounts))
+	for key, state := range g.accounts {
+		if active, ok := activeQuotaState(state, now); ok {
+			accounts[key] = active
+		}
+	}
+	latest := g.latestAccount
+	g.mu.RUnlock()
+	payload, err := json.Marshal(officialQuotaPersistedState{Version: 1, Accounts: accounts, LatestAccount: latest})
+	if err != nil {
+		g.logger.write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
+		return
+	}
+	dir := filepath.Dir(g.persistencePath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		g.logger.write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".official-quota-state-*.tmp")
+	if err != nil {
+		g.logger.write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
+		return
+	}
+	tmpPath := tmp.Name()
+	ok := false
+	if err = tmp.Chmod(0o600); err == nil {
+		_, err = tmp.Write(payload)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmpPath, g.persistencePath)
+		ok = err == nil
+	}
+	if !ok {
+		g.logger.write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
+	}
 }
 
 func chatGPTAccountID(req *http.Request) string {
@@ -67,12 +183,17 @@ func (g *officialQuotaGuard) blocked(accountID string, now time.Time) (bool, str
 	if g == nil || strings.TrimSpace(accountID) == "" {
 		return false, ""
 	}
+	key := quotaAccountKey(accountID)
 	g.mu.RLock()
-	state, ok := g.accounts[accountID]
+	state, ok := g.accounts[key]
 	g.mu.RUnlock()
 	if !ok {
 		return false, ""
 	}
+	return quotaStateBlocked(state, now)
+}
+
+func quotaStateBlocked(state officialQuotaAccountState, now time.Time) (bool, string) {
 	if quotaWindowBlocked(state.FiveHour, officialFiveHourStopPercent, now) {
 		return true, "five_hour"
 	}
@@ -93,6 +214,7 @@ func (g *officialQuotaGuard) observeHeaders(accountID string, headers http.Heade
 	if g == nil || strings.TrimSpace(accountID) == "" || headers == nil {
 		return
 	}
+	changed := false
 	for _, name := range []string{"Primary", "Secondary"} {
 		prefix := "X-Codex-" + name + "-"
 		used, errUsed := strconv.ParseFloat(strings.TrimSpace(headers.Get(prefix+"Used-Percent")), 64)
@@ -104,7 +226,12 @@ func (g *officialQuotaGuard) observeHeaders(accountID string, headers http.Heade
 		if !ok {
 			continue
 		}
-		g.observeWindow(accountID, officialQuotaWindow{UsedPercent: used, WindowMinutes: minutes, ResetAt: resetAt, ObservedAt: now})
+		if g.observeWindow(accountID, officialQuotaWindow{UsedPercent: used, WindowMinutes: minutes, ResetAt: resetAt, ObservedAt: now}) {
+			changed = true
+		}
+	}
+	if changed {
+		g.persist(now)
 	}
 }
 
@@ -150,6 +277,7 @@ func (g *officialQuotaGuard) observeRateLimitPayload(accountID string, payload [
 	if rateLimits == nil {
 		return
 	}
+	changed := false
 	for _, name := range []string{"primary", "secondary"} {
 		window := objectValue(rateLimits, name)
 		if window == nil {
@@ -164,7 +292,12 @@ func (g *officialQuotaGuard) observeRateLimitPayload(accountID string, payload [
 		if !ok {
 			continue
 		}
-		g.observeWindow(accountID, officialQuotaWindow{UsedPercent: used, WindowMinutes: minutes, ResetAt: resetAt, ObservedAt: now})
+		if g.observeWindow(accountID, officialQuotaWindow{UsedPercent: used, WindowMinutes: minutes, ResetAt: resetAt, ObservedAt: now}) {
+			changed = true
+		}
+	}
+	if changed {
+		g.persist(now)
 	}
 }
 
@@ -178,20 +311,30 @@ func quotaResetAtFromObject(window map[string]any, now time.Time) (time.Time, bo
 	return time.Time{}, false
 }
 
-func (g *officialQuotaGuard) observeWindow(accountID string, window officialQuotaWindow) {
+func (g *officialQuotaGuard) observeWindow(accountID string, window officialQuotaWindow) bool {
 	if window.WindowMinutes != officialFiveHourWindowMinutes && window.WindowMinutes != officialWeeklyWindowMinutes {
-		return
+		return false
 	}
+	key := quotaAccountKey(accountID)
 	g.mu.Lock()
-	state := g.accounts[accountID]
+	state := g.accounts[key]
+	current := state.Weekly
+	if window.WindowMinutes == officialFiveHourWindowMinutes {
+		current = state.FiveHour
+	}
+	if current != nil && current.UsedPercent == window.UsedPercent && current.WindowMinutes == window.WindowMinutes && current.ResetAt.Equal(window.ResetAt) {
+		g.latestAccount = key
+		g.mu.Unlock()
+		return false
+	}
 	copy := window
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
 		state.FiveHour = &copy
 	} else {
 		state.Weekly = &copy
 	}
-	g.accounts[accountID] = state
-	g.latestAccount = accountID
+	g.accounts[key] = state
+	g.latestAccount = key
 	g.mu.Unlock()
 
 	threshold := officialWeeklyStopPercent
@@ -208,6 +351,7 @@ func (g *officialQuotaGuard) observeWindow(accountID string, window officialQuot
 		"reset_at":       window.ResetAt.UTC().Format(time.RFC3339),
 		"reserve_active": window.UsedPercent >= threshold && window.ObservedAt.Before(window.ResetAt),
 	})
+	return true
 }
 
 func (g *officialQuotaGuard) status(now time.Time) map[string]any {
@@ -227,7 +371,7 @@ func (g *officialQuotaGuard) status(now time.Time) map[string]any {
 		return result
 	}
 	result["state"] = "open"
-	if blocked, reason := g.blocked(accountID, now); blocked {
+	if blocked, reason := quotaStateBlocked(state, now); blocked {
 		result["state"] = "protected"
 		result["reason"] = reason
 	}

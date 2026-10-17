@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -253,5 +255,41 @@ func TestOfficialWebsocketQuotaGuardAllowsLuna(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("quota-exempt Luna websocket turn did not reach upstream")
+	}
+}
+
+func TestOfficialQuotaGuardPersistsProtectedStateAcrossRestart(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0)
+	statePath := filepath.Join(t.TempDir(), "official-quota-state.json")
+	guard := newOfficialQuotaGuardWithState(nil, statePath, now)
+	guard.observeRateLimitPayload("private-account-id", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600},"secondary":{"used_percent":53,"window_minutes":10080,"reset_after_seconds":7200}}}`), now)
+
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("private-account-id")) {
+		t.Fatal("quota persistence leaked the raw ChatGPT account id")
+	}
+
+	reloaded := newOfficialQuotaGuardWithState(nil, statePath, now.Add(time.Second))
+	if blocked, reason := reloaded.blockedModel("private-account-id", "gpt-6.1-sol", now.Add(time.Second)); !blocked || reason != "five_hour" {
+		t.Fatalf("reloaded guard = blocked:%v reason:%q", blocked, reason)
+	}
+	if blocked, reason := reloaded.blockedModel("another-account-after-restart", "gpt-6.1-sol", now.Add(time.Second)); blocked {
+		t.Fatalf("persisted quota state leaked across accounts: reason=%q", reason)
+	}
+	if blocked, _ := reloaded.blockedModel("private-account-id", "gpt-6.1-sol", now.Add(3601*time.Second)); blocked {
+		t.Fatal("persisted five-hour protection survived its reset time")
+	}
+}
+
+func TestOfficialQuotaGuardStatusUsesHashedAccountState(t *testing.T) {
+	now := time.Unix(1_900_000_000, 0)
+	guard := newOfficialQuotaGuard(nil)
+	guard.observeRateLimitPayload("private-account-id", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), now)
+	status := guard.status(now)
+	if status["state"] != "protected" || status["reason"] != "five_hour" {
+		t.Fatalf("quota status = %#v", status)
 	}
 }
