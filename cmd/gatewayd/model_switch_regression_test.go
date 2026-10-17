@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,6 +42,42 @@ func TestCmbReasoningSanitizedAcrossTransports(t *testing.T) {
 				t.Fatalf("wrong reasoning sanitization: %s", raw)
 			}
 		})
+	}
+}
+
+func TestNativeCompactionRestoreStopsAfterCompletedEvent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "wopal-codex-gateway-models.json"), []byte(`{"models":[{"slug":"gpt-native","visibility":"list","priority":0}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"restored summary\"}\n\n")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"restored summary\"}]}]}}\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL + "/backend-api/codex")
+	bridge := &nativeCompactionBridge{chatgptTarget: target, openaiTarget: target, summaries: make(map[[32]byte]string)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req.Header.Set("Authorization", "Bearer official-token")
+	req.Header.Set("ChatGPT-Account-ID", "acct-test")
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	summary, err := bridge.summarize(ctx, req, []any{map[string]any{"type": "compaction", "id": "cmp-native", "encrypted_content": "official-ciphertext"}})
+	if err != nil {
+		t.Fatalf("completed restore must return before stream EOF: %v", err)
+	}
+	if summary != "restored summary" {
+		t.Fatalf("summary = %q", summary)
+	}
+	if elapsed := time.Since(started); elapsed >= 200*time.Millisecond {
+		t.Fatalf("restore waited for stream EOF after completion: %s", elapsed)
 	}
 }
 

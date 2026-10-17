@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -161,6 +162,7 @@ func (b *nativeCompactionBridge) summarize(ctx context.Context, original *http.R
 	var output []byte
 	var text strings.Builder
 	completed := false
+	stopAfterCompleted := errors.New("stop reading after response.completed")
 	err = readSSE(io.LimitReader(resp.Body, 16<<20), func(raw []byte) error {
 		var event map[string]any
 		if json.Unmarshal(raw, &event) != nil {
@@ -172,12 +174,13 @@ func (b *nativeCompactionBridge) summarize(ctx context.Context, original *http.R
 		case "response.completed":
 			completed = true
 			output, _ = responseOutputFromRawEvent(raw, nil)
+			return stopAfterCompleted
 		case "error", "response.failed", "response.incomplete":
 			return fmt.Errorf("official history restoration did not complete; no context was discarded")
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, stopAfterCompleted) {
 		return "", err
 	}
 	summary := extractWopalCompactionSummary(output, text.String())
