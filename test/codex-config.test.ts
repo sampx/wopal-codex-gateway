@@ -5,7 +5,7 @@ import { applyGatewayConfig, captureRestoreState, restoreGatewayConfig } from '.
 const clean = `model = "gpt-6.1-sol"\nmodel_reasoning_effort = "medium"\n\n[features]\nmemories = true\n`;
 
 test('install adds only gateway-owned root values and preserves existing config', () => {
-  const next = applyGatewayConfig(clean, '/Users/sam/.codex/wopal-codex-gateway-models.json', 'http://127.0.0.1:11435/v1');
+  const next = applyGatewayConfig(clean, '/Users/example/.codex/wopal-codex-gateway-models.json', 'http://127.0.0.1:11435/v1');
   assert.match(next, /model = "gpt-6\.1-sol"/);
   assert.match(next, /model_catalog_json = "\/Users\/sam\/\.codex\/wopal-codex-gateway-models\.json"/);
   assert.match(next, /openai_base_url = "http:\/\/127\.0\.0\.1:11435\/v1"/);

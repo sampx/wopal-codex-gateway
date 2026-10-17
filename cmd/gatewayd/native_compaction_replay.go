@@ -27,6 +27,7 @@ type nativeCompactionBridge struct {
 	mu                          sync.Mutex
 	summaries                   map[[32]byte]string
 	logger                      *activityLogger
+	quotaGuard                  *officialQuotaGuard
 }
 
 func nativeCompactionModel() (string, error) {
@@ -113,6 +114,9 @@ func (b *nativeCompactionBridge) expand(ctx context.Context, req *http.Request, 
 }
 
 func (b *nativeCompactionBridge) summarize(ctx context.Context, original *http.Request, input []any) (string, error) {
+	if blocked, _ := b.quotaGuard.blocked(chatGPTAccountID(original), time.Now()); blocked {
+		return "", fmt.Errorf("official quota reserve is protected; native compaction restore is paused until the quota window resets")
+	}
 	if strings.TrimSpace(original.Header.Get("Authorization")) == "" || original.Header.Get("Authorization") == "Bearer "+localAccessKey {
 		return "", fmt.Errorf("official credentials are required to restore native compacted history; switch to an official model first")
 	}
@@ -158,6 +162,7 @@ func (b *nativeCompactionBridge) summarize(ctx context.Context, original *http.R
 		return "", fmt.Errorf("restore native compacted history: %w", err)
 	}
 	defer resp.Body.Close()
+	b.quotaGuard.observeHeaders(chatGPTAccountID(original), resp.Header, time.Now())
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("official history restoration returned HTTP %d; no context was discarded", resp.StatusCode)
 	}
@@ -166,6 +171,7 @@ func (b *nativeCompactionBridge) summarize(ctx context.Context, original *http.R
 	completed := false
 	stopAfterCompleted := errors.New("stop reading after response.completed")
 	err = readSSE(io.LimitReader(resp.Body, 16<<20), func(raw []byte) error {
+		b.quotaGuard.observeRateLimitPayload(chatGPTAccountID(original), raw, time.Now())
 		var event map[string]any
 		if json.Unmarshal(raw, &event) != nil {
 			return nil
@@ -231,6 +237,9 @@ func (b *nativeCompactionBridge) summarizeChatGPTWebsocket(ctx context.Context, 
 		WriteBufferSize:  1 << 20,
 	}
 	conn, response, err := dialer.DialContext(ctx, endpoint.String(), header)
+	if response != nil {
+		b.quotaGuard.observeHeaders(chatGPTAccountID(original), response.Header, time.Now())
+	}
 	if err != nil {
 		if response != nil {
 			return "", fmt.Errorf("restore native compacted history websocket handshake returned HTTP %d: %w", response.StatusCode, err)
@@ -260,6 +269,7 @@ func (b *nativeCompactionBridge) summarizeChatGPTWebsocket(ctx context.Context, 
 			}
 			return "", fmt.Errorf("restore native compacted history websocket read: %w", err)
 		}
+		b.quotaGuard.observeRateLimitPayload(chatGPTAccountID(original), raw, time.Now())
 		var event map[string]any
 		if json.Unmarshal(raw, &event) != nil {
 			continue

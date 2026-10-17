@@ -24,11 +24,11 @@ test('fetchWopalModels reports upstream auth failures without exposing the token
   }), { status: 401, headers: { 'content-type': 'application/json' } });
 
   await assert.rejects(
-    fetchWopalModels('https://example.test/v1/', 'sk-secret-value', fakeFetch),
+    fetchWopalModels('https://example.test/v1/', 'test-api-key', fakeFetch),
     (error: unknown) => {
       assert.match(String(error), /HTTP 401/);
       assert.match(String(error), /Invalid token/);
-      assert.doesNotMatch(String(error), /sk-secret-value/);
+      assert.doesNotMatch(String(error), /test-api-key/);
       return true;
     },
   );

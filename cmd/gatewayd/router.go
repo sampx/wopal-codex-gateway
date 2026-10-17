@@ -43,17 +43,26 @@ func classifyModel(model string) routeKind {
 }
 
 func routingMiddleware(logger *activityLogger) gin.HandlerFunc {
-	return routingMiddlewareWithTargets(
+	return routingMiddlewareWithQuotaGuard(logger, newOfficialQuotaGuard(logger))
+}
+
+func routingMiddlewareWithQuotaGuard(logger *activityLogger, quotaGuard *officialQuotaGuard) gin.HandlerFunc {
+	return routingMiddlewareWithTargetsAndQuotaGuard(
 		logger,
 		mustURL("https://chatgpt.com/backend-api/codex"),
 		mustURL("https://api.openai.com/v1"),
+		quotaGuard,
 	)
 }
 
 func routingMiddlewareWithTargets(logger *activityLogger, chatgptTarget, openaiTarget *url.URL) gin.HandlerFunc {
-	chatgptProxy := newOfficialReverseProxy(chatgptTarget, true, logger)
-	openaiProxy := newOfficialReverseProxy(openaiTarget, false, logger)
-	nativeReplay := &nativeCompactionBridge{chatgptTarget: chatgptTarget, openaiTarget: openaiTarget, logger: logger}
+	return routingMiddlewareWithTargetsAndQuotaGuard(logger, chatgptTarget, openaiTarget, newOfficialQuotaGuard(logger))
+}
+
+func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTarget, openaiTarget *url.URL, quotaGuard *officialQuotaGuard) gin.HandlerFunc {
+	chatgptProxy := newOfficialReverseProxy(chatgptTarget, true, logger, quotaGuard)
+	openaiProxy := newOfficialReverseProxy(openaiTarget, false, logger, quotaGuard)
+	nativeReplay := &nativeCompactionBridge{chatgptTarget: chatgptTarget, openaiTarget: openaiTarget, logger: logger, quotaGuard: quotaGuard}
 
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -98,15 +107,24 @@ func routingMiddlewareWithTargets(logger *activityLogger, chatgptTarget, openaiT
 			provider := "openai"
 			proxy := openaiProxy
 			target := openaiTarget
-			if strings.TrimSpace(c.Request.Header.Get("ChatGPT-Account-ID")) != "" {
+			accountID := chatGPTAccountID(c.Request)
+			if accountID != "" {
 				provider = "chatgpt"
 				proxy = chatgptProxy
 				target = chatgptTarget
+				if blocked, reason := quotaGuard.blocked(accountID, time.Now()); blocked {
+					logger.write(map[string]any{"event": "official_quota_guard_blocked", "model": model, "path": path, "reason": reason})
+					c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": gin.H{
+						"code": "official_quota_guard", "type": "invalid_request_error",
+						"message": "official quota reserve is protected; switch to a wopal-ai model until the limit resets",
+					}})
+					return
+				}
 			}
 			logger.write(map[string]any{"event": "route_selected", "provider": provider, "model": model, "path": path})
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Abort()
-				serveOfficialWebsocketBridge(c, logger, target)
+				serveOfficialWebsocketBridge(c, logger, target, quotaGuard, accountID)
 				return
 			}
 			rewriteOfficialRequestBody(c.Request, logger)
@@ -193,7 +211,7 @@ func parseRoutingHintModel(value string) string {
 	return ""
 }
 
-func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activityLogger) *httputil.ReverseProxy {
+func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activityLogger, quotaGuard *officialQuotaGuard) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		FlushInterval: -1,
 		Director: func(req *http.Request) {
@@ -213,6 +231,9 @@ func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activityLogg
 		},
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		if chatgpt {
+			quotaGuard.observeHeaders(chatGPTAccountID(resp.Request), resp.Header, time.Now())
+		}
 		logger.write(map[string]any{
 			"event": "official_upstream_connected", "upstream": target.Host,
 			"status": resp.StatusCode, "protocol": resp.Proto, "timestamp": time.Now().UTC().Format(time.RFC3339Nano),

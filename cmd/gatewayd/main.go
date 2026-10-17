@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	sdkapi "github.com/router-for-me/CLIProxyAPI/v8/sdk/api"
@@ -63,23 +64,25 @@ func run() error {
 		"event": "gateway_starting", "host": gateway.Listen.Host, "port": gateway.Listen.Port,
 		"wopal_models": len(gateway.WopalAI.Models), "ollama_enabled": false, "relay_port": nil,
 	})
+	quotaGuard := newOfficialQuotaGuard(logger)
 
 	builder := cliproxy.NewBuilder().
 		WithConfig(cliConfig).
 		WithConfigPath(cliConfigPath).
 		WithServerOptions(
-			sdkapi.WithMiddleware(routingMiddleware(logger)),
+			sdkapi.WithMiddleware(routingMiddlewareWithQuotaGuard(logger, quotaGuard)),
 			sdkapi.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *sdkconfig.Config) {
 				engine.GET("/_health", func(c *gin.Context) {
 					c.JSON(200, gin.H{"ok": true, "mode": "single-process", "wopal_models": len(gateway.WopalAI.Models)})
 				})
 				engine.GET("/_status", func(c *gin.Context) {
 					c.JSON(200, gin.H{
-						"ok":       true,
-						"listen":   fmt.Sprintf("%s:%d", gateway.Listen.Host, gateway.Listen.Port),
-						"official": "native-pass-through",
-						"wopal":    "cliproxy-responses-to-chat",
-						"ollama":   "disabled",
+						"ok":             true,
+						"listen":         fmt.Sprintf("%s:%d", gateway.Listen.Host, gateway.Listen.Port),
+						"official":       "native-pass-through",
+						"official_quota": quotaGuard.status(time.Now()),
+						"wopal":          "cliproxy-responses-to-chat",
+						"ollama":         "disabled",
 					})
 				})
 			}),

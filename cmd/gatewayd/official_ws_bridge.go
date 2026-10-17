@@ -25,7 +25,7 @@ const (
 
 var officialWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
-func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target *url.URL) {
+func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target *url.URL, quotaGuard *officialQuotaGuard, accountID string) {
 	// Dial upstream before upgrading the client so a failed dial still returns
 	// a clean HTTP error instead of a half-open websocket.
 	upstreamConn, upstreamResponse, err := dialOfficialWebsocketUpstream(c, target)
@@ -38,6 +38,7 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target
 	// on, then let gorilla own the websocket-specific ones.
 	responseHeader := http.Header{}
 	if upstreamResponse != nil {
+		quotaGuard.observeHeaders(accountID, upstreamResponse.Header, time.Now())
 		responseHeader = upstreamResponse.Header.Clone()
 	}
 	for _, name := range []string{
@@ -64,8 +65,8 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target
 	})
 
 	done := make(chan struct{}, 2)
-	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger)
-	go pumpOfficialWebsocket(upstreamConn, clientConn, done, false, logger)
+	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger, quotaGuard, accountID)
+	go pumpOfficialWebsocket(upstreamConn, clientConn, done, false, logger, quotaGuard, accountID)
 
 	<-done
 	_ = clientConn.Close()
@@ -78,7 +79,7 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target
 
 // pumpOfficialWebsocket copies frames one direction. Each connection has exactly
 // one reader and one writer goroutine, which websocket.Conn requires.
-func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activityLogger) {
+func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activityLogger, quotaGuard *officialQuotaGuard, accountID string) {
 	defer func() { done <- struct{}{} }()
 	for {
 		messageType, payload, err := source.ReadMessage()
@@ -100,12 +101,23 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 			}
 			return
 		}
-		if rewriteClientFrames && (messageType == websocket.TextMessage || messageType == websocket.BinaryMessage) &&
-			reconnectForWebsocketRouteChange(source, routeOfficial, payload, logger) {
+		isDataFrame := messageType == websocket.TextMessage || messageType == websocket.BinaryMessage
+		if rewriteClientFrames && isDataFrame && reconnectForWebsocketRouteChange(source, routeOfficial, payload, logger) {
 			return
 		}
-		if rewriteClientFrames && (messageType == websocket.TextMessage || messageType == websocket.BinaryMessage) &&
-			containsOfficialSanitizeMarker(payload) {
+		if rewriteClientFrames && isDataFrame && isOfficialInferenceFrame(payload) {
+			if blocked, reason := quotaGuard.blocked(accountID, time.Now()); blocked {
+				logger.write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "reason": reason})
+				_ = source.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(
+					websocket.CloseServiceRestart, "official quota reserve protected; switch to a wopal-ai model",
+				), time.Now().Add(time.Second))
+				return
+			}
+		}
+		if !rewriteClientFrames && isDataFrame {
+			quotaGuard.observeRateLimitPayload(accountID, payload, time.Now())
+		}
+		if rewriteClientFrames && isDataFrame && containsOfficialSanitizeMarker(payload) {
 			if rewritten, ok := sanitizeOfficialWebsocketFrame(payload); ok {
 				payload = rewritten
 			}
@@ -172,4 +184,14 @@ func dialOfficialWebsocketUpstream(c *gin.Context, target *url.URL) (*websocket.
 		return nil, response, err
 	}
 	return conn, response, nil
+}
+
+func isOfficialInferenceFrame(payload []byte) bool {
+	var request struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(payload, &request) != nil {
+		return false
+	}
+	return request.Type == "response.create" || request.Type == "response.append"
 }
