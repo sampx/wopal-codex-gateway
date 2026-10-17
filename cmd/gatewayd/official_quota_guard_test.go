@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -77,26 +78,65 @@ func TestRoutingQuotaGuardBlocksOfficialButAllowsWopal(t *testing.T) {
 	engine.POST("/v1/responses", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"provider": "wopal"})
 	})
+	downstream := httptest.NewServer(engine)
+	defer downstream.Close()
 
-	official := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"gpt-6.1-sol","input":[]}`))
-	official.Header.Set("Content-Type", "application/json")
-	official.Header.Set("ChatGPT-Account-ID", "acct")
-	officialRecorder := httptest.NewRecorder()
-	engine.ServeHTTP(officialRecorder, official)
-	if officialRecorder.Code != http.StatusConflict || !bytes.Contains(officialRecorder.Body.Bytes(), []byte("official_quota_guard")) {
-		t.Fatalf("official guard response = %d %s", officialRecorder.Code, officialRecorder.Body.String())
+	post := func(model string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, downstream.URL+"/v1/responses", bytes.NewBufferString(`{"model":"`+model+`","input":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("ChatGPT-Account-ID", "acct")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, string(body)
+	}
+
+	status, body := post("gpt-6.1-sol")
+	if status != http.StatusConflict || !strings.Contains(body, "official_quota_guard") {
+		t.Fatalf("official guard response = %d %s", status, body)
 	}
 	if upstreamHits != 0 {
 		t.Fatalf("protected official request reached upstream %d times", upstreamHits)
 	}
 
-	wopal := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"model":"wopal-ai/deepseek-v4.1-flash-free","input":[]}`))
-	wopal.Header.Set("Content-Type", "application/json")
-	wopal.Header.Set("ChatGPT-Account-ID", "acct")
-	wopalRecorder := httptest.NewRecorder()
-	engine.ServeHTTP(wopalRecorder, wopal)
-	if wopalRecorder.Code != http.StatusOK {
-		t.Fatalf("wopal request was blocked: %d %s", wopalRecorder.Code, wopalRecorder.Body.String())
+	for _, model := range []string{"gpt-6-luna", "codex-auto-review"} {
+		status, body = post(model)
+		if status != http.StatusOK {
+			t.Fatalf("quota-exempt model %s was blocked: %d %s", model, status, body)
+		}
+	}
+	if upstreamHits != 2 {
+		t.Fatalf("quota-exempt official models reached upstream %d times, want 2", upstreamHits)
+	}
+
+	status, body = post("wopal-ai/deepseek-v4.1-flash-free")
+	if status != http.StatusOK {
+		t.Fatalf("wopal request was blocked: %d %s", status, body)
+	}
+}
+
+func TestOfficialQuotaGuardModelExemptions(t *testing.T) {
+	now := time.Now()
+	guard := newOfficialQuotaGuard(nil)
+	guard.observeRateLimitPayload("acct", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), now)
+
+	for _, model := range []string{"gpt-6-luna", "codex-auto-review"} {
+		if blocked, reason := guard.blockedModel("acct", model, now); blocked {
+			t.Fatalf("quota-exempt model %s blocked with reason %q", model, reason)
+		}
+	}
+	if blocked, reason := guard.blockedModel("acct", "gpt-6.1-sol", now); !blocked || reason != "five_hour" {
+		t.Fatalf("metered model guard = blocked:%v reason:%q", blocked, reason)
 	}
 }
 
@@ -166,5 +206,52 @@ func TestOfficialWebsocketQuotaGuardStopsNextTurn(t *testing.T) {
 	case payload := <-upstreamFrames:
 		t.Fatalf("protected websocket turn reached upstream: %s", payload)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestOfficialWebsocketQuotaGuardAllowsLuna(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	guard := newOfficialQuotaGuard(nil)
+	guard.observeRateLimitPayload("acct-luna", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), time.Now())
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstreamFrames := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if _, payload, err := conn.ReadMessage(); err == nil {
+			upstreamFrames <- payload
+		}
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL + "/backend-api/codex")
+
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithTargetsAndQuotaGuard(nil, target, target, guard))
+	downstream := httptest.NewServer(engine)
+	defer downstream.Close()
+
+	header := http.Header{}
+	header.Set("ChatGPT-Account-ID", "acct-luna")
+	header.Set("X-Codex-Routing-Hint", "model=gpt-6-luna")
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-6-luna", "input": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case payload := <-upstreamFrames:
+		if !bytes.Contains(payload, []byte(`"model":"gpt-6-luna"`)) {
+			t.Fatalf("unexpected Luna upstream frame: %s", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("quota-exempt Luna websocket turn did not reach upstream")
 	}
 }

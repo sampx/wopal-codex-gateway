@@ -47,6 +47,22 @@ func chatGPTAccountID(req *http.Request) string {
 	return strings.TrimSpace(req.Header.Get("ChatGPT-Account-ID"))
 }
 
+func quotaExemptOfficialModel(model string) bool {
+	switch strings.TrimSpace(model) {
+	case "gpt-6-luna", "codex-auto-review":
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *officialQuotaGuard) blockedModel(accountID, model string, now time.Time) (bool, string) {
+	if quotaExemptOfficialModel(model) {
+		return false, ""
+	}
+	return g.blocked(accountID, now)
+}
+
 func (g *officialQuotaGuard) blocked(accountID string, now time.Time) (bool, string) {
 	if g == nil || strings.TrimSpace(accountID) == "" {
 		return false, ""

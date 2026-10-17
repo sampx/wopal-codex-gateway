@@ -9,8 +9,10 @@ A local gateway for using native ChatGPT/Codex models and third-party OpenAI-com
 - Bridges Codex WebSocket traffic to third-party HTTP/SSE providers.
 - Preserves conversation state when switching model providers, including compaction compatibility handling.
 - Protects ChatGPT subscription quota before it is completely exhausted:
-  - 5-hour (`300` minute) window: stop native inference at **98% used**.
-  - Weekly (`10080` minute) window: stop native inference at **99% used**.
+  - 5-hour (`300` minute) window: stop metered native inference at **98% used**.
+  - Weekly (`10080` minute) window: stop metered native inference at **99% used**.
+  - `gpt-6-luna` remains available as a low-cost native recovery model.
+  - `codex-auto-review` remains available for approval review flows.
   - Third-party `wopal-ai/*` models remain available while native inference is protected.
   - Protection clears automatically after the reported quota window reset time.
 
@@ -18,7 +20,7 @@ A local gateway for using native ChatGPT/Codex models and third-party OpenAI-com
 
 The daemon observes Codex rate-limit metadata returned by the native ChatGPT route. It identifies quota windows by their reported duration rather than by `primary`/`secondary` position.
 
-When a protected threshold is reached, native `/v1/responses` traffic is rejected locally with `official_quota_guard` instead of forwarding another inference request to ChatGPT. Existing native WebSocket sessions also stop the next native turn before it reaches the upstream.
+When a protected threshold is reached, metered native `/v1/responses` traffic is rejected locally with `official_quota_guard` instead of forwarding another inference request to ChatGPT. Existing native WebSocket sessions apply the same model-aware policy before each turn. `gpt-6-luna` and `codex-auto-review` are explicit recovery exceptions; native compaction restoration remains protected.
 
 `GET /_status` exposes the latest observed quota percentages and reset times without exposing account identifiers or credentials.
 

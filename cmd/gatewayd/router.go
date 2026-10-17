@@ -112,7 +112,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 				provider = "chatgpt"
 				proxy = chatgptProxy
 				target = chatgptTarget
-				if blocked, reason := quotaGuard.blocked(accountID, time.Now()); blocked {
+				if blocked, reason := quotaGuard.blockedModel(accountID, model, time.Now()); blocked {
 					logger.write(map[string]any{"event": "official_quota_guard_blocked", "model": model, "path": path, "reason": reason})
 					c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": gin.H{
 						"code": "official_quota_guard", "type": "invalid_request_error",
@@ -124,7 +124,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 			logger.write(map[string]any{"event": "route_selected", "provider": provider, "model": model, "path": path})
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Abort()
-				serveOfficialWebsocketBridge(c, logger, target, quotaGuard, accountID)
+				serveOfficialWebsocketBridge(c, logger, target, quotaGuard, accountID, model)
 				return
 			}
 			rewriteOfficialRequestBody(c.Request, logger)

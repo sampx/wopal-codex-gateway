@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,7 +26,7 @@ const (
 
 var officialWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
-func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target *url.URL, quotaGuard *officialQuotaGuard, accountID string) {
+func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target *url.URL, quotaGuard *officialQuotaGuard, accountID, boundModel string) {
 	// Dial upstream before upgrading the client so a failed dial still returns
 	// a clean HTTP error instead of a half-open websocket.
 	upstreamConn, upstreamResponse, err := dialOfficialWebsocketUpstream(c, target)
@@ -65,8 +66,8 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target
 	})
 
 	done := make(chan struct{}, 2)
-	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger, quotaGuard, accountID)
-	go pumpOfficialWebsocket(upstreamConn, clientConn, done, false, logger, quotaGuard, accountID)
+	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger, quotaGuard, accountID, boundModel)
+	go pumpOfficialWebsocket(upstreamConn, clientConn, done, false, logger, quotaGuard, accountID, boundModel)
 
 	<-done
 	_ = clientConn.Close()
@@ -79,7 +80,7 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target
 
 // pumpOfficialWebsocket copies frames one direction. Each connection has exactly
 // one reader and one writer goroutine, which websocket.Conn requires.
-func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activityLogger, quotaGuard *officialQuotaGuard, accountID string) {
+func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activityLogger, quotaGuard *officialQuotaGuard, accountID, boundModel string) {
 	defer func() { done <- struct{}{} }()
 	for {
 		messageType, payload, err := source.ReadMessage()
@@ -105,13 +106,15 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 		if rewriteClientFrames && isDataFrame && reconnectForWebsocketRouteChange(source, routeOfficial, payload, logger) {
 			return
 		}
-		if rewriteClientFrames && isDataFrame && isOfficialInferenceFrame(payload) {
-			if blocked, reason := quotaGuard.blocked(accountID, time.Now()); blocked {
-				logger.write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "reason": reason})
-				_ = source.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(
-					websocket.CloseServiceRestart, "official quota reserve protected; switch to a wopal-ai model",
-				), time.Now().Add(time.Second))
-				return
+		if rewriteClientFrames && isDataFrame {
+			if model, ok := officialInferenceModel(payload, boundModel); ok {
+				if blocked, reason := quotaGuard.blockedModel(accountID, model, time.Now()); blocked {
+					logger.write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "model": model, "reason": reason})
+					_ = source.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(
+						websocket.CloseServiceRestart, "official quota reserve protected; switch to gpt-6-luna or a wopal-ai model",
+					), time.Now().Add(time.Second))
+					return
+				}
 			}
 		}
 		if !rewriteClientFrames && isDataFrame {
@@ -186,12 +189,17 @@ func dialOfficialWebsocketUpstream(c *gin.Context, target *url.URL) (*websocket.
 	return conn, response, nil
 }
 
-func isOfficialInferenceFrame(payload []byte) bool {
+func officialInferenceModel(payload []byte, fallback string) (string, bool) {
 	var request struct {
-		Type string `json:"type"`
+		Type  string `json:"type"`
+		Model string `json:"model"`
 	}
-	if json.Unmarshal(payload, &request) != nil {
-		return false
+	if json.Unmarshal(payload, &request) != nil || (request.Type != "response.create" && request.Type != "response.append") {
+		return "", false
 	}
-	return request.Type == "response.create" || request.Type == "response.append"
+	model := strings.TrimSpace(request.Model)
+	if model == "" {
+		model = strings.TrimSpace(fallback)
+	}
+	return model, true
 }
