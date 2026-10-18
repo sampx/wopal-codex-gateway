@@ -41,31 +41,187 @@ Gateway 不负责：
 
 ## 4. 总体架构
 
+### 4.1 CLIProxyAPI 的集成方式
+
+本项目使用开源项目 **CLIProxyAPI**，但不是把请求转发给一个独立运行的 CLIProxyAPI 服务，也不是把其源码复制或 fork 到本仓库中维护。
+
+当前实现把 CLIProxyAPI 作为 Go Module / SDK 依赖直接引入：
+
+```text
+github.com/router-for-me/CLIProxyAPI/v8 v8.0.29
+```
+
+Go daemon 直接使用它提供的 SDK 包：
+
+```text
+sdk/api
+sdk/api/handlers
+sdk/cliproxy
+sdk/config
+```
+
+启动时由 `wopal-codex-gatewayd` 自己调用 `cliproxy.NewBuilder()` 创建服务，再通过 `Build()` / `Run(ctx)` 启动。因此：
+
+- CLIProxyAPI 与 Wopal Gateway 编译进**同一个 Go 二进制**；
+- 运行时只有**一个 `wopal-codex-gatewayd` 进程**；
+- 两者共享**同一个监听地址和端口**，默认是 `127.0.0.1:11435`；
+- 不需要另外启动 `cliproxy` 可执行文件；
+- 不存在“Gateway -> 独立 CLIProxyAPI 进程”的第二跳网络服务。
+
+更准确的关系是：
+
+> **Wopal Gateway 是控制层和兼容层，CLIProxyAPI SDK 是被内嵌的数据面 / provider 适配能力。**
+
+### 4.2 真实进程结构
+
 ```text
 Codex Desktop / Codex CLI
         |
-        | OpenAI Responses 兼容流量
         | HTTP + WebSocket
+        | OpenAI Responses 语义
         v
-127.0.0.1:11435
-Wopal Codex Gateway（Go daemon）
-        |
-        +----------------------+----------------------+
-        |                      |                      |
-        v                      v                      v
-ChatGPT Codex backend     OpenAI API            Wopal AI
-（订阅官方线路）            （API 官方线路）        （OpenAI 兼容）
-                                                  |
-                                                  v
-                                           CLIProxyAPI adapter
++---------------------------------------------------------+
+| wopal-codex-gatewayd                                    |
+| 单进程，监听 127.0.0.1:11435                           |
+|                                                         |
+|  Wopal Gateway 自定义层                                 |
+|  - 路由 / namespace                                    |
+|  - 官方 HTTP / WebSocket 直通                          |
+|  - quota guard / failover / failback                   |
+|  - compaction / wgcp1                                   |
+|  - provider 边界清洗                                   |
+|  - Wopal WebSocket 状态桥                              |
+|             |                                           |
+|             | c.Next() / 本机回环 HTTP                 |
+|             v                                           |
+|  内嵌 CLIProxyAPI SDK                                   |
+|  - Responses HTTP handler                               |
+|  - OpenAI-compatible provider 适配                      |
+|  - Wopal AI / New API 上游转发                         |
+|  - /v1/models 等基础 API                               |
++-------------+---------------------------+---------------+
+              |                           |
+              | 官方路径                  | Wopal 路径
+              v                           v
+      ChatGPT Codex / OpenAI         Wopal AI / New API
 ```
 
-项目分为两个实现层：
+项目仍分为两个本仓库实现层：
 
-- **Go daemon（`cmd/gatewayd`）**：运行时路由、HTTP / WebSocket 协议处理、compaction、quota 状态、provider 边界清洗、会话状态。
+- **Go daemon（`cmd/gatewayd`）**：运行时路由、HTTP / WebSocket 协议处理、compaction、quota 状态、provider 边界清洗、会话状态，以及对 CLIProxyAPI SDK 的嵌入和扩展。
 - **TypeScript CLI（`src/`）**：安装、模型目录生成、Codex 配置修改与恢复、LaunchAgent 管理、Wopal 模型配置。
 
 运行时请求行为以 Go daemon 为准；安装与本地配置管理以 TypeScript CLI 为准。
+
+### 4.3 CLIProxyAPI SDK 如何挂进 Gateway
+
+Go daemon 使用 CLIProxyAPI 的 Builder 创建服务器，并向同一个 Gin Engine 注入 Gateway 自己的 middleware 与运维端点：
+
+```text
+cliproxy.NewBuilder()
+  -> WithConfig(...)
+  -> WithServerOptions(
+       WithMiddleware(Wopal routing middleware),
+       WithRouterConfigurator(...)
+     )
+  -> Build()
+  -> Run(ctx)
+```
+
+因此请求首先进入同一个服务进程，再由 Gateway middleware 决定：
+
+- 由 Gateway 自己完全接管；或
+- 清洗 / 改写后继续 `c.Next()`，交给内嵌 CLIProxyAPI handler。
+
+这不是在 CLIProxyAPI 前面再架一层独立 HTTP Proxy，而是在 CLIProxyAPI 提供的服务器内部插入我们的控制逻辑。
+
+### 4.4 三条真实请求路径
+
+#### A. 官方模型
+
+```text
+Codex
+ -> 127.0.0.1:11435
+ -> Gateway routing middleware
+ -> Gateway 官方 reverse proxy / WebSocket bridge
+ -> ChatGPT Codex backend 或 OpenAI API
+```
+
+官方推理请求由 Gateway 自己接管，保持 native pass-through 语义。**官方模型不会经过 CLIProxyAPI 的第三方 provider 翻译链路。**
+
+#### B. Wopal AI 的 HTTP 请求
+
+```text
+Codex POST /v1/responses
+ -> Gateway routing middleware
+ -> 识别 wopal-ai/<model>
+ -> 清除官方凭证 / 处理跨 provider 历史
+ -> 写入本机 local access key
+ -> c.Next()
+ -> 内嵌 CLIProxyAPI Responses handler
+ -> OpenAI-compatible provider 适配
+ -> Wopal AI / New API
+```
+
+这里没有额外进程跳转。当前 HTTP 请求仍在同一个 `wopal-codex-gatewayd` 中继续执行，只是从我们的 middleware 落到 CLIProxyAPI SDK 自带的 handler。
+
+#### C. Wopal AI 的 WebSocket 请求
+
+Codex 的 WebSocket 行为与第三方上游常见的 HTTP/SSE 行为并不相同，所以这条路径由 Gateway 自己维护 WebSocket 会话状态：
+
+```text
+Codex WebSocket
+ -> Gateway Wopal WebSocket bridge
+ -> 整理 / 重放当前会话状态
+ -> 本机回环 POST http://127.0.0.1:11435/v1/responses
+ -> 同一个进程中的 Gateway middleware
+ -> 内嵌 CLIProxyAPI Responses handler
+ -> Wopal AI / New API HTTP/SSE
+ -> SSE 返回 Gateway WebSocket bridge
+ -> 转成 Codex WebSocket 事件
+```
+
+这里确实存在一次 **localhost 回环 HTTP**，但它仍然是**同一个进程、同一个监听端口**；目的不是调用另一个 Proxy 服务，而是复用 CLIProxyAPI 已实现并测试过的 HTTP Responses/provider 适配链路，避免 Gateway 再维护第二套第三方 HTTP adapter。
+
+Compaction 调用 Wopal AI 时也复用同一条回环 HTTP 路径。
+
+### 4.5 CLIProxyAPI 配置与密钥边界
+
+Gateway 启动时根据自己的配置动态生成 CLIProxyAPI runtime config：
+
+```text
+runtime/cliproxy-runtime.json
+```
+
+其中包含：
+
+- 本地监听地址；
+- 本地 access key；
+- Wopal AI `base-url`；
+- 模型 alias 与 context window；
+- OpenAI-compatible provider 配置。
+
+真实 Wopal API Key **不会写入这个文件**。磁盘上的配置只保存占位符 `__KEYCHAIN__`；Gateway 从 macOS Keychain 读取真实密钥后，在 `sdkconfig.Config` 已经解析到内存以后再注入：
+
+```text
+macOS Keychain
+ -> wopal-codex-gatewayd 内存
+ -> CLIProxyAPI SDK provider config
+```
+
+因此 CLIProxyAPI SDK 能正常完成 Wopal AI 上游认证，但真实密钥不会因为生成 runtime config 而落盘。
+
+### 4.6 为什么采用 SDK 内嵌，而不是独立 Proxy 进程
+
+选择 SDK 内嵌的主要原因是：
+
+1. **单进程部署。** LaunchAgent 只需要管理一个 daemon，减少端口、进程和生命周期故障点。
+2. **复用成熟 provider 适配。** Wopal Gateway 不需要重新实现 CLIProxyAPI 已有的 OpenAI-compatible Responses/provider 转换能力。
+3. **Gateway 可以在 handler 前控制路由。** quota、compaction、跨 provider 清洗等逻辑可以在请求进入第三方 adapter 前完成。
+4. **官方线路保持原生。** 官方请求可以被 middleware 截获并直接送往 ChatGPT/OpenAI，不必经过第三方协议转换。
+5. **安全边界更清楚。** 官方凭证在进入 CLIProxyAPI 的 Wopal provider 路径之前已经被 Gateway 清除。
+
+代价是 CLIProxyAPI 版本成为编译期依赖。升级 CLIProxyAPI 时需要重新构建 Gateway，并重新验证 Responses、模型目录和第三方 provider 行为，而不能像外部独立服务那样单独升级。
 
 ## 5. 本地端点
 
