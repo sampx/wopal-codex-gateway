@@ -32,6 +32,7 @@ type gatewayConfig struct {
 	Ollama struct {
 		Enabled bool `json:"enabled"`
 	} `json:"ollama"`
+	Notifications notificationsConfig `json:"notifications"`
 }
 
 func loadGatewayConfig(path string) (*gatewayConfig, error) {

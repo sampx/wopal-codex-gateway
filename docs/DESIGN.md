@@ -623,6 +623,18 @@ logs/service-error.log
 
 `/_status` 是轻量查看健康状态与最新 quota 状态的标准接口。
 
+### 19.1 用户通知
+
+自动 quota failover 会替换用户请求的官方模型，属于用户可感知的行为变化，因此 Gateway 在替换发生时发送一条 macOS 通知。
+
+- 触发点是模型被替换的那次 sampling step，不是每一次 quota 检查；
+- 同一个保护周期、同一个额度窗口、同一个被替换的模型只通知一次；
+- 通知是 best-effort：通知工具缺失或发送失败都不影响路由，只在日志中记录事件；
+- 通知由 `terminal-notifier` 发送，不使用 `osascript`——`osascript` 发出的通知归属 Script Editor，点击后会打开脚本编辑器；
+- 通知内容只包含请求模型、生效模型和额度重置时间，不含 prompt、凭证或账号标识。
+
+通知开关与参数属于本地运行配置（`runtime/config.json` 的 `notifications` 段），默认开启。`/_status` 的 `notifications` 字段用于确认通知是否可用。
+
 ## 20. 服务生命周期
 
 Gateway 以 macOS 当前用户的 LaunchAgent 运行：
@@ -737,6 +749,8 @@ Node 测试当前使用：
 | Native compaction restore 超时 | 约 `3 分钟` |
 | Install health deadline | `90 秒` |
 | Node 单测试超时 | `30 秒` |
+| Failover 用户通知 | 默认开启（每个保护周期、窗口、模型各一次） |
+| 通知工具 | `terminal-notifier`（缺失时不通知，仅记录日志） |
 
 ## 25. 变更纪律
 

@@ -128,7 +128,8 @@ Building from source requires:
 - pnpm `11.x`;
 - a working Wopal AI / New API OpenAI-compatible endpoint;
 - an API key for that endpoint;
-- the upstream must currently expose `deepseek-v4.1-flash`, because compaction, Memory, and quota failover all use that model in this build.
+- the upstream must currently expose `deepseek-v4.1-flash`, because compaction, Memory, and quota failover all use that model in this build;
+- (optional) `terminal-notifier` for the macOS notification posted on automatic quota failover (`brew install terminal-notifier`); without it the gateway simply stays quiet, routing is unaffected.
 
 Check the toolchain:
 
@@ -447,6 +448,14 @@ This is a gateway runtime policy, separate from Codex `[memories]` configuration
 Before every new sampling step the gateway rechecks quota state. A protected native request is routed to the Wopal fallback model; after reset, a safe subsequent step reconnects to the originally requested native model.
 
 A WebSocket `1012 Service Restart` during provider change, quota failover, or failback is an expected control path: Codex should reconnect and replay the full input.
+
+When the switch happens the gateway posts one macOS notification telling you which model replaced the official one you requested and roughly when quota recovers. It fires once per protection period, so a burst of requests cannot turn into a burst of banners.
+
+Notifications require `terminal-notifier`; without it nothing is posted and routing is unaffected. To turn them off, add this to `runtime/config.json`:
+
+```json
+"notifications": { "enabled": false }
+```
 
 ## 8. Model management
 
@@ -790,6 +799,16 @@ Run:
 ```
 
 Then fully quit and restart ChatGPT/Codex Desktop. The client may cache the model catalog for the lifetime of the process.
+
+### No quota failover notification
+
+Check in order:
+
+1. `terminal-notifier` is available: `command -v terminal-notifier`;
+2. System Settings → Notifications allows notifications from `terminal-notifier`;
+3. `notifications.enabled` is not set to `false` in `runtime/config.json`;
+4. the current protection period was already announced (one notification per period, window, and replaced model);
+5. the `quota_failover_notified`, `quota_failover_notify_unavailable`, and `quota_failover_notify_failed` events in `logs/gateway.log`.
 
 ## 13. Security and local state
 

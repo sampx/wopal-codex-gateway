@@ -65,6 +65,8 @@ func run() error {
 		"wopal_models": len(gateway.WopalAI.Models), "ollama_enabled": false, "relay_port": nil,
 	})
 	quotaGuard := newOfficialQuotaGuardWithState(logger, filepath.Join(root, "runtime", "official-quota-state.json"), time.Now())
+	quotaGuard.notifier = newQuotaNotifier(logger, gateway.Notifications)
+	logger.write(map[string]any{"event": "quota_notification_configured", "status": quotaGuard.notifier.status()})
 
 	builder := cliproxy.NewBuilder().
 		WithConfig(cliConfig).
@@ -81,6 +83,7 @@ func run() error {
 						"listen":         fmt.Sprintf("%s:%d", gateway.Listen.Host, gateway.Listen.Port),
 						"official":       "native-pass-through",
 						"official_quota": quotaGuard.status(time.Now()),
+						"notifications":  quotaGuard.notificationStatus(),
 						"wopal":          "cliproxy-responses-to-chat",
 						"ollama":         "disabled",
 					})

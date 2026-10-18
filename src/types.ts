@@ -5,10 +5,17 @@ export interface ExternalModelConfig {
   reasoning?: boolean;
 }
 
+export interface NotificationsConfig {
+  enabled?: boolean;
+  sound?: string;
+  tool?: string;
+}
+
 export interface GatewayConfig {
   listen: { host: string; port: number };
   wopalAi: { baseUrl: string; models: ExternalModelConfig[]; excludedModels: string[] };
   relay?: { baseUrl: string; binaryPath: string };
+  notifications?: NotificationsConfig;
   ollama: { enabled: boolean; baseUrl: string };
 }
 

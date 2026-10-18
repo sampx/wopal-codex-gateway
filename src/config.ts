@@ -25,15 +25,22 @@ export const defaultConfig: GatewayConfig = {
   ollama: { enabled: false, baseUrl: 'http://127.0.0.1:11434' },
 };
 
+// Gateway-owned sections that the CLI does not manage must survive a load/save
+// round trip, otherwise rewriting config.json would silently drop them.
+export function mergeConfig(saved: Partial<GatewayConfig>): GatewayConfig {
+  return {
+    listen: { ...defaultConfig.listen, ...saved.listen },
+    wopalAi: { ...defaultConfig.wopalAi, ...saved.wopalAi, models: saved.wopalAi?.models ?? defaultConfig.wopalAi.models, excludedModels: saved.wopalAi?.excludedModels ?? defaultConfig.wopalAi.excludedModels },
+    ...(saved.relay ? { relay: saved.relay } : {}),
+    ...(saved.notifications ? { notifications: saved.notifications } : {}),
+    ollama: { ...defaultConfig.ollama, ...saved.ollama },
+  };
+}
+
 export async function loadConfig(): Promise<GatewayConfig> {
   try {
     const saved = JSON.parse(await readFile(configPath(), 'utf8')) as Partial<GatewayConfig>;
-    return {
-      listen: { ...defaultConfig.listen, ...saved.listen },
-      wopalAi: { ...defaultConfig.wopalAi, ...saved.wopalAi, models: saved.wopalAi?.models ?? defaultConfig.wopalAi.models, excludedModels: saved.wopalAi?.excludedModels ?? defaultConfig.wopalAi.excludedModels },
-      ...(saved.relay ? { relay: saved.relay } : {}),
-      ollama: { ...defaultConfig.ollama, ...saved.ollama },
-    };
+    return mergeConfig(saved);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return structuredClone(defaultConfig);
     throw error;

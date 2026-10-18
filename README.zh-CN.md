@@ -128,7 +128,8 @@ consolidation_model = "wopal-ai/deepseek-v4.1-flash"
 - pnpm `11.x`；
 - 一个可用的 Wopal AI / New API OpenAI-compatible endpoint；
 - 对应的 API Key；
-- 当前上游必须提供 `deepseek-v4.1-flash`，因为当前版本的 compaction、Memory 和 quota failover 都使用该模型。
+- 当前上游必须提供 `deepseek-v4.1-flash`，因为当前版本的 compaction、Memory 和 quota failover 都使用该模型；
+- （可选）`terminal-notifier`：自动 quota failover 时弹 macOS 通知，安装方式 `brew install terminal-notifier`；未安装时只是不弹通知，路由功能不受影响。
 
 检查基本环境：
 
@@ -490,6 +491,14 @@ Wopal fallback
 ```
 
 WebSocket 路径出现 `1012 Service Restart` 在 Provider 切换和 quota failover/failback 场景下是预期控制行为，Codex 应重新建立连接并重放输入。
+
+切换发生时，Gateway 会弹出一条 macOS 通知，告诉你请求的官方模型被换成了哪个模型、额度大约什么时候恢复。每个保护周期只会通知一次，不会在大批请求里反复弹窗。
+
+通知依赖 `terminal-notifier`；未安装时不会弹通知，路由功能不受影响。需要关闭通知时，在 `runtime/config.json` 里加上：
+
+```json
+"notifications": { "enabled": false }
+```
 
 ## 8. 模型管理
 
@@ -866,6 +875,16 @@ Gateway 会尝试通过官方 Provider 将它物化为可继续使用的历史�
 然后**完全退出并重新启动** ChatGPT/Codex Desktop。
 
 客户端运行期间通常会缓存模型目录，仅修改磁盘配置并不会立即刷新 UI。
+
+### 12.9 没有收到 quota failover 通知
+
+依次检查：
+
+1. `terminal-notifier` 是否可用：`command -v terminal-notifier`；
+2. 「系统设置 → 通知」里是否允许 `terminal-notifier` 发送通知；
+3. `runtime/config.json` 中 `notifications.enabled` 是否为 `false`；
+4. 当前保护周期是否已经通知过（同一保护周期、同一窗口、同一被替换模型只通知一次）；
+5. `logs/gateway.log` 中的 `quota_failover_notified`、`quota_failover_notify_unavailable`、`quota_failover_notify_failed` 事件。
 
 ## 13. 安全与本地状态
 

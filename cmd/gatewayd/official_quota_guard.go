@@ -39,6 +39,7 @@ type officialQuotaGuard struct {
 	latestAccount   string
 	persistencePath string
 	logger          *activityLogger
+	notifier        *quotaNotifier
 }
 
 type officialQuotaPersistedState struct {
@@ -176,7 +177,47 @@ func (g *officialQuotaGuard) blockedModel(accountID, model string, now time.Time
 	if quotaExemptOfficialModel(model) {
 		return false, ""
 	}
-	return g.blocked(accountID, now)
+	blocked, reason := g.blocked(accountID, now)
+	if blocked {
+		g.notifyQuotaFailover(model, reason, accountID, now)
+	}
+	return blocked, reason
+}
+
+// notifyQuotaFailover surfaces the automatic provider switch to the user. It is
+// called only from the model-scoped guard used by the routing paths, so it sees
+// exactly the requests that used to fail instead of failing over.
+func (g *officialQuotaGuard) notifyQuotaFailover(requestedModel, reason, accountID string, now time.Time) {
+	if g == nil || g.notifier == nil {
+		return
+	}
+	g.notifier.notifyQuotaFailover(requestedModel, officialQuotaFailoverModel, reason, g.windowResetAt(accountID, reason), now)
+}
+
+func (g *officialQuotaGuard) windowResetAt(accountID, reason string) time.Time {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	state, ok := g.accounts[quotaAccountKey(accountID)]
+	if !ok {
+		return time.Time{}
+	}
+	if reason == "weekly" {
+		if state.Weekly != nil {
+			return state.Weekly.ResetAt
+		}
+		return time.Time{}
+	}
+	if state.FiveHour != nil {
+		return state.FiveHour.ResetAt
+	}
+	return time.Time{}
+}
+
+func (g *officialQuotaGuard) notificationStatus() map[string]any {
+	if g == nil || g.notifier == nil {
+		return map[string]any{"enabled": false, "available": false, "tool": ""}
+	}
+	return g.notifier.status()
 }
 
 func (g *officialQuotaGuard) blocked(accountID string, now time.Time) (bool, string) {
