@@ -115,10 +115,10 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 			}
 			if model, ok := officialInferenceModel(payload, boundModel); ok {
 				if blocked, reason := quotaGuard.blockedModel(accountID, model, time.Now()); blocked {
-					logger.write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "model": model, "reason": reason})
+					logger.write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "model": model, "reason": reason, "action": "failover", "effective_model": officialQuotaFailoverModel})
 					sourceWriteMu.Lock()
 					_ = source.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(
-						websocket.CloseServiceRestart, "official quota reserve protected; switch to gpt-5.6-luna or a wopal-ai model",
+						websocket.CloseServiceRestart, "official quota reserve protected; reconnect for automatic Wopal failover",
 					), time.Now().Add(time.Second))
 					sourceWriteMu.Unlock()
 					return

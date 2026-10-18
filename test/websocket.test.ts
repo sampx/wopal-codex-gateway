@@ -15,7 +15,20 @@ async function listen(server: http.Server): Promise<string> {
 
 async function closeServer(server: http.Server): Promise<void> {
   if (!server.listening) return;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      server.closeAllConnections();
+      finish();
+    }, 1_000);
+    server.close(finish);
+  });
 }
 
 function wsUrl(httpUrl: string, path: string): string {
@@ -434,6 +447,7 @@ test('closing Codex websocket aborts an active third-party HTTP stream', async (
   const client = new WebSocket(wsUrl(gatewayBase, '/v1/responses'), {
     headers: { 'x-codex-routing-hint': 'model=wopal-ai/slow-model' },
   });
+  t.after(() => { if (client.readyState !== WebSocket.CLOSED) client.terminate(); });
   await once(client, 'open');
   client.send(JSON.stringify({ type: 'response.create', model: 'wopal-ai/slow-model', stream: true, input: [] }));
   assert.equal((await nextJson(client)).type, 'response.created');

@@ -17,7 +17,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const maxRoutingBodyBytes = 64 * 1024 * 1024
+const (
+	maxRoutingBodyBytes        = 64 * 1024 * 1024
+	officialQuotaFailoverModel = "wopal-ai/deepseek-v4.1-flash"
+)
 
 type routeKind string
 
@@ -118,11 +121,30 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 				proxy = chatgptProxy
 				target = chatgptTarget
 				if blocked, reason := quotaGuard.blockedModel(accountID, model, time.Now()); blocked {
-					logger.write(map[string]any{"event": "official_quota_guard_blocked", "model": model, "path": path, "reason": reason})
-					c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": gin.H{
-						"code": "official_quota_guard", "type": "invalid_request_error",
-						"message": "official quota reserve is protected; switch to gpt-5.6-luna or a wopal-ai model until the limit resets",
-					}})
+					logger.write(map[string]any{"event": "official_quota_failover", "requested_model": model, "effective_model": officialQuotaFailoverModel, "path": path, "reason": reason})
+					if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
+						c.Set("native_compaction_bridge", nativeReplay)
+						c.Set("quota_failover_requested_model", model)
+						c.Set("quota_failover_guard", quotaGuard)
+						c.Set("quota_failover_account_id", accountID)
+						c.Abort()
+						serveWopalWebsocketBridge(c, logger, officialQuotaFailoverModel)
+						return
+					}
+					if c.Request.Method == http.MethodPost {
+						if err := rewriteRequestModel(c.Request, officialQuotaFailoverModel); err != nil {
+							c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "quota_failover_rewrite_failed", "type": "invalid_request_error", "message": err.Error()}})
+							return
+						}
+						if !prepareWopalHTTP(c, logger, officialQuotaFailoverModel, nativeReplay) {
+							return
+						}
+						c.Request.Header.Set("Authorization", "Bearer "+localAccessKey)
+						c.Request.Header.Del("ChatGPT-Account-ID")
+						c.Next()
+						return
+					}
+					c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": gin.H{"code": "official_quota_guard", "type": "invalid_request_error", "message": "official quota reserve is protected"}})
 					return
 				}
 			}
@@ -144,6 +166,37 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 			c.Next()
 		}
 	}
+}
+
+func rewriteRequestModel(req *http.Request, model string) error {
+	if req == nil || req.Body == nil {
+		return fmt.Errorf("request body is required for quota failover")
+	}
+	raw, err := io.ReadAll(io.LimitReader(req.Body, maxRoutingBodyBytes+1))
+	if err != nil {
+		return fmt.Errorf("read quota failover request: %w", err)
+	}
+	if len(raw) > maxRoutingBodyBytes {
+		return fmt.Errorf("request body exceeds routing limit")
+	}
+	decoded, err := decodeRoutingBody(raw, req.Header.Get("Content-Encoding"))
+	if err != nil {
+		return err
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return fmt.Errorf("parse quota failover request: %w", err)
+	}
+	payload["model"] = model
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode quota failover request: %w", err)
+	}
+	req.Body = io.NopCloser(bytes.NewReader(rewritten))
+	req.ContentLength = int64(len(rewritten))
+	req.Header.Del("Content-Encoding")
+	req.Header.Set("Content-Length", fmt.Sprint(len(rewritten)))
+	return nil
 }
 
 func isGatewayCompactionRequest(req *http.Request, path string) bool {

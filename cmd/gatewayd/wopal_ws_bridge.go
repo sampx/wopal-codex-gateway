@@ -56,6 +56,12 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activityLogger, model str
 		_ = conn.Close()
 	}()
 	logger.write(map[string]any{"event": "wopal_ws_connected", "model": model})
+	failoverRequestedModel, _ := c.Get("quota_failover_requested_model")
+	failoverGuardValue, _ := c.Get("quota_failover_guard")
+	failoverGuard, _ := failoverGuardValue.(*officialQuotaGuard)
+	failoverAccountValue, _ := c.Get("quota_failover_account_id")
+	failoverAccountID, _ := failoverAccountValue.(string)
+	requestedOfficialModel, _ := failoverRequestedModel.(string)
 
 	for {
 		messageType, payload, errRead := conn.ReadMessage()
@@ -73,6 +79,17 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activityLogger, model str
 		}
 		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
 			continue
+		}
+		if requestedOfficialModel != "" && failoverGuard != nil {
+			rewritten, failback, changed := rewriteQuotaFailoverWebsocketFrame(payload, failoverGuard, failoverAccountID, requestedOfficialModel, time.Now())
+			if failback {
+				logger.write(map[string]any{"event": "official_quota_failback", "requested_model": requestedOfficialModel, "transport": "websocket"})
+				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "official quota recovered; reconnect and resend full input"), time.Now().Add(time.Second))
+				return
+			}
+			if changed {
+				payload = rewritten
+			}
 		}
 		if reconnectForWebsocketRouteChange(conn, routeWopal, payload, logger) {
 			return

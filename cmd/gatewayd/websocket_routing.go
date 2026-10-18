@@ -35,3 +35,30 @@ func reconnectForWebsocketRouteChange(conn *websocket.Conn, boundRoute routeKind
 	), time.Now().Add(time.Second))
 	return true
 }
+
+func rewriteQuotaFailoverWebsocketFrame(payload []byte, quotaGuard *officialQuotaGuard, accountID, requestedOfficialModel string, now time.Time) ([]byte, bool, bool) {
+	var request map[string]any
+	if json.Unmarshal(payload, &request) != nil {
+		return payload, false, false
+	}
+	requestType := strings.TrimSpace(stringOrEmpty(request["type"]))
+	if requestType != "response.create" && requestType != "response.append" {
+		return payload, false, false
+	}
+	model := strings.TrimSpace(stringOrEmpty(request["model"]))
+	if model == "" {
+		model = strings.TrimSpace(requestedOfficialModel)
+	}
+	if classifyModel(model) != routeOfficial {
+		return payload, false, false
+	}
+	if blocked, _ := quotaGuard.blockedModel(accountID, model, now); !blocked {
+		return payload, true, false
+	}
+	request["model"] = officialQuotaFailoverModel
+	rewritten, err := json.Marshal(request)
+	if err != nil {
+		return payload, false, false
+	}
+	return rewritten, false, true
+}

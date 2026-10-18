@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { buildCatalog, discoverOllamaModels, loadNativeCatalog, writeCatalog } from './catalog.js';
-import { applyGatewayConfig, captureRestoreState, restoreGatewayConfig, type CodexRestoreState } from './codex-config.js';
+import { applyGatewayConfig, captureRestoreState, mergeGatewayRestoreState, restoreGatewayConfig, type CodexRestoreState } from './codex-config.js';
 import {
   codexConfigPath, codexGatewayCatalogPath, codexNativeCatalogPath, restoreStatePath,
 } from './config.js';
@@ -46,9 +46,21 @@ export async function installIntoCodex(config: GatewayConfig, cliPath: string): 
   const alreadyManaged = currentState.openaiBaseUrl.value === gatewayBaseUrl
     && currentState.modelCatalogJson.value === codexGatewayCatalogPath();
 
+  await mkdir(dirname(restoreStatePath()), { recursive: true, mode: 0o700 });
   if (!alreadyManaged) {
-    await mkdir(dirname(restoreStatePath()), { recursive: true, mode: 0o700 });
     await writeFile(restoreStatePath(), `${JSON.stringify(currentState, null, 2)}\n`, { mode: 0o600 });
+  } else {
+    const savedText = await readFile(restoreStatePath(), 'utf8').catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (savedText) {
+      const saved = JSON.parse(savedText) as CodexRestoreState;
+      const merged = mergeGatewayRestoreState(saved, currentState);
+      if (JSON.stringify(merged) !== JSON.stringify(saved)) {
+        await writeFile(restoreStatePath(), `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+      }
+    }
   }
   const nextText = applyGatewayConfig(currentText, codexGatewayCatalogPath(), gatewayBaseUrl);
   await writeAtomic(configFile, nextText);

@@ -60,7 +60,7 @@ func TestOfficialQuotaGuardReadsHeadersByWindowLength(t *testing.T) {
 	}
 }
 
-func TestRoutingQuotaGuardBlocksOfficialButAllowsWopal(t *testing.T) {
+func TestRoutingQuotaGuardFailsOverOfficialAndAllowsExemptions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	guard := newOfficialQuotaGuard(nil)
 	now := time.Now()
@@ -104,11 +104,8 @@ func TestRoutingQuotaGuardBlocksOfficialButAllowsWopal(t *testing.T) {
 	}
 
 	status, body := post("gpt-6.1-sol")
-	if status != http.StatusConflict || !strings.Contains(body, "official_quota_guard") {
-		t.Fatalf("official guard response = %d %s", status, body)
-	}
-	if !strings.Contains(body, "gpt-5.6-luna") {
-		t.Fatalf("official guard response did not advertise Luna recovery: %s", body)
+	if status != http.StatusOK {
+		t.Fatalf("official failover response = %d %s", status, body)
 	}
 	if upstreamHits != 0 {
 		t.Fatalf("protected official request reached upstream %d times", upstreamHits)
@@ -158,7 +155,7 @@ func TestNativeCompactionRestoreStopsWhenQuotaProtected(t *testing.T) {
 	}
 }
 
-func TestOfficialWebsocketQuotaGuardStopsNextTurn(t *testing.T) {
+func TestOfficialWebsocketQuotaGuardStopsCurrentSocketBeforeFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	guard := newOfficialQuotaGuard(nil)
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -206,9 +203,6 @@ func TestOfficialWebsocketQuotaGuardStopsNextTurn(t *testing.T) {
 	closeErr, ok := err.(*websocket.CloseError)
 	if !ok || closeErr.Code != websocket.CloseServiceRestart {
 		t.Fatalf("guard close = %T %v", err, err)
-	}
-	if !strings.Contains(closeErr.Text, "gpt-5.6-luna") {
-		t.Fatalf("guard close did not advertise Luna recovery: %q", closeErr.Text)
 	}
 	select {
 	case payload := <-upstreamFrames:
@@ -308,5 +302,169 @@ func TestQuotaExemptOfficialModelsIncludeCurrentLuna(t *testing.T) {
 	}
 	if quotaExemptOfficialModel("gpt-6.1-sol") {
 		t.Fatal("gpt-6.1-sol should remain quota protected")
+	}
+}
+
+func TestQuotaProtectedOfficialHTTPFallsBackToWopal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	guard := newOfficialQuotaGuard(nil)
+	guard.observeRateLimitPayload("acct-failover", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), time.Now())
+
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+
+	var gotModel, gotAuth, gotAccount string
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithTargetsAndQuotaGuard(nil, target, target, guard))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		var body map[string]any
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		gotModel = strings.TrimSpace(stringOrEmpty(body["model"]))
+		gotAuth = c.GetHeader("Authorization")
+		gotAccount = c.GetHeader("ChatGPT-Account-ID")
+		c.JSON(http.StatusOK, gin.H{"provider": "wopal"})
+	})
+	server := httptest.NewServer(engine)
+	defer server.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", bytes.NewBufferString(`{"model":"gpt-6.1-sol","input":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer official-token")
+	req.Header.Set("ChatGPT-Account-ID", "acct-failover")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("protected request did not fail over: %d %s", resp.StatusCode, body)
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("protected request reached official upstream %d times", upstreamHits)
+	}
+	if gotModel != "wopal-ai/deepseek-v4.1-flash" {
+		t.Fatalf("fallback model = %q", gotModel)
+	}
+	if gotAuth != "Bearer "+localAccessKey || gotAccount != "" {
+		t.Fatalf("official credentials leaked into fallback: auth=%q account=%q", gotAuth, gotAccount)
+	}
+}
+
+func TestQuotaFailoverWebsocketFrameChecksEverySamplingStep(t *testing.T) {
+	now := time.Now()
+	guard := newOfficialQuotaGuard(nil)
+	guard.observeRateLimitPayload("acct-step", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), now)
+
+	for _, messageType := range []string{"response.create", "response.append"} {
+		raw := []byte(`{"type":"` + messageType + `","model":"gpt-6.1-sol","input":[]}`)
+		rewritten, failback, changed := rewriteQuotaFailoverWebsocketFrame(raw, guard, "acct-step", "gpt-6.1-sol", now)
+		if failback || !changed {
+			t.Fatalf("%s failover decision = failback:%v changed:%v", messageType, failback, changed)
+		}
+		if !bytes.Contains(rewritten, []byte(`"model":"wopal-ai/deepseek-v4.1-flash"`)) {
+			t.Fatalf("%s was not rewritten to fallback: %s", messageType, rewritten)
+		}
+	}
+
+	guard.observeRateLimitPayload("acct-step", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":0,"window_minutes":300,"reset_after_seconds":3600}}}`), now.Add(time.Second))
+	raw := []byte(`{"type":"response.append","model":"gpt-6.1-sol","input":[]}`)
+	_, failback, changed := rewriteQuotaFailoverWebsocketFrame(raw, guard, "acct-step", "gpt-6.1-sol", now.Add(time.Second))
+	if !failback || changed {
+		t.Fatalf("quota reset decision = failback:%v changed:%v", failback, changed)
+	}
+}
+
+func TestProtectedOfficialWebsocketReconnectUsesWopalAndFailsBack(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	guard := newOfficialQuotaGuard(nil)
+	guard.observeRateLimitPayload("acct-reconnect", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), time.Now())
+
+	officialConnections := 0
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		officialConnections++
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL + "/backend-api/codex")
+
+	wopalModels := make(chan string, 2)
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithTargetsAndQuotaGuard(nil, target, target, guard))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		var body map[string]any
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		wopalModels <- strings.TrimSpace(stringOrEmpty(body["model"]))
+		c.Header("Content-Type", "text/event-stream")
+		_, _ = c.Writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"wopal-result\",\"status\":\"completed\",\"output\":[]}}\n\n"))
+		c.Writer.Flush()
+	})
+	server := httptest.NewServer(engine)
+	defer server.Close()
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer official-token")
+	header.Set("ChatGPT-Account-ID", "acct-reconnect")
+	header.Set("X-Codex-Routing-Hint", "model=gpt-6.1-sol")
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		if response != nil {
+			t.Fatalf("protected reconnect returned HTTP %d: %v", response.StatusCode, err)
+		}
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if officialConnections != 0 {
+		t.Fatalf("protected reconnect opened %d official connections", officialConnections)
+	}
+
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-6.1-sol", "input": []any{map[string]any{"type": "message", "role": "user", "content": "full replay"}}}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		var event map[string]any
+		if err := conn.ReadJSON(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event["type"] == "response.completed" {
+			break
+		}
+	}
+	select {
+	case model := <-wopalModels:
+		if model != "wopal-ai/deepseek-v4.1-flash" {
+			t.Fatalf("fallback model = %q", model)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("protected reconnect did not reach Wopal")
+	}
+
+	guard.observeRateLimitPayload("acct-reconnect", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":0,"window_minutes":300,"reset_after_seconds":3600}}}`), time.Now())
+	if err := conn.WriteJSON(map[string]any{"type": "response.append", "model": "gpt-6.1-sol", "input": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = conn.ReadMessage()
+	closeErr, ok := err.(*websocket.CloseError)
+	if !ok || closeErr.Code != websocket.CloseServiceRestart {
+		t.Fatalf("quota failback close = %T %v", err, err)
+	}
+	if !strings.Contains(closeErr.Text, "quota recovered") {
+		t.Fatalf("unexpected failback reason %q", closeErr.Text)
 	}
 }
