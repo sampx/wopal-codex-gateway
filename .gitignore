@@ -5,3 +5,6 @@ dist/
 logs/
 runtime/
 /gatewayd
+.env
+.env.*
+!.env.example
