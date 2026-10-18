@@ -2,6 +2,8 @@
 
 A local gateway for using native ChatGPT/Codex models and third-party OpenAI-compatible models from the same Codex client.
 
+Architecture and behavioral design: [`docs/DESIGN.md`](docs/DESIGN.md).
+
 ## What it does
 
 - Keeps unnamespaced models on the native ChatGPT/OpenAI route.
