@@ -129,10 +129,22 @@ func openWopalCompactionCapsule(encoded string) (wopalCompactionCapsule, error) 
 	return capsule, nil
 }
 
+const wopalCompactionSummaryIDPrefix = "wopal_compaction_summary_"
+
+func wopalCompactionSummaryID(id any) string {
+	raw := strings.TrimSpace(fmt.Sprint(id))
+	candidate := wopalCompactionSummaryIDPrefix + raw
+	if len(candidate) <= 64 {
+		return candidate
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return wopalCompactionSummaryIDPrefix + fmt.Sprintf("%x", sum[:16])
+}
+
 func wopalCompactionSummaryMessage(capsule wopalCompactionCapsule) map[string]any {
 	return map[string]any{
 		"type": "message",
-		"id":   "wopal_compaction_summary_" + capsule.ID,
+		"id":   wopalCompactionSummaryID(capsule.ID),
 		"role": "developer",
 		"content": "The earlier conversation was compacted. Continue from this preserved conversation context:\n\n" +
 			strings.TrimSpace(capsule.Summary),

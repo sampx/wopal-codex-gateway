@@ -125,7 +125,7 @@ func expandWopalCapsuleForOfficial(item map[string]any, requestHasTools bool) ([
 func wopalCompactionUnavailableMessage(id any) map[string]any {
 	return map[string]any{
 		"type":    "message",
-		"id":      "wopal_compaction_summary_" + strings.TrimSpace(fmt.Sprint(id)),
+		"id":      wopalCompactionSummaryID(id),
 		"role":    "developer",
 		"content": officialCompactionUnavailableContent,
 	}

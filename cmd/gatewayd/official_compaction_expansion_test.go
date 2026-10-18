@@ -417,3 +417,25 @@ func TestOfficialSanitizerDropsLocalCompactionResponseIDWithoutCapsule(t *testin
 		t.Fatalf("websocket sanitizer kept local compaction response id: %s", rewrittenFrame)
 	}
 }
+
+func TestWopalCompactionSummaryIDsFitOfficialLimit(t *testing.T) {
+	capsule := wopalCompactionCapsule{
+		Version: 1,
+		ID:      "cmp_wopal_12345678-1234-1234-1234-123456789abc",
+		Summary: "preserved context",
+	}
+	message := wopalCompactionSummaryMessage(capsule)
+	id := strings.TrimSpace(fmt.Sprint(message["id"]))
+	if len(id) == 0 || len(id) > 64 {
+		t.Fatalf("summary id length = %d, want 1..64: %q", len(id), id)
+	}
+
+	fallback := wopalCompactionUnavailableMessage(capsule.ID)
+	fallbackID := strings.TrimSpace(fmt.Sprint(fallback["id"]))
+	if len(fallbackID) == 0 || len(fallbackID) > 64 {
+		t.Fatalf("fallback id length = %d, want 1..64: %q", len(fallbackID), fallbackID)
+	}
+	if fallbackID != id {
+		t.Fatalf("summary id mismatch: normal=%q fallback=%q", id, fallbackID)
+	}
+}

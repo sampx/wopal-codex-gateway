@@ -107,18 +107,21 @@ func TestRoutingQuotaGuardBlocksOfficialButAllowsWopal(t *testing.T) {
 	if status != http.StatusConflict || !strings.Contains(body, "official_quota_guard") {
 		t.Fatalf("official guard response = %d %s", status, body)
 	}
+	if !strings.Contains(body, "gpt-5.6-luna") {
+		t.Fatalf("official guard response did not advertise Luna recovery: %s", body)
+	}
 	if upstreamHits != 0 {
 		t.Fatalf("protected official request reached upstream %d times", upstreamHits)
 	}
 
-	for _, model := range []string{"gpt-6-luna", "codex-auto-review"} {
+	for _, model := range []string{"gpt-5.6-luna", "gpt-6-luna", "codex-auto-review"} {
 		status, body = post(model)
 		if status != http.StatusOK {
 			t.Fatalf("quota-exempt model %s was blocked: %d %s", model, status, body)
 		}
 	}
-	if upstreamHits != 2 {
-		t.Fatalf("quota-exempt official models reached upstream %d times, want 2", upstreamHits)
+	if upstreamHits != 3 {
+		t.Fatalf("quota-exempt official models reached upstream %d times, want 3", upstreamHits)
 	}
 
 	status, body = post("wopal-ai/deepseek-v4.1-flash-free")
@@ -204,6 +207,9 @@ func TestOfficialWebsocketQuotaGuardStopsNextTurn(t *testing.T) {
 	if !ok || closeErr.Code != websocket.CloseServiceRestart {
 		t.Fatalf("guard close = %T %v", err, err)
 	}
+	if !strings.Contains(closeErr.Text, "gpt-5.6-luna") {
+		t.Fatalf("guard close did not advertise Luna recovery: %q", closeErr.Text)
+	}
 	select {
 	case payload := <-upstreamFrames:
 		t.Fatalf("protected websocket turn reached upstream: %s", payload)
@@ -239,18 +245,18 @@ func TestOfficialWebsocketQuotaGuardAllowsLuna(t *testing.T) {
 
 	header := http.Header{}
 	header.Set("ChatGPT-Account-ID", "acct-luna")
-	header.Set("X-Codex-Routing-Hint", "model=gpt-6-luna")
+	header.Set("X-Codex-Routing-Hint", "model=gpt-5.6-luna")
 	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", header)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-6-luna", "input": []any{}}); err != nil {
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-5.6-luna", "input": []any{}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case payload := <-upstreamFrames:
-		if !bytes.Contains(payload, []byte(`"model":"gpt-6-luna"`)) {
+		if !bytes.Contains(payload, []byte(`"model":"gpt-5.6-luna"`)) {
 			t.Fatalf("unexpected Luna upstream frame: %s", payload)
 		}
 	case <-time.After(time.Second):
@@ -291,5 +297,16 @@ func TestOfficialQuotaGuardStatusUsesHashedAccountState(t *testing.T) {
 	status := guard.status(now)
 	if status["state"] != "protected" || status["reason"] != "five_hour" {
 		t.Fatalf("quota status = %#v", status)
+	}
+}
+
+func TestQuotaExemptOfficialModelsIncludeCurrentLuna(t *testing.T) {
+	for _, model := range []string{"gpt-5.6-luna", "gpt-6-luna", "codex-auto-review"} {
+		if !quotaExemptOfficialModel(model) {
+			t.Fatalf("model %q should bypass quota reserve", model)
+		}
+	}
+	if quotaExemptOfficialModel("gpt-6.1-sol") {
+		t.Fatal("gpt-6.1-sol should remain quota protected")
 	}
 }

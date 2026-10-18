@@ -165,7 +165,7 @@ func chatGPTAccountID(req *http.Request) string {
 
 func quotaExemptOfficialModel(model string) bool {
 	switch strings.TrimSpace(model) {
-	case "gpt-6-luna", "codex-auto-review":
+	case "gpt-5.6-luna", "gpt-6-luna", "codex-auto-review":
 		return true
 	default:
 		return false

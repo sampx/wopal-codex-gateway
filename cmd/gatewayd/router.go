@@ -121,7 +121,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 					logger.write(map[string]any{"event": "official_quota_guard_blocked", "model": model, "path": path, "reason": reason})
 					c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": gin.H{
 						"code": "official_quota_guard", "type": "invalid_request_error",
-						"message": "official quota reserve is protected; switch to a wopal-ai model until the limit resets",
+						"message": "official quota reserve is protected; switch to gpt-5.6-luna or a wopal-ai model until the limit resets",
 					}})
 					return
 				}
