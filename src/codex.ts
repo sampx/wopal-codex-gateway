@@ -1,9 +1,9 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { buildCatalog, discoverOllamaModels, loadNativeCatalog, writeCatalog } from './catalog.js';
+import { buildCatalog, discoverOllamaModels, loadBundledNativeCatalog, writeCatalog } from './catalog.js';
 import { applyGatewayConfig, captureRestoreState, mergeGatewayRestoreState, restoreGatewayConfig, type CodexRestoreState } from './codex-config.js';
 import {
-  codexConfigPath, codexGatewayCatalogPath, codexNativeCatalogPath, restoreStatePath,
+  codexConfigPath, codexGatewayCatalogPath, restoreStatePath,
 } from './config.js';
 import type { ExternalModelConfig, GatewayConfig } from './types.js';
 import { hasWopalApiKey } from './keychain.js';
@@ -12,7 +12,7 @@ import { installLaunchAgent, uninstallLaunchAgent } from './service.js';
 export interface CatalogRefreshResult { native: number; wopalAi: number; ollama: number; ollamaWarning?: string }
 
 export async function refreshCatalog(config: GatewayConfig): Promise<CatalogRefreshResult> {
-  const native = await loadNativeCatalog(codexNativeCatalogPath());
+  const native = await loadBundledNativeCatalog();
   let ollamaModels: ExternalModelConfig[] = [];
   let ollamaWarning: string | undefined;
   if (config.ollama.enabled) {

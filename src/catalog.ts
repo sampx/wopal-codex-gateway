@@ -1,7 +1,14 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import type { ExternalModelConfig } from './types.js';
 
 export interface ModelCatalog { models: Record<string, unknown>[] }
+
+const execFileAsync = promisify(execFile);
 
 const reasoningLevels = [
   { effort: 'none', description: 'Turn reasoning off' },
@@ -67,6 +74,26 @@ export async function loadNativeCatalog(path: string): Promise<ModelCatalog> {
   const parsed = JSON.parse(await readFile(path, 'utf8')) as { models?: Record<string, unknown>[] };
   if (!Array.isArray(parsed.models) || parsed.models.length === 0) throw new Error(`Codex model catalog is empty: ${path}`);
   return { models: parsed.models };
+}
+
+export async function loadBundledNativeCatalog(codexCommand?: string): Promise<ModelCatalog> {
+  const command = codexCommand ?? await resolveCodexCommand();
+  const { stdout } = await execFileAsync(command, ['debug', 'models', '--bundled'], { maxBuffer: 16 * 1024 * 1024 });
+  const parsed = JSON.parse(stdout) as { models?: Record<string, unknown>[] };
+  if (!Array.isArray(parsed.models) || parsed.models.length === 0) {
+    throw new Error(`Codex bundled model catalog is empty: ${command}`);
+  }
+  return { models: parsed.models };
+}
+
+async function resolveCodexCommand(): Promise<string> {
+  const local = join(homedir(), '.local', 'bin', 'codex');
+  try {
+    await access(local, fsConstants.X_OK);
+    return local;
+  } catch {
+    return 'codex';
+  }
 }
 
 export async function discoverOllamaModels(baseUrl: string): Promise<ExternalModelConfig[]> {

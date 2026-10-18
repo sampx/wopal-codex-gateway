@@ -45,3 +45,17 @@ test('catalog can omit Ollama models when integration is disabled', () => {
   const catalog = buildCatalog(nativeCatalog, [{ name: 'qwen3-coder' }], []);
   assert.equal(catalog.models.some((model: any) => String(model.slug).startsWith('ollama/')), false);
 });
+
+test('bundled native catalog comes from Codex CLI instead of mutable models_cache', async (t) => {
+  const { mkdtemp, writeFile, chmod } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { loadBundledNativeCatalog } = await import('../src/catalog.js');
+  const dir = await mkdtemp(join(tmpdir(), 'wopal-codex-bundled-'));
+  t.after(async () => { const { rm } = await import('node:fs/promises'); await rm(dir, { recursive: true, force: true }); });
+  const fakeCodex = join(dir, 'codex');
+  await writeFile(fakeCodex, '#!/bin/sh\nprintf \'%s\\n\' \'{"models":[{"slug":"gpt-test-official","display_name":"Official"}]}\'\n');
+  await chmod(fakeCodex, 0o755);
+  const catalog = await loadBundledNativeCatalog(fakeCodex);
+  assert.deepEqual(catalog.models.map((model: any) => model.slug), ['gpt-test-official']);
+});
