@@ -1,170 +1,170 @@
-# Wopal Codex Gateway Design
+# Wopal Codex Gateway 设计规范
 
-**Status:** Active  
-**Scope:** `projects/wopal-codex-gateway/`  
-**Role:** Architecture and behavioral source of truth for the gateway.
+**状态：** Active
+**范围：** `projects/wopal-codex-gateway/`
+**角色：** 本文档是 Gateway 架构与行为规范的真相源。
 
-## 1. Purpose
+## 1. 项目目标
 
-Wopal Codex Gateway is a local compatibility and routing layer between Codex Desktop/CLI and multiple model providers.
+Wopal Codex Gateway 是 Codex Desktop / Codex CLI 与多个模型提供方之间的本地兼容与路由层。
 
-Its job is not merely to proxy HTTP. It preserves the Codex interaction model while allowing one client and one conversation to use:
+它不只是一个 HTTP 反向代理。它需要在不破坏 Codex 原有交互模型的前提下，让同一个客户端、同一个会话能够使用：
 
-- native ChatGPT/Codex models;
-- Wopal AI models exposed through an OpenAI-compatible upstream.
+- ChatGPT / Codex 官方模型；
+- 通过 OpenAI 兼容接口提供的 Wopal AI 模型。
 
-The gateway also owns the provider-boundary behaviors that Codex itself does not provide reliably: provider switching, portable compaction, quota protection/failover, model catalog composition, and reversible Codex configuration.
+对于 Codex 本身不能可靠处理的 provider 边界问题，Gateway 负责补齐，包括：跨 provider 模型切换、可移植上下文压缩、官方额度保护与自动故障转移、模型目录合并、以及可逆的 Codex 配置接管。
 
-## 2. Design goals
+## 2. 设计目标
 
-The project MUST optimize for the following goals, in this order:
+项目必须按以下优先级进行设计：
 
-1. **Conversation continuity.** Switching providers must not silently discard conversation history.
-2. **Native compatibility.** Unnamespaced official models should behave as close to native Codex as possible.
-3. **Explicit routing.** Third-party models use explicit namespaces; unknown namespaces never fall through to OpenAI.
-4. **Credential isolation.** ChatGPT/OpenAI credentials must never be forwarded to a third-party provider.
-5. **Portable state.** New compaction state must be usable across official and Wopal providers.
-6. **Quota continuity.** Protected native quota should trigger an automatic provider failover rather than terminate an agent task.
-7. **Reversible installation.** Gateway-owned Codex configuration must be restorable to its pre-install state.
-8. **Local-first security.** Runtime state, credentials, and logs stay local and are not committed to Git.
-9. **Operational simplicity.** Prefer a small local daemon and deterministic routing rules over adaptive or opaque behavior.
+1. **会话连续性。** 切换 provider 时不得静默丢失历史上下文。
+2. **官方兼容性。** 未命名空间的官方模型应尽可能保持 Codex 原生行为。
+3. **路由明确。** 第三方模型必须使用显式命名空间；未知命名空间绝不能回落到 OpenAI 官方线路。
+4. **凭证隔离。** ChatGPT / OpenAI 凭证绝不能转发给第三方 provider。
+5. **状态可移植。** 新产生的 compaction 状态必须能在官方模型和 Wopal 模型之间恢复使用。
+6. **额度连续性。** 官方额度进入保护区后，应自动切到备用模型继续任务，而不是中断 Agent。
+7. **安装可恢复。** Gateway 接管的 Codex 配置必须能够恢复到安装前状态。
+8. **本地优先安全。** 运行时状态、凭证和日志保留在本机，不进入 Git。
+9. **运维简单。** 优先使用小型本地 daemon 和确定性规则，避免复杂、隐式、自适应路由。
 
-## 3. Non-goals
+## 3. 非目标
 
-The gateway is not intended to:
+Gateway 不负责：
 
-- expose a public multi-tenant API;
-- invent a new general-purpose provider protocol;
-- silently map arbitrary unknown namespaces to an official model;
-- log prompts, full conversation bodies, credentials, or raw account identifiers for observability;
-- make provider-specific opaque state magically portable without an explicit materialization step.
+- 对公网暴露多租户 API；
+- 发明新的通用 provider 协议；
+- 把任意未知命名空间静默映射到官方模型；
+- 为了可观测性记录 prompt、完整请求正文、凭证或原始账号标识；
+- 在没有显式 materialization（物化）步骤的情况下，把 provider 专属 opaque state 伪装成天然可移植状态。
 
-## 4. High-level architecture
+## 4. 总体架构
 
 ```text
 Codex Desktop / Codex CLI
         |
-        | OpenAI Responses-compatible traffic
+        | OpenAI Responses 兼容流量
         | HTTP + WebSocket
         v
 127.0.0.1:11435
-Wopal Codex Gateway (Go daemon)
+Wopal Codex Gateway（Go daemon）
         |
         +----------------------+----------------------+
         |                      |                      |
         v                      v                      v
 ChatGPT Codex backend     OpenAI API            Wopal AI
-(native subscription)    (native API path)      (OpenAI-compatible)
+（订阅官方线路）            （API 官方线路）        （OpenAI 兼容）
                                                   |
                                                   v
                                            CLIProxyAPI adapter
 ```
 
-The project has two implementation layers:
+项目分为两个实现层：
 
-- **Go daemon (`cmd/gatewayd`)** — runtime routing, HTTP/WebSocket protocol handling, compaction, quota state, provider-boundary sanitization, session state.
-- **TypeScript CLI (`src/`)** — installation, model catalog generation, Codex config mutation/restore, LaunchAgent management, Wopal model configuration.
+- **Go daemon（`cmd/gatewayd`）**：运行时路由、HTTP / WebSocket 协议处理、compaction、quota 状态、provider 边界清洗、会话状态。
+- **TypeScript CLI（`src/`）**：安装、模型目录生成、Codex 配置修改与恢复、LaunchAgent 管理、Wopal 模型配置。
 
-The runtime daemon is the authority for request behavior. The TypeScript CLI is the authority for installation and local configuration management.
+运行时请求行为以 Go daemon 为准；安装与本地配置管理以 TypeScript CLI 为准。
 
-## 5. Local endpoints
+## 5. 本地端点
 
-The default bind address is:
+默认监听地址：
 
 ```text
 127.0.0.1:11435
 ```
 
-Important endpoints:
+主要端点：
 
-| Endpoint | Purpose |
+| 端点 | 用途 |
 | --- | --- |
-| `POST /v1/responses` | Responses inference and HTTP failover path |
-| `GET /v1/responses` with WebSocket upgrade | Codex WebSocket inference |
-| `POST /v1/responses/compact` | Compaction compatibility endpoint |
-| `/v1/models` | Embedded provider/model API |
-| `GET /_health` | Process health |
-| `GET /_status` | Sanitized runtime/quota status |
+| `POST /v1/responses` | Responses 推理与 HTTP failover |
+| `GET /v1/responses` + WebSocket Upgrade | Codex WebSocket 推理 |
+| `POST /v1/responses/compact` | compaction 兼容端点 |
+| `/v1/models` | 内嵌 provider / 模型 API |
+| `GET /_health` | 进程健康检查 |
+| `GET /_status` | 脱敏后的运行时 / quota 状态 |
 
-`/_health` and `/_status` are local operational endpoints and must not expose credentials or raw account identifiers.
+`/_health` 与 `/_status` 仅用于本地运维，不得暴露凭证或原始账号标识。
 
-## 6. Model namespace contract
+## 6. 模型命名空间契约
 
-Routing is intentionally simple and deterministic.
+路由规则必须简单、确定、可预测。
 
-### 6.1 Official models
+### 6.1 官方模型
 
-An **unnamespaced** model is treated as an official model:
+**没有命名空间**的模型视为官方模型，例如：
 
 ```text
 gpt-6.1-sol
 ```
 
-Official traffic is routed to ChatGPT when a `ChatGPT-Account-ID` is present, otherwise to the OpenAI API route.
+如果请求带有 `ChatGPT-Account-ID`，走 ChatGPT Codex backend；否则走 OpenAI API 官方线路。
 
-### 6.2 Wopal AI models
+### 6.2 Wopal AI 模型
 
-A model prefixed with `wopal-ai/` is routed to the configured Wopal AI upstream:
+以 `wopal-ai/` 开头的模型路由到 Wopal AI：
 
 ```text
 wopal-ai/deepseek-v4.1-flash
 ```
 
-The namespace is a routing boundary. Official authentication headers must be removed before the request reaches Wopal AI.
+命名空间同时也是安全边界。请求进入 Wopal AI 前，必须清除官方认证信息。
 
-### 6.3 Unsupported namespaces
+### 6.3 不支持的命名空间
 
-The current Go daemon intentionally enables only the official and `wopal-ai/` route classes. Ollama-related CLI/catalog plumbing is retained for future/local experimentation, but the active daemon build rejects Ollama integration.
+当前 Go daemon 只启用 official 和 `wopal-ai/*` 两类运行时路由。Ollama 相关 CLI / catalog 代码暂时保留用于未来或本地实验，但当前 daemon 不提供 Ollama 正式运行时路由。
 
-Any other namespaced model is rejected rather than falling through:
+任何其他命名空间都必须明确拒绝：
 
 ```text
 foo/model -> rejected
 ```
 
-This prevents a typo or unknown provider name from accidentally consuming official quota or leaking credentials.
+这样可以避免拼写错误或未知 provider 意外消耗官方额度，或造成官方凭证泄漏。
 
-## 7. Model catalog design
+## 7. 模型目录设计
 
-The Codex model picker uses a gateway-generated merged catalog.
+Codex 模型选择器使用 Gateway 生成的合并 catalog。
 
-### 7.1 Official catalog source
+### 7.1 官方目录来源
 
-The canonical official baseline MUST come from the Codex binary's bundled catalog:
+官方模型的 canonical baseline 必须来自当前 Codex 二进制自带的 bundled catalog：
 
 ```text
 codex debug models --bundled
 ```
 
-The mutable runtime file `~/.codex/models_cache.json` MUST NOT be used as the canonical official source. Codex may rewrite that cache through the configured gateway, which can otherwise create a self-polluting catalog loop.
+不得把可变运行时文件 `~/.codex/models_cache.json` 当作官方模型真相源。Codex 可能通过 Gateway 自己刷新这个缓存，如果 Gateway 再把它当官方源读取，会形成 catalog 自污染循环。
 
-### 7.2 Visibility
+### 7.2 可见性
 
-Official model metadata is preserved, including `visibility`.
+官方模型元数据必须原样保留，包括 `visibility`：
 
-- `visibility = "list"` means the model can appear in the user model picker.
-- `visibility = "hide"` means the model is retained for internal Codex workflows but must stay hidden from normal user selection.
+- `visibility = "list"`：允许出现在用户模型选择器中；
+- `visibility = "hide"`：仅供 Codex 内部流程使用，不能作为普通用户模型展示。
 
-Internal models such as approval/safety workers may therefore remain present in the merged catalog without becoming user-selectable.
+因此审批、安全检查等内部模型可以继续存在于合并 catalog 中，但必须保持隐藏。
 
-### 7.3 External catalog entries
+### 7.3 外部模型目录
 
-Wopal AI entries are generated with explicit namespaced slugs and are user-visible by design.
+Wopal AI 模型使用显式 namespaced slug，并默认作为用户可选模型显示。
 
-The merged catalog preserves official metadata and adds external entries; it does not redefine official models.
+合并 catalog 的职责是“保留官方元数据 + 增加外部条目”，不是重新定义官方模型。
 
-## 8. Codex installation contract
+## 8. Codex 安装契约
 
-`codex install` manages only gateway-owned settings and records the previous values before mutation.
+`codex install` 只能修改 Gateway 明确拥有的配置，并且在修改前记录原值。
 
-The managed root settings are:
+当前接管的 root 配置：
 
 ```toml
 model_catalog_json = ".../wopal-codex-gateway-models.json"
 openai_base_url = "http://127.0.0.1:11435/v1"
 ```
 
-The gateway also owns two memory model overrides while installed:
+Gateway 安装期间还会接管两个 Memory 模型设置：
 
 ```toml
 [memories]
@@ -172,279 +172,283 @@ extract_model = "wopal-ai/deepseek-v4.1-flash"
 consolidation_model = "wopal-ai/deepseek-v4.1-flash"
 ```
 
-The previous values are stored in the Git-ignored runtime restore state. `codex restore` must restore prior values rather than guessing defaults.
+安装前原值记录在 Git 忽略的 runtime restore state 中。`codex restore` 必须恢复原值，不能猜测默认值。
 
-Install/restore logic must preserve unrelated user configuration and comments whenever possible.
+安装 / 恢复过程中应尽量保留与 Gateway 无关的用户配置和注释。
 
-## 9. HTTP routing
+## 9. HTTP 路由
 
-For `POST /v1/responses`, the request body is authoritative for model routing when a model is present. A stale handshake/routing hint must not override a newer body model.
+对于 `POST /v1/responses`，当正文内包含 `model` 时，正文模型优先于旧的 routing hint。过期的握手 hint 不得覆盖新模型。
 
-The gateway supports compressed request bodies used by Codex and normalizes a rewritten request to an uncompressed body when mutation is required.
+Gateway 必须支持 Codex 可能发送的压缩请求正文；当请求需要改写时，可以规范化为未压缩正文再继续处理。
 
-The routing body size is bounded to avoid unbounded memory use.
+用于路由解析的正文大小必须有限制，避免无限占用内存。
 
-### 9.1 Official HTTP
+### 9.1 官方 HTTP
 
-Official requests are reverse proxied to their native target after gateway-owned state is sanitized.
+官方请求在清洗掉 Gateway 自己生成、OpenAI 无法验证的状态后，再透明反向代理到官方目标。
 
 ### 9.2 Wopal HTTP
 
-Wopal requests are normalized for the third-party Responses-to-chat adapter. Official credentials and ChatGPT account headers are removed.
+Wopal 请求进入第三方 Responses-to-chat adapter 前需要做协议归一化，同时移除官方 Authorization 与 ChatGPT account header。
 
-### 9.3 Quota HTTP failover
+### 9.3 HTTP quota failover
 
-When an official request is protected by the quota guard, the gateway rewrites the effective model to the configured Wopal failover model and serves the request through the Wopal path instead of returning a quota interruption.
+当官方请求已经进入 quota 保护状态时，Gateway 直接把 effective model 改写为 Wopal fallback 模型，通过 Wopal 路径继续完成请求，而不是返回额度中断错误。
 
-## 10. WebSocket design
+## 10. WebSocket 设计
 
-Codex uses long-lived WebSocket sessions. A socket is provider-bound because its handshake, authentication, and upstream connection are provider-specific.
+Codex 使用长连接 WebSocket。一个 socket 的握手、认证与上游连接都绑定到具体 provider，因此 socket 本身就是 provider-bound。
 
-Therefore a single upstream socket MUST NOT be reused across provider boundaries.
+**同一个上游 socket 绝不能跨 provider 复用。**
 
-### 10.1 Cross-provider switching
+### 10.1 跨 provider 切换
 
-When a sampling request changes route class, the gateway closes the client socket with WebSocket close code `1012` (Service Restart).
-
-This is deliberate:
+当新的 sampling request 改变了 route class，Gateway 使用 WebSocket `1012`（Service Restart）关闭客户端连接：
 
 ```text
 provider A socket
-    -> model changes provider
-    -> gateway closes 1012
-    -> Codex reconnects
-    -> Codex replays full input
-    -> gateway binds new socket to provider B
+    -> 模型切换到 provider B
+    -> Gateway 发送 1012
+    -> Codex 重连
+    -> Codex 重放完整 input
+    -> Gateway 为 provider B 建立新 socket
 ```
 
-An API `400` must not be used for this transition because it terminates the turn instead of encouraging a transport retry.
+不能用 API `400` 表示这种切换，因为 `400` 会终止 turn，而不是触发 transport retry。
 
-### 10.2 Official WebSocket
+### 10.2 官方 WebSocket
 
-Official WebSocket traffic is mostly transparent pass-through. The gateway observes rate-limit telemetry and sanitizes only gateway-owned state that OpenAI cannot validate.
+官方 WebSocket 以透明 pass-through 为主。Gateway 只负责观察 rate-limit telemetry，以及清洗 OpenAI 无法验证的 Gateway-owned state。
 
 ### 10.3 Wopal WebSocket bridge
 
-Wopal AI may expose HTTP/SSE rather than Codex-native WebSocket semantics. The gateway therefore maintains a local WebSocket session and translates each Codex sampling step to an HTTP/SSE upstream call.
+Wopal AI 上游可能只提供 HTTP / SSE，而 Codex 需要 WebSocket 语义。因此 Gateway 在本地维护 Codex WebSocket session，并把每个 sampling step 转成 HTTP / SSE 上游调用。
 
-The bridge maintains bounded local state for:
+本地桥接状态包括：
 
-- last normalized request;
-- last response output;
-- last response id;
-- active compaction id.
+- 上一次归一化请求；
+- 上一次 response output；
+- 上一次 response id；
+- 当前 active compaction id。
 
-Session transcript state is bounded; the daemon must fail rather than grow state without limit.
+会话状态必须有上限；超过上限时宁可失败，也不能无限增长内存。
 
-## 11. Sampling-step semantics
+## 11. Sampling step 语义
 
-Quota and provider switching operate at the **sampling-step** boundary, not only at the outer user turn boundary.
+Quota 与 provider 切换的判断粒度是 **sampling step**，不是整个用户 turn。
 
-A single user/agent turn may contain many cycles:
+一次用户 / Agent turn 里可能发生多轮：
 
 ```text
-model call
--> tool call
--> model call
--> tool call
--> model call
+模型调用
+-> 工具调用
+-> 模型调用
+-> 工具调用
+-> 模型调用
 ```
 
-Each new `response.create` or `response.append` is a new decision point.
+每个新的 `response.create` 或 `response.append` 都是新的路由与 quota 判断点。
 
-The gateway can prevent the **next** model sampling call after it observes protected quota. It cannot retroactively stop quota already consumed by a sampling call that has started.
+Gateway 能阻止的是“观察到 quota 进入保护状态以后，下一次模型采样请求”。已经开始执行的采样步骤不能事后撤销其额度消耗。
 
-## 12. Official quota guard
+## 12. 官方额度保护
 
-The quota guard protects subscription reserve while keeping the task alive.
+Quota guard 的目标是保留官方订阅额度，同时保证 Agent 任务继续执行。
 
 ### 12.1 Telemetry
 
-Quota state is learned from native ChatGPT response metadata. Window identity is determined by window duration, not by assuming `primary` and `secondary` always map to fixed meanings.
+Quota 状态来自 ChatGPT 官方响应返回的 rate-limit metadata。窗口类型根据窗口时长识别，不能假设 `primary` / `secondary` 永远对应固定含义。
 
-Current recognized windows:
+当前识别：
 
-| Window | Duration | Protection threshold |
+| 窗口 | 时长 | 保护阈值 |
 | --- | ---: | ---: |
-| 5 hour | 300 minutes | 98% used |
-| weekly | 10080 minutes | 99% used |
+| 5 小时 | 300 分钟 | 已使用 98% |
+| 每周 | 10080 分钟 | 已使用 99% |
 
-These percentages are current product policy values, not protocol invariants.
+这些比例是当前产品策略，不是协议级不变量。
 
-### 12.2 Persistence
+### 12.2 持久化
 
-Quota state is persisted under `runtime/official-quota-state.json` so a daemon restart does not forget an already-protected window.
+Quota 状态保存到：
 
-Raw ChatGPT account IDs must not be stored. The account key is SHA-256 hashed before persistence.
+```text
+runtime/official-quota-state.json
+```
 
-Expired windows are removed by reset time.
+这样 daemon 重启后不会忘记已经处于保护状态的窗口。
 
-### 12.3 Exempt official flows
+原始 ChatGPT account ID 不得落盘；持久化前使用 SHA-256 哈希作为 account key。
 
-Some official models are exempt from failover because they serve recovery or internal approval roles. The current implementation explicitly exempts the supported Luna recovery models and `codex-auto-review`.
+到达 reset time 后，相应窗口状态应自动失效。
 
-This exception list is policy and must stay explicit; it must not be inferred from model names heuristically.
+### 12.3 官方豁免流程
 
-### 12.4 Failover state machine
+部分官方模型用于恢复或内部审批，不参与普通 quota failover。当前实现显式豁免支持的 Luna 恢复模型和 `codex-auto-review`。
+
+豁免列表属于明确策略，不能靠模型名称猜测。
+
+### 12.4 Failover 状态机
 
 ```text
 OFFICIAL
    |
-   | protected before next sampling step
+   | 下一 sampling step 前发现 protected
    v
 WOPAL FAILOVER
    |
-   | quota window reset before next sampling step
+   | 下一 sampling step 前发现 quota 已 reset
    v
 OFFICIAL
 ```
 
-For HTTP, the model is rewritten directly.
+HTTP 路径直接改写 model。
 
-For WebSocket, the official socket is closed with `1012`; on reconnect the request is served by the Wopal bridge. While in failover mode, each sampling step rechecks quota. Once the reset has passed, the Wopal socket is closed with `1012` so Codex reconnects to the originally requested official model.
+WebSocket 路径先使用 `1012` 关闭官方 socket；Codex 重连后，同一个请求由 Wopal bridge 接管。处于 fallback 状态时，每一个 sampling step 都重新检查 quota。窗口 reset 后，Wopal socket 再次用 `1012` 关闭，让 Codex 重连回原本请求的官方模型。
 
-The requested model and effective model are separate concepts and should be distinguishable in logs.
+日志必须区分 requested model 与 effective model。
 
-## 13. Memory and compaction are separate systems
+## 13. Memory 与 Compaction 是两套机制
 
-Codex **Memory** and conversation **compaction** solve different problems and are implemented differently.
+Codex **Memory** 和会话 **compaction** 解决的问题不同，实现方式也不同。
 
 ### 13.1 Codex Memory
 
-Memory extraction and consolidation are Codex background workflows. The gateway does not intercept them by recognizing hidden model names.
+Memory extraction / consolidation 是 Codex 自己的后台流程。Gateway 不通过识别隐藏模型名去“猜”某个请求是不是 Memory。
 
-Instead, installation explicitly configures Codex to use:
-
-```text
-wopal-ai/deepseek-v4.1-flash
-```
-
-for both extraction and consolidation.
-
-This avoids hidden official Memory workers consuming native quota and avoids brittle proxy heuristics.
-
-### 13.2 Conversation compaction
-
-Conversation compaction is gateway-owned.
-
-New compaction work is intercepted regardless of the foreground model and currently runs through the dedicated model:
+安装时直接配置 Codex：
 
 ```text
 wopal-ai/deepseek-v4.1-flash
 ```
 
-The compaction model is an implementation policy constant and is not derived from the currently selected foreground model.
+作为 extraction 与 consolidation 的模型。
 
-## 14. Portable compaction (`wgcp1`)
+这种方式可以避免隐藏的官方 Memory worker 消耗官方额度，同时避免 Proxy 中增加脆弱的启发式规则。
 
-OpenAI-native compaction capsules are opaque to third-party providers. The gateway therefore creates its own portable encrypted capsule for all new compactions.
+### 13.2 会话 Compaction
 
-### 14.1 Compaction pipeline
+会话 compaction 由 Gateway 接管。
+
+无论前台当前使用哪个模型，新 compaction 都会被 Gateway 拦截，并使用专用模型执行。当前模型：
 
 ```text
-Codex compaction request
-    -> Gateway intercepts
-    -> full usable conversation context is prepared
-    -> dedicated Wopal compaction model generates a handoff summary
-    -> Gateway seals the summary and retained prefix metadata
-    -> Codex receives a gateway-owned compaction item
+wopal-ai/deepseek-v4.1-flash
 ```
 
-The encrypted payload prefix is:
+Compaction 模型是 Gateway 当前策略常量，不继承前台模型。
+
+## 14. 可移植 Compaction（`wgcp1`）
+
+OpenAI 原生 compaction capsule 对第三方 provider 是 opaque 的。为了支持跨 provider，会话中新产生的 compaction 统一由 Gateway 生成自己的可移植加密 capsule。
+
+### 14.1 压缩流程
+
+```text
+Codex 发起 compaction
+    -> Gateway 拦截
+    -> 准备可用的完整会话上下文
+    -> 专用 Wopal compaction 模型生成 handoff summary
+    -> Gateway 封装 summary 与需保留的 prefix metadata
+    -> 返回 Gateway-owned compaction item 给 Codex
+```
+
+加密 payload 前缀：
 
 ```text
 wgcp1.
 ```
 
-The payload is authenticated/encrypted with AES-GCM using a key derived from the local Wopal secret. The ciphertext must not contain plaintext summary content.
+Payload 使用 AES-GCM 认证加密，密钥由本机 Wopal secret 派生。ciphertext 中不得出现 summary 明文。
 
 ### 14.2 Retained prefix
 
-Provider-independent context that must survive compaction, such as supported `additional_tools` declarations, may be retained in the encrypted capsule and restored before the summary.
+与 provider 无关、但压缩后仍需存在的上下文，例如支持的 `additional_tools` 声明，可以一起加密保存在 capsule 中，并在 summary 前恢复。
 
-If the client already supplied the current declaration, restoration must avoid duplication.
+如果客户端已经带了最新声明，恢复时不得重复插入。
 
-### 14.3 Expanded summary item
+### 14.3 展开的 summary message
 
-When a `wgcp1` capsule is materialized as an official Responses `message`, the synthetic ID must satisfy official message constraints:
+当 `wgcp1` 被展开成官方 Responses `message` 时，合成 ID 必须满足官方约束：
 
-- prefix: `msg_`;
-- maximum length: 64 characters;
-- deterministic/stable for the same compaction id.
+- 前缀必须是 `msg_`；
+- 最大长度 64 字符；
+- 相同 compaction id 必须得到稳定、确定的 ID。
 
-The current form uses a `msg_wopal_compaction_summary_...` prefix and hashes long source IDs.
+当前形式为 `msg_wopal_compaction_summary_...`；源 ID 太长时使用稳定哈希。
 
-### 14.4 Local response IDs
+### 14.4 本地 response ID
 
-Gateway-local compaction response IDs are not valid OpenAI server-side continuation IDs. When crossing back to official, the gateway removes local `previous_response_id` values and sends the materialized history instead.
+Gateway 自己生成的 compaction response id 不是 OpenAI 服务端 continuation id。切回官方模型时，必须删除本地 `previous_response_id`，改为发送 materialized history。
 
-## 15. Official-boundary sanitization
+## 15. 官方边界清洗
 
-Gateway-owned opaque content must never be forwarded to OpenAI as though OpenAI created it.
+Gateway 自己生成的 opaque state 不能伪装成 OpenAI 生成的数据再转给官方。
 
-Before an official request is sent, the gateway must:
+官方请求发送前必须：
 
-- expand readable `wgcp1` capsules into ordinary messages;
-- remove Wopal-generated reasoning items identified by gateway-specific reasoning IDs;
-- remove gateway-local `previous_response_id` values when materialized history replaces them;
-- preserve genuine OpenAI-native reasoning/compaction state unchanged.
+- 把可读取的 `wgcp1` 展开成普通 message；
+- 删除 Gateway / Wopal 生成的 reasoning item；
+- 当历史已经 materialize 时删除 Gateway-local `previous_response_id`；
+- 原样保留真正的 OpenAI native reasoning / compaction state。
 
-If a gateway capsule cannot be opened, the request must degrade explicitly without leaking ciphertext or inventing lost history.
+如果 Gateway capsule 无法解密，必须显式降级或失败，不能泄漏 ciphertext，也不能伪造丢失的历史。
 
-## 16. Legacy OpenAI-native compaction
+## 16. 旧 OpenAI Native Compaction
 
-Old conversations may still contain OpenAI-native opaque compaction state created before the gateway took ownership of new compactions.
+旧会话可能仍然携带 Gateway 接管 compaction 之前产生的 OpenAI opaque capsule。
 
-Third-party models cannot interpret that state directly.
+第三方模型无法直接理解这类状态。
 
-For a provider switch from native history to Wopal, the gateway uses a native compaction bridge to ask the owning official provider to materialize a usable summary. The result is cached so the same native capsule does not require repeated restoration.
+当旧官方历史切到 Wopal 时，Gateway 通过 native compaction bridge，请原 provider 把 opaque state materialize 成可用 summary。恢复结果需要缓存，避免同一个 capsule 重复请求官方恢复。
 
-Legacy restoration has a bounded timeout and must stop once a completed response is obtained; it must not wait indefinitely for stream EOF.
+Legacy restore 必须有超时，并且一旦拿到 completed response 就立即结束，不能无期限等待 stream EOF。
 
-If native state cannot be restored, the gateway must fail the provider switch rather than silently discard history.
+如果 native state 无法恢复，跨 provider 切换必须失败，不能静默丢弃历史。
 
-This legacy path exists for migration compatibility. New compactions must not create additional OpenAI-native opaque state.
+这是一条迁移兼容路径。新的 compaction 不得继续制造 OpenAI native opaque state。
 
-## 17. Provider-switch continuity rules
+## 17. 跨 Provider 会话连续性规则
 
-The following rules are mandatory:
+以下规则是强制约束：
 
-1. Never silently discard a compaction item because the target provider cannot read it.
-2. Never forward provider-A opaque encrypted state to provider B and hope it works.
-3. When state is materialized into plain conversation history, invalidate provider-local `previous_response_id` links.
-4. Cross-provider WebSocket changes require reconnect + replay.
-5. Switching back to official must sanitize Wopal-owned items into official-valid Responses items.
-6. Switching to Wopal from legacy official history requires native state materialization first.
+1. 目标 provider 无法读取 compaction 时，绝不能静默丢弃它。
+2. 绝不能把 provider A 的 opaque encrypted state 原样发给 provider B 碰运气。
+3. 当 provider-local state 已经 materialize 成普通历史时，必须解除旧的 `previous_response_id` 链接。
+4. WebSocket 跨 provider 切换必须通过 reconnect + replay。
+5. 切回官方时，Wopal-owned item 必须转换成官方合法的 Responses item。
+6. 旧官方历史切到 Wopal 前，必须先 materialize native state。
 
-These rules are more important than preserving a single transport connection.
+会话连续性优先级高于保住某一个 transport connection。
 
-## 18. Authentication and credential boundaries
+## 18. 认证与凭证边界
 
 ### 18.1 Wopal AI secret
 
-The Wopal API key is stored in macOS Keychain. The daemon reads it at runtime.
+Wopal API key 存储在 macOS Keychain，由 daemon 运行时读取。
 
-Generated CLIProxyAPI runtime configuration must not persist the real Wopal API key.
+生成给 CLIProxyAPI 的运行时配置不能写入真实 Wopal API key。
 
-### 18.2 Official credentials
+### 18.2 官方凭证
 
-Official Authorization and ChatGPT account headers are only valid on official routes.
+官方 Authorization 与 ChatGPT account header 只能存在于官方线路。
 
-Before entering a Wopal route the gateway must:
+进入 Wopal 路径前必须：
 
-- replace the Authorization header with the local embedded-proxy credential;
-- remove `ChatGPT-Account-ID`;
-- avoid forwarding other official-only credential material.
+- 把 Authorization 替换成本地 embedded proxy credential；
+- 删除 `ChatGPT-Account-ID`；
+- 不转发其他只属于官方 provider 的认证信息。
 
-### 18.3 Local files
+### 18.3 本地文件
 
-Runtime configuration, logs, generated binaries, auth state, restore state, and quota persistence are Git-ignored local artifacts.
+运行时配置、日志、生成二进制、auth state、restore state 和 quota persistence 都属于 Git 忽略的本地运行数据。
 
-Files containing sensitive runtime state should use restrictive permissions where practical.
+包含敏感状态的文件应尽可能使用严格权限。
 
-## 19. Logging and observability
+## 19. 日志与可观测性
 
-Primary local logs:
+主要本地日志：
 
 ```text
 logs/gateway.log
@@ -452,55 +456,55 @@ logs/service.log
 logs/service-error.log
 ```
 
-`gateway.log` records routing/lifecycle metadata such as selected provider/model, failover/failback, quota observations, and WebSocket lifecycle events.
+`gateway.log` 记录路由 / 生命周期元数据，例如 provider / model、failover / failback、quota observation、WebSocket 生命周期。
 
-Logs should prefer metadata over content. Do not log:
+日志应优先记录 metadata，不记录：
 
-- prompts or full request bodies;
-- API keys or authorization headers;
-- raw ChatGPT account IDs;
-- plaintext encrypted capsule payloads.
+- prompt 或完整请求正文；
+- API key 或 Authorization header；
+- 原始 ChatGPT account ID；
+- 加密 capsule 的明文内容。
 
-`/_status` is the supported lightweight status surface for health and latest quota state.
+`/_status` 是轻量查看健康状态与最新 quota 状态的标准接口。
 
-## 20. Service lifecycle
+## 20. 服务生命周期
 
-The gateway is installed as the per-user macOS LaunchAgent:
+Gateway 以 macOS 当前用户的 LaunchAgent 运行：
 
 ```text
 com.wopal.codex-gateway
 ```
 
-The live daemon is expected at:
+正式 daemon 路径：
 
 ```text
 runtime/bin/wopal-codex-gatewayd
 ```
 
-Installation must not report success until `/_health` responds successfully.
+安装流程必须等 `/_health` 成功后才能报告完成。
 
-Cold startup of a newly built Mach-O on macOS can occasionally take longer than normal startup, so the installer uses a bounded health deadline rather than a short fixed retry count. The current total health deadline is 90 seconds.
+新编译 Mach-O 在 macOS 上首次运行可能因为系统安全检查而明显变慢，因此 installer 使用有限总 deadline，而不是很短的固定重试次数。当前总 health deadline 为 90 秒。
 
-A long health deadline is not permission to hide a crashed daemon: failure after the deadline remains an installation error.
+较长 deadline 不代表允许隐藏 daemon crash；超过 deadline 仍必须报告安装失败。
 
-## 21. Runtime failure behavior
+## 21. 运行时失败原则
 
-The gateway follows these failure principles:
+Gateway 遵循以下失败策略：
 
-- **Unknown namespace:** reject explicitly.
-- **Unreadable cross-provider history:** fail without discarding history.
-- **Official dial failure before WebSocket upgrade:** return a clean HTTP error, not a half-open socket.
-- **Provider change:** close/reconnect, do not tunnel across incompatible credentials.
-- **Quota protection:** fail over when possible instead of returning an interruption.
-- **Quota recovery:** return to the originally requested official model on a safe sampling boundary.
-- **State overflow:** fail rather than retain unbounded session history.
-- **Compaction failure:** do not fabricate a successful compaction capsule.
+- **未知命名空间：** 明确拒绝。
+- **跨 provider 历史无法恢复：** 失败，但不得丢历史。
+- **官方 WebSocket upgrade 前上游拨号失败：** 返回干净 HTTP 错误，不能留下半开 socket。
+- **Provider 变化：** 重连，不跨不兼容凭证直接隧道复用。
+- **Quota 保护：** 能 failover 就继续任务，不优先返回中断。
+- **Quota 恢复：** 在安全 sampling boundary 回到原请求的官方模型。
+- **状态超限：** 失败，不允许无限保留会话状态。
+- **Compaction 失败：** 不能伪造成功 capsule。
 
-## 22. Testing contract
+## 22. 测试契约
 
-Behavior that crosses providers, mutates history, or handles credentials requires regression coverage.
+任何涉及跨 provider、历史变换或凭证边界的行为，都必须有回归测试。
 
-Minimum project validation:
+项目最低验证命令：
 
 ```sh
 go test ./...
@@ -509,87 +513,87 @@ pnpm test
 pnpm typecheck
 ```
 
-Race-sensitive Go paths should also be exercised with targeted `go test -race` coverage.
+并发敏感 Go 路径还应运行有针对性的 `go test -race`。
 
-### 22.1 Test lifecycle hygiene
+### 22.1 测试生命周期卫生
 
-Tests must not leave local child processes or sockets behind after success or failure.
+无论测试成功还是失败，都不能遗留本地子进程或 socket。
 
-The Node test runner uses:
+Node 测试当前使用：
 
-- a per-test timeout;
-- forced worker exit after the suite;
-- explicit WebSocket/client teardown;
-- server shutdown fallback when normal close cannot drain connections.
+- 单测试硬超时；
+- suite 完成后强制退出 worker；
+- 显式关闭 WebSocket / client；
+- server 正常 close 无法排空连接时使用兜底强制关闭。
 
-A successful suite with leaked test processes is considered a failed validation outcome.
+“测试全部通过但留下垃圾进程”应视为验证失败。
 
-### 22.2 Required regression themes
+### 22.2 必须长期覆盖的回归主题
 
-Tests should preserve at least these behaviors:
+至少包括：
 
-- official vs namespaced routing;
-- credential stripping at third-party boundaries;
-- HTTP and WebSocket provider switching;
-- `1012` replay behavior;
-- quota protect/failover/failback at sampling-step boundaries;
-- quota state persistence across restart;
-- Wopal compaction closed loop;
-- Wopal -> official compaction expansion;
-- official -> Wopal legacy compaction materialization;
-- valid official synthetic message IDs;
-- hidden official catalog visibility;
-- reversible Codex config install/restore;
-- no stale model cache used as the official catalog source.
+- official 与 namespaced routing；
+- 第三方边界凭证清洗；
+- HTTP / WebSocket provider switching；
+- `1012` replay 行为；
+- sampling-step 级 quota protect / failover / failback；
+- quota 状态跨重启持久化；
+- Wopal compaction 闭环；
+- Wopal -> official compaction expansion；
+- official -> Wopal legacy compaction materialization；
+- 官方合法 synthetic message ID；
+- hidden 官方模型可见性；
+- Codex 配置 install / restore 可逆；
+- 不把 stale `models_cache.json` 当官方 catalog 源。
 
-## 23. Stable invariants
+## 23. 稳定架构不变量
 
-Future changes MUST preserve these invariants unless this design is explicitly revised:
+除非本文档被明确修订，未来实现必须保持以下约束：
 
-1. **Official models remain unnamespaced.**
-2. **Third-party routes require explicit namespaces.**
-3. **Unknown namespaces never fall through to official.**
-4. **Official credentials never reach Wopal AI.**
-5. **The bundled Codex catalog is the official model baseline.**
-6. **Hidden official models remain hidden.**
-7. **Cross-provider WebSocket changes reconnect and replay.**
-8. **New conversation compaction is gateway-owned and portable.**
-9. **Gateway-owned encrypted/reasoning state is sanitized before official forwarding.**
-10. **Unreadable provider-specific history is never silently dropped.**
-11. **Quota protection is checked at each new sampling step.**
-12. **Codex installation is reversible.**
-13. **Runtime credentials/state remain outside Git.**
-14. **Tests must clean up their processes and sockets.**
+1. **官方模型保持无命名空间。**
+2. **第三方 provider 必须使用显式命名空间。**
+3. **未知命名空间绝不能回落到官方。**
+4. **官方凭证绝不能到达 Wopal AI。**
+5. **Codex bundled catalog 是官方模型基线。**
+6. **官方 hidden 模型必须继续 hidden。**
+7. **WebSocket 跨 provider 必须 reconnect + replay。**
+8. **新的会话 compaction 由 Gateway 接管并保持可移植。**
+9. **Gateway-owned encrypted / reasoning state 在进入官方前必须清洗。**
+10. **无法读取的 provider 专属历史绝不能被静默丢弃。**
+11. **每个新 sampling step 都要检查 quota protection。**
+12. **Codex 安装必须可逆。**
+13. **运行时凭证与状态不得进入 Git。**
+14. **测试必须回收自己创建的进程和 socket。**
 
-## 24. Current policy values
+## 24. 当前策略参数
 
-The following values describe the current deployment policy. They may change without changing the architecture above, but changes should be explicit and tested.
+以下值是当前部署策略，不是永久架构约束；以后可以修改，但必须显式调整并有测试覆盖。
 
-| Policy | Current value |
+| 策略 | 当前值 |
 | --- | --- |
-| Default listen address | `127.0.0.1:11435` |
-| Wopal quota failover model | `wopal-ai/deepseek-v4.1-flash` |
-| Dedicated compaction model | `wopal-ai/deepseek-v4.1-flash` |
-| Memory extraction model | `wopal-ai/deepseek-v4.1-flash` |
-| Memory consolidation model | `wopal-ai/deepseek-v4.1-flash` |
-| 5-hour stop threshold | `98% used` |
-| Weekly stop threshold | `99% used` |
-| Native compaction restore timeout | about `3 minutes` |
-| Install health deadline | `90 seconds` |
-| Node test timeout | `30 seconds` |
+| 默认监听地址 | `127.0.0.1:11435` |
+| Quota fallback 模型 | `wopal-ai/deepseek-v4.1-flash` |
+| 专用 compaction 模型 | `wopal-ai/deepseek-v4.1-flash` |
+| Memory extraction 模型 | `wopal-ai/deepseek-v4.1-flash` |
+| Memory consolidation 模型 | `wopal-ai/deepseek-v4.1-flash` |
+| 5 小时窗口保护阈值 | 已使用 `98%` |
+| Weekly 保护阈值 | 已使用 `99%` |
+| Native compaction restore 超时 | 约 `3 分钟` |
+| Install health deadline | `90 秒` |
+| Node 单测试超时 | `30 秒` |
 
-## 25. Change discipline
+## 25. 变更纪律
 
-Changes that affect any of the following should update this document in the same change set:
+以下行为发生变化时，必须在同一变更集中同步更新本文档：
 
-- routing namespace semantics;
-- provider credential boundaries;
-- model catalog source/visibility rules;
-- quota state machine or thresholds;
-- compaction ownership/capsule format;
-- Memory routing policy;
-- cross-provider replay behavior;
-- Codex install/restore ownership;
-- runtime security invariants.
+- 路由命名空间语义；
+- provider 凭证边界；
+- 模型 catalog 来源或可见性规则；
+- quota 状态机或保护阈值；
+- compaction 所有权或 capsule 格式；
+- Memory 路由策略；
+- 跨 provider replay 行为；
+- Codex install / restore 接管范围；
+- 运行时安全不变量。
 
-Implementation details may evolve freely when they preserve the documented behavior and invariants.
+只要不改变本文定义的行为与不变量，内部实现细节可以自由演进。

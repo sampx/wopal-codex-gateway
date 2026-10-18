@@ -1,8 +1,10 @@
 # Wopal Codex Gateway
 
+English | [简体中文](README.zh-CN.md)
+
 A local gateway for using native ChatGPT/Codex models and third-party OpenAI-compatible models from the same Codex client.
 
-Architecture and behavioral design: [`docs/DESIGN.md`](docs/DESIGN.md).
+Architecture and behavioral design (Chinese): [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ## What it does
 
