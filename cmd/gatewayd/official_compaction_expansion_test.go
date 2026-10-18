@@ -386,6 +386,19 @@ func TestOfficialSanitizerDropsLocalPreviousResponseAfterWopalCompaction(t *test
 	if !bytes.Contains(rewritten, []byte("PORTABLE-77")) {
 		t.Fatalf("HTTP sanitizer lost portable summary: %s", rewritten)
 	}
+	var rewrittenPayload map[string]any
+	if err := json.Unmarshal(rewritten, &rewrittenPayload); err != nil {
+		t.Fatal(err)
+	}
+	rewrittenInput, _ := rewrittenPayload["input"].([]any)
+	if len(rewrittenInput) == 0 {
+		t.Fatalf("HTTP sanitizer produced no input: %s", rewritten)
+	}
+	summaryMessage, _ := rewrittenInput[0].(map[string]any)
+	summaryID := strings.TrimSpace(fmt.Sprint(summaryMessage["id"]))
+	if !strings.HasPrefix(summaryID, "msg_") || len(summaryID) > 64 {
+		t.Fatalf("HTTP sanitizer produced invalid official message id %q", summaryID)
+	}
 
 	frame := append([]byte(nil), body...)
 	rewrittenFrame, ok := sanitizeOfficialWebsocketFrame(frame)
@@ -397,6 +410,16 @@ func TestOfficialSanitizerDropsLocalPreviousResponseAfterWopalCompaction(t *test
 	}
 	if !bytes.Contains(rewrittenFrame, []byte("PORTABLE-77")) {
 		t.Fatalf("websocket sanitizer lost portable summary: %s", rewrittenFrame)
+	}
+	var framePayload map[string]any
+	if err := json.Unmarshal(rewrittenFrame, &framePayload); err != nil {
+		t.Fatal(err)
+	}
+	frameInput, _ := framePayload["input"].([]any)
+	frameSummary, _ := frameInput[0].(map[string]any)
+	frameSummaryID := strings.TrimSpace(fmt.Sprint(frameSummary["id"]))
+	if !strings.HasPrefix(frameSummaryID, "msg_") || len(frameSummaryID) > 64 {
+		t.Fatalf("websocket sanitizer produced invalid official message id %q", frameSummaryID)
 	}
 }
 
@@ -428,6 +451,9 @@ func TestWopalCompactionSummaryIDsFitOfficialLimit(t *testing.T) {
 	id := strings.TrimSpace(fmt.Sprint(message["id"]))
 	if len(id) == 0 || len(id) > 64 {
 		t.Fatalf("summary id length = %d, want 1..64: %q", len(id), id)
+	}
+	if !strings.HasPrefix(id, "msg_") {
+		t.Fatalf("summary id must use official message prefix: %q", id)
 	}
 
 	fallback := wopalCompactionUnavailableMessage(capsule.ID)

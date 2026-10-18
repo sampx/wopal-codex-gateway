@@ -129,7 +129,7 @@ func openWopalCompactionCapsule(encoded string) (wopalCompactionCapsule, error) 
 	return capsule, nil
 }
 
-const wopalCompactionSummaryIDPrefix = "wopal_compaction_summary_"
+const wopalCompactionSummaryIDPrefix = "msg_wopal_compaction_summary_"
 
 func wopalCompactionSummaryID(id any) string {
 	raw := strings.TrimSpace(fmt.Sprint(id))
