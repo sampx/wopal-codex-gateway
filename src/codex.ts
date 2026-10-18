@@ -88,18 +88,21 @@ async function writeAtomic(path: string, content: string): Promise<void> {
   await rename(temp, path);
 }
 
-async function waitForHealth(host: string, port: number): Promise<void> {
+export async function waitForHealth(host: string, port: number, timeoutMs = 90_000, retryDelayMs = 250): Promise<void> {
   const url = `http://${host}:${port}/_health`;
+  const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  while (Date.now() < deadline) {
+    const remaining = Math.max(1, deadline - Date.now());
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(500) });
+      const response = await fetch(url, { signal: AbortSignal.timeout(Math.min(500, remaining)) });
       if (response.ok) return;
       lastError = new Error(`health returned ${response.status}`);
     } catch (error) {
       lastError = error;
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const sleepMs = Math.min(retryDelayMs, Math.max(0, deadline - Date.now()));
+    if (sleepMs > 0) await new Promise((resolve) => setTimeout(resolve, sleepMs));
   }
-  throw new Error(`gateway service did not become healthy: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  throw new Error(`gateway service did not become healthy within ${timeoutMs}ms: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
