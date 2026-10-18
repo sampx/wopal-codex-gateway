@@ -261,3 +261,101 @@ func TestQuotaGuardNotifiesOnlyForBlockedOfficialModels(t *testing.T) {
 	}
 	expectNoNotification(t, dispatched)
 }
+
+func TestQuotaNotifierDescribesQuotaRecovery(t *testing.T) {
+	notifier, dispatched := newRecordingNotifier(t, true)
+	now := time.Unix(1_800_000_000, 0)
+	resetAt := now.Add(3 * time.Hour)
+
+	if !notifier.notifyQuotaRecovered("gpt-6.1-sol", "five_hour", resetAt, now.Add(3*time.Hour)) {
+		t.Fatal("quota recovery did not dispatch a notification")
+	}
+	if notifier.notifyQuotaRecovered("gpt-6.1-sol", "five_hour", resetAt, now.Add(4*time.Hour)) {
+		t.Fatal("quota recovery dispatched a second notification for the same window")
+	}
+
+	record := waitForNotification(t, dispatched)
+	if got := argValue(record.args, "-title"); !strings.Contains(got, "已恢复") {
+		t.Fatalf("title = %q", got)
+	}
+	message := argValue(record.args, "-message")
+	if !strings.Contains(message, "gpt-6.1-sol") {
+		t.Fatalf("message = %q", message)
+	}
+	if got := argValue(record.args, "-group"); got != quotaNotificationGroupID {
+		t.Fatalf("group = %q", got)
+	}
+	expectNoNotification(t, dispatched)
+}
+
+func TestQuotaGuardNotifiesRecoveryWhenTheWindowResets(t *testing.T) {
+	notifier, dispatched := newRecordingNotifier(t, true)
+	guard := newOfficialQuotaGuard(nil)
+	guard.notifier = notifier
+
+	var scheduled []func()
+	var delays []time.Duration
+	guard.scheduleAfter = func(delay time.Duration, fn func()) {
+		delays = append(delays, delay)
+		scheduled = append(scheduled, fn)
+	}
+
+	now := time.Unix(1_800_000_000, 0)
+	guard.observeRateLimitPayload("acct", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_at":1800010800}}}`), now)
+
+	if blocked, _ := guard.blockedModel("acct", "gpt-6.1-sol", now); !blocked {
+		t.Fatal("official model was not blocked")
+	}
+	waitForNotifications(t, dispatched, 1)
+
+	if len(scheduled) != 1 {
+		t.Fatalf("scheduled %d recovery callbacks", len(scheduled))
+	}
+	if delays[0] != 3*time.Hour {
+		t.Fatalf("recovery delay = %v", delays[0])
+	}
+	status := guard.failoverStatus()
+	if status["active"] != true || status["requested_model"] != "gpt-6.1-sol" {
+		t.Fatalf("failover status = %v", status)
+	}
+
+	if blocked, _ := guard.blockedModel("acct", "gpt-6.1-sol", now.Add(time.Minute)); !blocked {
+		t.Fatal("official model was not blocked on the second sampling step")
+	}
+	if len(scheduled) != 1 {
+		t.Fatalf("second sampling step scheduled another recovery callback: %d", len(scheduled))
+	}
+
+	scheduled[0]()
+	record := waitForNotification(t, dispatched)
+	if got := argValue(record.args, "-message"); !strings.Contains(got, "gpt-6.1-sol") {
+		t.Fatalf("recovery message = %q", got)
+	}
+	if status := guard.failoverStatus(); status["active"] != false {
+		t.Fatalf("failover still active after recovery: %v", status)
+	}
+	expectNoNotification(t, dispatched)
+}
+
+func TestQuotaGuardSkipsRecoveryWithoutFailover(t *testing.T) {
+	notifier, dispatched := newRecordingNotifier(t, true)
+	guard := newOfficialQuotaGuard(nil)
+	guard.notifier = notifier
+
+	scheduledCount := 0
+	guard.scheduleAfter = func(time.Duration, func()) { scheduledCount++ }
+
+	now := time.Unix(1_800_000_000, 0)
+	guard.observeRateLimitPayload("acct", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":97,"window_minutes":300,"reset_at":1800010800}}}`), now)
+
+	if blocked, _ := guard.blockedModel("acct", "gpt-6.1-sol", now); blocked {
+		t.Fatal("official model was blocked below the threshold")
+	}
+	if scheduledCount != 0 {
+		t.Fatalf("scheduled %d recovery callbacks without a failover", scheduledCount)
+	}
+	if status := guard.failoverStatus(); status["active"] != false {
+		t.Fatalf("failover status = %v", status)
+	}
+	expectNoNotification(t, dispatched)
+}

@@ -492,7 +492,18 @@ Wopal fallback
 
 WebSocket 路径出现 `1012 Service Restart` 在 Provider 切换和 quota failover/failback 场景下是预期控制行为，Codex 应重新建立连接并重放输入。
 
-切换发生时，Gateway 会弹出一条 macOS 通知，告诉你请求的官方模型被换成了哪个模型、额度大约什么时候恢复。每个保护周期只会通知一次，不会在大批请求里反复弹窗。
+两个方向都会弹 macOS 通知，每个保护周期各一次，不会在大批请求里反复弹窗：
+
+- 切换发生时：告诉你请求的官方模型被换成了哪个模型、额度大约什么时候恢复；
+- 额度 reset 时：告诉你可以切回官方模型了（由定时器驱动，不需要你先发一次请求）。
+
+想随时确认「现在这句跑在哪个模型上」，看这里：
+
+```sh
+curl -fsS http://127.0.0.1:11435/_status
+```
+
+`official_quota.state` 为 `protected` 表示官方额度处于保护区；`official_quota.failover.active` 为 `true` 表示你的官方请求正在被自动换成 Wopal 模型。
 
 通知依赖 `terminal-notifier`；未安装时不会弹通知，路由功能不受影响。需要关闭通知时，在 `runtime/config.json` 里加上：
 
@@ -884,7 +895,8 @@ Gateway 会尝试通过官方 Provider 将它物化为可继续使用的历史�
 2. 「系统设置 → 通知」里是否允许 `terminal-notifier` 发送通知；
 3. `runtime/config.json` 中 `notifications.enabled` 是否为 `false`；
 4. 当前保护周期是否已经通知过（同一保护周期、同一窗口、同一被替换模型只通知一次）；
-5. `logs/gateway.log` 中的 `quota_failover_notified`、`quota_failover_notify_unavailable`、`quota_failover_notify_failed` 事件。
+5. `logs/gateway.log` 中的 `quota_failover_notified`、`quota_recovery_notified`、`quota_failover_notify_unavailable`、`quota_failover_notify_failed` 事件；
+6. Gateway 是否在保护周期内重启过（重启会丢失「恢复通知」的定时器，该周期不会再补发）。
 
 ## 13. 安全与本地状态
 

@@ -40,6 +40,15 @@ type officialQuotaGuard struct {
 	persistencePath string
 	logger          *activityLogger
 	notifier        *quotaNotifier
+
+	failoverMu     sync.Mutex
+	failoverActive bool
+	failoverSince  time.Time
+	failoverModel  string
+	recoveryKey    string
+
+	// scheduleAfter is overridden in tests; production uses time.AfterFunc.
+	scheduleAfter func(time.Duration, func())
 }
 
 type officialQuotaPersistedState struct {
@@ -178,20 +187,87 @@ func (g *officialQuotaGuard) blockedModel(accountID, model string, now time.Time
 		return false, ""
 	}
 	blocked, reason := g.blocked(accountID, now)
-	if blocked {
-		g.notifyQuotaFailover(model, reason, accountID, now)
+	if !blocked {
+		return false, ""
 	}
-	return blocked, reason
+	g.enterQuotaFailover(model, reason, accountID, now)
+	return true, reason
 }
 
-// notifyQuotaFailover surfaces the automatic provider switch to the user. It is
-// called only from the model-scoped guard used by the routing paths, so it sees
-// exactly the requests that used to fail instead of failing over.
-func (g *officialQuotaGuard) notifyQuotaFailover(requestedModel, reason, accountID string, now time.Time) {
-	if g == nil || g.notifier == nil {
+// enterQuotaFailover records the automatic provider switch and arms the matching
+// recovery notification for the moment the protected window resets. It is called
+// only from the model-scoped guard used by the routing paths, so it sees exactly
+// the requests that were replaced instead of failing.
+func (g *officialQuotaGuard) enterQuotaFailover(requestedModel, reason, accountID string, now time.Time) {
+	if g == nil {
 		return
 	}
-	g.notifier.notifyQuotaFailover(requestedModel, officialQuotaFailoverModel, reason, g.windowResetAt(accountID, reason), now)
+	resetAt := g.windowResetAt(accountID, reason)
+	key := quotaRecoveryKey(reason, resetAt, requestedModel)
+
+	g.failoverMu.Lock()
+	alreadyArmed := g.recoveryKey == key
+	g.failoverActive = true
+	g.failoverSince = now
+	g.failoverModel = requestedModel
+	if !alreadyArmed && !resetAt.IsZero() {
+		g.recoveryKey = key
+	}
+	g.failoverMu.Unlock()
+
+	g.notifier.notifyQuotaFailover(requestedModel, officialQuotaFailoverModel, reason, resetAt, now)
+	if alreadyArmed || resetAt.IsZero() {
+		return
+	}
+
+	delay := resetAt.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	schedule := g.scheduleAfter
+	if schedule == nil {
+		schedule = func(delay time.Duration, fn func()) { time.AfterFunc(delay, fn) }
+	}
+	schedule(delay, func() { g.notifyQuotaRecovered(requestedModel, reason, resetAt, key) })
+}
+
+func quotaRecoveryKey(reason string, resetAt time.Time, requestedModel string) string {
+	return reason + "|" + resetAt.UTC().Format(time.RFC3339) + "|" + requestedModel
+}
+
+// notifyQuotaRecovered clears the failover state and tells the user native models
+// are usable again. It runs from the timer armed at failover time.
+func (g *officialQuotaGuard) notifyQuotaRecovered(requestedModel, reason string, resetAt time.Time, key string) {
+	if g == nil {
+		return
+	}
+	g.failoverMu.Lock()
+	superseded := g.recoveryKey != key
+	g.failoverActive = false
+	g.failoverSince = time.Time{}
+	g.failoverModel = ""
+	g.failoverMu.Unlock()
+	if superseded {
+		return
+	}
+	g.notifier.notifyQuotaRecovered(requestedModel, reason, resetAt, time.Now())
+}
+
+// failoverStatus reports whether native requests are currently being replaced,
+// so users can tell which model their conversation is actually running on.
+func (g *officialQuotaGuard) failoverStatus() map[string]any {
+	if g == nil {
+		return map[string]any{"active": false}
+	}
+	g.failoverMu.Lock()
+	defer g.failoverMu.Unlock()
+	status := map[string]any{"active": g.failoverActive}
+	if g.failoverActive {
+		status["since"] = g.failoverSince.UTC().Format(time.RFC3339)
+		status["requested_model"] = g.failoverModel
+		status["effective_model"] = officialQuotaFailoverModel
+	}
+	return status
 }
 
 func (g *officialQuotaGuard) windowResetAt(accountID, reason string) time.Time {
@@ -404,6 +480,7 @@ func (g *officialQuotaGuard) status(now time.Time) map[string]any {
 	if g == nil {
 		return result
 	}
+	result["failover"] = g.failoverStatus()
 	g.mu.RLock()
 	accountID := g.latestAccount
 	state, ok := g.accounts[accountID]

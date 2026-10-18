@@ -111,35 +111,71 @@ func (n *quotaNotifier) notifyQuotaFailover(requestedModel, effectiveModel, reas
 		})
 		return false
 	}
-	if !n.reserve(requestedModel, reason, resetAt, now) {
-		return false
-	}
-
-	args := n.notificationArgs(requestedModel, effectiveModel, reason, resetAt, now)
-	tool, run := n.tool, n.run
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), quotaNotificationTimeout)
-		defer cancel()
-		if err := run(ctx, tool, args...); err != nil {
-			n.logger.write(map[string]any{
-				"event": "quota_failover_notify_failed", "requested_model": requestedModel, "reason": reason, "error": err.Error(),
-			})
-			return
-		}
-		n.logger.write(map[string]any{
-			"event": "quota_failover_notified", "requested_model": requestedModel, "effective_model": effectiveModel,
-			"reason": reason, "reset_at": resetAt.UTC().Format(time.RFC3339),
-		})
-	}()
-	return true
-}
-
-func (n *quotaNotifier) reserve(requestedModel, reason string, resetAt, now time.Time) bool {
-	key := reason + "|" + resetAt.UTC().Format(time.RFC3339) + "|" + requestedModel
 	expiry := resetAt
 	if expiry.IsZero() {
 		expiry = now.Add(24 * time.Hour)
 	}
+	if !n.reserve("failover|"+reason+"|"+resetAt.UTC().Format(time.RFC3339)+"|"+requestedModel, expiry, now) {
+		return false
+	}
+
+	n.dispatch("quota_failover_notified", "quota_failover_notify_failed",
+		n.notificationArgs(quotaNotificationTitle(reason), "已自动切换到 Wopal AI 模型继续",
+			quotaNotificationMessage(requestedModel, effectiveModel, resetAt, now)),
+		map[string]any{
+			"requested_model": requestedModel, "effective_model": effectiveModel,
+			"reason": reason, "reset_at": resetAt.UTC().Format(time.RFC3339),
+		})
+	return true
+}
+
+// notifyQuotaRecovered tells the user their protected window ended and native
+// models are usable again. It fires once per protected window.
+func (n *quotaNotifier) notifyQuotaRecovered(requestedModel, reason string, resetAt, now time.Time) bool {
+	if n == nil || !n.enabled {
+		return false
+	}
+	if n.tool == "" {
+		n.logger.write(map[string]any{
+			"event": "quota_recovery_notify_unavailable", "requested_model": requestedModel, "reason": reason,
+		})
+		return false
+	}
+	if !n.reserve("recovered|"+reason+"|"+resetAt.UTC().Format(time.RFC3339)+"|"+requestedModel, now.Add(24*time.Hour), now) {
+		return false
+	}
+
+	n.dispatch("quota_recovery_notified", "quota_recovery_notify_failed",
+		n.notificationArgs("官方额度已恢复", "已自动切回官方模型继续", quotaNotificationRecoveryMessage(requestedModel)),
+		map[string]any{"requested_model": requestedModel, "reason": reason})
+	return true
+}
+
+func quotaNotificationRecoveryMessage(requestedModel string) string {
+	return requestedModel + " 已恢复可用；本次自动切换结束，下次请求会自动回到官方模型"
+}
+
+// dispatch posts one notification without ever blocking or failing the request
+// path: the caller decides, this only reports the outcome to the log.
+func (n *quotaNotifier) dispatch(successEvent, failureEvent string, args []string, fields map[string]any) {
+	tool, run := n.tool, n.run
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), quotaNotificationTimeout)
+		defer cancel()
+		event := successEvent
+		entry := map[string]any{"event": event}
+		for key, value := range fields {
+			entry[key] = value
+		}
+		if err := run(ctx, tool, args...); err != nil {
+			entry["event"] = failureEvent
+			entry["error"] = err.Error()
+		}
+		n.logger.write(entry)
+	}()
+}
+
+func (n *quotaNotifier) reserve(key string, expiry, now time.Time) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for existing, expiresAt := range n.notified {
@@ -154,11 +190,13 @@ func (n *quotaNotifier) reserve(requestedModel, reason string, resetAt, now time
 	return true
 }
 
-func (n *quotaNotifier) notificationArgs(requestedModel, effectiveModel, reason string, resetAt, now time.Time) []string {
+// notificationArgs builds the terminal-notifier call. No -execute/-open is
+// ever passed, so clicking the banner does nothing.
+func (n *quotaNotifier) notificationArgs(title, subtitle, message string) []string {
 	args := []string{
-		"-title", quotaNotificationTitle(reason),
-		"-subtitle", "已自动切换到 Wopal AI 模型继续",
-		"-message", quotaNotificationMessage(requestedModel, effectiveModel, resetAt, now),
+		"-title", title,
+		"-subtitle", subtitle,
+		"-message", message,
 		"-group", quotaNotificationGroupID,
 	}
 	if n.sound != "" {

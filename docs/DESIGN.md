@@ -633,7 +633,16 @@ logs/service-error.log
 - 通知由 `terminal-notifier` 发送，不使用 `osascript`——`osascript` 发出的通知归属 Script Editor，点击后会打开脚本编辑器；
 - 通知内容只包含请求模型、生效模型和额度重置时间，不含 prompt、凭证或账号标识。
 
-通知开关与参数属于本地运行配置（`runtime/config.json` 的 `notifications` 段），默认开启。`/_status` 的 `notifications` 字段用于确认通知是否可用。
+两个方向都会通知：
+
+- 进入保护区时通知「已切换到 Wopal 模型」，包含被替换的模型和预计恢复时间；
+- 保护区 reset 时通知「额度已恢复、可切回官方模型」，由 failover 时按窗口 reset 时间排定的定时器驱动，不依赖用户的下一次请求。
+
+定时器是进程内的：Gateway 若在保护周期内重启，恢复通知的定时器会丢失，该周期不会再补发（下一次进入保护区会重新排定）。
+
+`/_status` 的 `official_quota.failover` 暴露当前是否处于自动切换（`active` / `since` / `requested_model` / `effective_model`），用于回答「这一句到底跑在哪个模型上」。`notifications` 字段用于确认通知是否可用。
+
+通知开关与参数属于本地运行配置（`runtime/config.json` 的 `notifications` 段），默认开启。
 
 ## 20. 服务生命周期
 

@@ -449,7 +449,18 @@ Before every new sampling step the gateway rechecks quota state. A protected nat
 
 A WebSocket `1012 Service Restart` during provider change, quota failover, or failback is an expected control path: Codex should reconnect and replay the full input.
 
-When the switch happens the gateway posts one macOS notification telling you which model replaced the official one you requested and roughly when quota recovers. It fires once per protection period, so a burst of requests cannot turn into a burst of banners.
+The gateway posts a macOS notification in both directions, once per protection period, so a burst of requests cannot turn into a burst of banners:
+
+- on failover: which model replaced the official one you requested, and roughly when quota recovers;
+- on recovery: that official models are usable again (driven by a timer, so you do not have to make a request first).
+
+To check which model a request is actually running on:
+
+```sh
+curl -fsS http://127.0.0.1:11435/_status
+```
+
+`official_quota.state` is `protected` while native quota is in reserve; `official_quota.failover.active` is `true` while native requests are being replaced by Wopal models.
 
 Notifications require `terminal-notifier`; without it nothing is posted and routing is unaffected. To turn them off, add this to `runtime/config.json`:
 
@@ -808,7 +819,8 @@ Check in order:
 2. System Settings → Notifications allows notifications from `terminal-notifier`;
 3. `notifications.enabled` is not set to `false` in `runtime/config.json`;
 4. the current protection period was already announced (one notification per period, window, and replaced model);
-5. the `quota_failover_notified`, `quota_failover_notify_unavailable`, and `quota_failover_notify_failed` events in `logs/gateway.log`.
+5. the `quota_failover_notified`, `quota_recovery_notified`, `quota_failover_notify_unavailable`, and `quota_failover_notify_failed` events in `logs/gateway.log`;
+6. whether the gateway restarted during the protection period (that drops the recovery timer and the notification is not re-sent for that period).
 
 ## 13. Security and local state
 
