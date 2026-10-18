@@ -226,8 +226,8 @@ function printConfiguredModelStatus(configured: string[]): void {
     : 'Warning: none of the configured Wopal AI models were returned by /models.');
 }
 
-function printCatalogResult(result: { native: number; wopalAi: number; ollama: number; ollamaWarning?: string }): void {
-  console.log(`Model catalog: official=${result.native}, wopal-ai=${result.wopalAi}, ollama=${result.ollama}`);
+function printCatalogResult(result: { native: number; nativeVisible: number; nativeHidden: number; wopalAi: number; ollama: number; ollamaWarning?: string }): void {
+  console.log(`Model catalog: official-visible=${result.nativeVisible}, official-internal=${result.nativeHidden}, wopal-ai=${result.wopalAi}, ollama=${result.ollama}`);
   if (result.ollamaWarning) console.warn(`Ollama discovery warning: ${result.ollamaWarning}`);
 }
 

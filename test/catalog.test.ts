@@ -59,3 +59,13 @@ test('bundled native catalog comes from Codex CLI instead of mutable models_cach
   const catalog = await loadBundledNativeCatalog(fakeCodex);
   assert.deepEqual(catalog.models.map((model: any) => model.slug), ['gpt-test-official']);
 });
+
+test('catalog preserves hidden visibility for Codex internal official models', () => {
+  const catalog = buildCatalog({ models: [
+    { slug: 'gpt-6.1-sol', visibility: 'list', supported_in_api: true },
+    { slug: 'codex-auto-review', visibility: 'hide', supported_in_api: true },
+  ] }, [], []);
+  const bySlug = new Map(catalog.models.map((m: any) => [m.slug, m]));
+  assert.equal(bySlug.get('gpt-6.1-sol').visibility, 'list');
+  assert.equal(bySlug.get('codex-auto-review').visibility, 'hide');
+});

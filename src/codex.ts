@@ -9,7 +9,7 @@ import type { ExternalModelConfig, GatewayConfig } from './types.js';
 import { hasWopalApiKey } from './keychain.js';
 import { installLaunchAgent, uninstallLaunchAgent } from './service.js';
 
-export interface CatalogRefreshResult { native: number; wopalAi: number; ollama: number; ollamaWarning?: string }
+export interface CatalogRefreshResult { native: number; nativeVisible: number; nativeHidden: number; wopalAi: number; ollama: number; ollamaWarning?: string }
 
 export async function refreshCatalog(config: GatewayConfig): Promise<CatalogRefreshResult> {
   const native = await loadBundledNativeCatalog();
@@ -25,7 +25,8 @@ export async function refreshCatalog(config: GatewayConfig): Promise<CatalogRefr
   const catalog = buildCatalog(native, config.wopalAi.models, ollamaModels);
   await mkdir(dirname(codexGatewayCatalogPath()), { recursive: true });
   await writeCatalog(codexGatewayCatalogPath(), catalog);
-  return { native: native.models.length, wopalAi: config.wopalAi.models.length, ollama: ollamaModels.length, ollamaWarning };
+  const nativeVisible = native.models.filter((model) => model.visibility !== 'hide').length;
+  return { native: native.models.length, nativeVisible, nativeHidden: native.models.length - nativeVisible, wopalAi: config.wopalAi.models.length, ollama: ollamaModels.length, ollamaWarning };
 }
 
 export async function installIntoCodex(config: GatewayConfig, cliPath: string): Promise<CatalogRefreshResult> {
