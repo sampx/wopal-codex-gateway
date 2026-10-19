@@ -441,7 +441,9 @@ runtime/official-quota-state.json
 
 ### 12.3 官方豁免流程
 
-部分官方模型用于恢复或内部审批，不参与普通 quota failover。当前实现显式豁免支持的 Luna 恢复模型和 `codex-auto-review`。
+恢复模型（`gpt-5.6-luna`、`gpt-6-luna`）不参与普通 quota failover，因为额度耗尽时仍需要它们完成恢复。
+
+内部审批模型 `codex-auto-review` **不是**豁免模型：它和其他官方模型一样计费，因此进入保护区后必须 failover 到 `wopal-ai/deepseek-v4.1-flash`。它与普通模型有一处差别：它属于用户没有直接请求的内部流量，所以不覆盖 `failover.active` 里的 requested/effective model，也不重复发送用户可见通知。
 
 豁免列表属于明确策略，不能靠模型名称猜测。
 

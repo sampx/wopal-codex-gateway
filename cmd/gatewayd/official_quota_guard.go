@@ -173,13 +173,24 @@ func chatGPTAccountID(req *http.Request) string {
 	return strings.TrimSpace(req.Header.Get("ChatGPT-Account-ID"))
 }
 
+// quotaExemptOfficialModel lists native models that may keep using the official
+// provider while the reserve is protected. Only recovery models belong here:
+// every other native model, including the internal approval reviewer, is
+// metered and must be failovered once the reserve is active.
 func quotaExemptOfficialModel(model string) bool {
 	switch strings.TrimSpace(model) {
-	case "gpt-5.6-luna", "gpt-6-luna", "codex-auto-review":
+	case "gpt-5.6-luna", "gpt-6-luna":
 		return true
 	default:
 		return false
 	}
+}
+
+// internalMeteredOfficialModel reports native traffic the user did not request
+// directly. It is still metered, so the reserve must fail it over, but it must
+// not overwrite the user-visible failover state or fire a second notification.
+func internalMeteredOfficialModel(model string) bool {
+	return strings.TrimSpace(model) == "codex-auto-review"
 }
 
 func (g *officialQuotaGuard) blockedModel(accountID, model string, now time.Time) (bool, string) {
@@ -189,6 +200,9 @@ func (g *officialQuotaGuard) blockedModel(accountID, model string, now time.Time
 	blocked, reason := g.blocked(accountID, now)
 	if !blocked {
 		return false, ""
+	}
+	if internalMeteredOfficialModel(model) {
+		return true, reason
 	}
 	g.enterQuotaFailover(model, reason, accountID, now)
 	return true, reason

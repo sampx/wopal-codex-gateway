@@ -108,7 +108,7 @@ requested native model
 
 After the quota reset time, the next safe sampling step reconnects and returns to the originally requested native model.
 
-`gpt-5.6-luna`, `gpt-6-luna`, and the internal `codex-auto-review` flow remain native exceptions in the current policy.
+`gpt-5.6-luna` and `gpt-6-luna` remain native exceptions because they are recovery models. The internal `codex-auto-review` approval flow is metered like any other native model: while the reserve is protected it is failovered to `wopal-ai/deepseek-v4.1-flash` instead of reaching ChatGPT.
 
 ## 2. Requirements
 

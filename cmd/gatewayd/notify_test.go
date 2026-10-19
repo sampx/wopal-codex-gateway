@@ -251,6 +251,11 @@ func TestQuotaGuardNotifiesOnlyForBlockedOfficialModels(t *testing.T) {
 	if blocked, _ := guard.blockedModel("acct", "gpt-5.6-luna", now); blocked {
 		t.Fatal("exempt model was blocked")
 	}
+	// The internal reviewer is metered, so it is blocked, but it must neither
+	// replace the user-visible failover model nor trigger a second notification.
+	if blocked, _ := guard.blockedModel("acct", "codex-auto-review", now); !blocked {
+		t.Fatal("auto-review was not blocked")
+	}
 	// Namespaced models never reach the official guard, and the notifier refuses
 	// them anyway; either way they must not produce a notification.
 	guard.blockedModel("acct", "wopal-ai/deepseek-v4.1-flash", now)

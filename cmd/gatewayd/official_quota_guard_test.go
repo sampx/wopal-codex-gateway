@@ -111,14 +111,24 @@ func TestRoutingQuotaGuardFailsOverOfficialAndAllowsExemptions(t *testing.T) {
 		t.Fatalf("protected official request reached upstream %d times", upstreamHits)
 	}
 
-	for _, model := range []string{"gpt-5.6-luna", "gpt-6-luna", "codex-auto-review"} {
+	for _, model := range []string{"gpt-5.6-luna", "gpt-6-luna"} {
 		status, body = post(model)
 		if status != http.StatusOK {
 			t.Fatalf("quota-exempt model %s was blocked: %d %s", model, status, body)
 		}
 	}
-	if upstreamHits != 3 {
-		t.Fatalf("quota-exempt official models reached upstream %d times, want 3", upstreamHits)
+	if upstreamHits != 2 {
+		t.Fatalf("quota-exempt official models reached upstream %d times, want 2", upstreamHits)
+	}
+
+	// The internal approval reviewer is metered, so it must not reach the
+	// official provider while the reserve is protected.
+	status, body = post("codex-auto-review")
+	if status != http.StatusOK {
+		t.Fatalf("protected auto-review response = %d %s", status, body)
+	}
+	if upstreamHits != 2 {
+		t.Fatalf("protected auto-review reached official upstream; hits = %d", upstreamHits)
 	}
 
 	status, body = post("wopal-ai/deepseek-v4.1-flash-free")
@@ -132,10 +142,13 @@ func TestOfficialQuotaGuardModelExemptions(t *testing.T) {
 	guard := newOfficialQuotaGuard(nil)
 	guard.observeRateLimitPayload("acct", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), now)
 
-	for _, model := range []string{"gpt-6-luna", "codex-auto-review"} {
+	for _, model := range []string{"gpt-5.6-luna", "gpt-6-luna"} {
 		if blocked, reason := guard.blockedModel("acct", model, now); blocked {
 			t.Fatalf("quota-exempt model %s blocked with reason %q", model, reason)
 		}
+	}
+	if blocked, reason := guard.blockedModel("acct", "codex-auto-review", now); !blocked || reason != "five_hour" {
+		t.Fatalf("auto-review guard = blocked:%v reason:%q", blocked, reason)
 	}
 	if blocked, reason := guard.blockedModel("acct", "gpt-6.1-sol", now); !blocked || reason != "five_hour" {
 		t.Fatalf("metered model guard = blocked:%v reason:%q", blocked, reason)
@@ -295,13 +308,15 @@ func TestOfficialQuotaGuardStatusUsesHashedAccountState(t *testing.T) {
 }
 
 func TestQuotaExemptOfficialModelsIncludeCurrentLuna(t *testing.T) {
-	for _, model := range []string{"gpt-5.6-luna", "gpt-6-luna", "codex-auto-review"} {
+	for _, model := range []string{"gpt-5.6-luna", "gpt-6-luna"} {
 		if !quotaExemptOfficialModel(model) {
 			t.Fatalf("model %q should bypass quota reserve", model)
 		}
 	}
-	if quotaExemptOfficialModel("gpt-6.1-sol") {
-		t.Fatal("gpt-6.1-sol should remain quota protected")
+	for _, model := range []string{"gpt-6.1-sol", "codex-auto-review"} {
+		if quotaExemptOfficialModel(model) {
+			t.Fatalf("metered model %q must not bypass quota reserve", model)
+		}
 	}
 }
 
