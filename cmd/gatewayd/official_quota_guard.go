@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,8 +18,18 @@ import (
 const (
 	officialFiveHourWindowMinutes = 300
 	officialWeeklyWindowMinutes   = 10080
-	officialFiveHourStopPercent   = 98.0
+	officialFiveHourStopPercent   = 97.0
 	officialWeeklyStopPercent     = 99.0
+
+	// The upstream only reports whole percentages, and one sampling step can
+	// consume more than one point. The guard therefore stops earlier than the
+	// hard limit by the largest step it has actually observed, never less than
+	// these margins. The five-hour threshold of 97 with a two-point margin
+	// means the worst case ends at 98%, keeping two points in reserve for the
+	// app to stay usable. A larger observed step automatically tightens the
+	// margin.
+	officialFiveHourMinMargin = 2.0
+	officialWeeklyMinMargin   = 1.0
 )
 
 type officialQuotaWindow struct {
@@ -31,6 +42,11 @@ type officialQuotaWindow struct {
 type officialQuotaAccountState struct {
 	FiveHour *officialQuotaWindow
 	Weekly   *officialQuotaWindow
+	// Largest single-step increase ever observed for each window type. These
+	// live on the account, not the window, so a reset does not erase what the
+	// guard has learned about how much one sampling step can cost.
+	FiveHourMaxStep float64 `json:",omitempty"`
+	WeeklyMaxStep   float64 `json:",omitempty"`
 }
 
 type officialQuotaGuard struct {
@@ -73,6 +89,9 @@ func quotaAccountKey(accountID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// activeQuotaState drops expired windows but keeps the learned per-step cost.
+// Losing that memory at a window boundary would reintroduce exactly the risk
+// the margin exists to prevent.
 func activeQuotaState(state officialQuotaAccountState, now time.Time) (officialQuotaAccountState, bool) {
 	if state.FiveHour != nil && !now.Before(state.FiveHour.ResetAt) {
 		state.FiveHour = nil
@@ -80,7 +99,11 @@ func activeQuotaState(state officialQuotaAccountState, now time.Time) (officialQ
 	if state.Weekly != nil && !now.Before(state.Weekly.ResetAt) {
 		state.Weekly = nil
 	}
-	return state, state.FiveHour != nil || state.Weekly != nil
+	active := state.FiveHour != nil || state.Weekly != nil
+	if !active && state.FiveHourMaxStep == 0 && state.WeeklyMaxStep == 0 {
+		return state, false
+	}
+	return state, true
 }
 
 func (g *officialQuotaGuard) loadPersisted(now time.Time) {
@@ -325,20 +348,29 @@ func (g *officialQuotaGuard) blocked(accountID string, now time.Time) (bool, str
 }
 
 func quotaStateBlocked(state officialQuotaAccountState, now time.Time) (bool, string) {
-	if quotaWindowBlocked(state.FiveHour, officialFiveHourStopPercent, now) {
+	if quotaWindowBlocked(state.FiveHour, officialFiveHourStopPercent, officialFiveHourMinMargin, state.FiveHourMaxStep, now) {
 		return true, "five_hour"
 	}
-	if quotaWindowBlocked(state.Weekly, officialWeeklyStopPercent, now) {
+	if quotaWindowBlocked(state.Weekly, officialWeeklyStopPercent, officialWeeklyMinMargin, state.WeeklyMaxStep, now) {
 		return true, "weekly"
 	}
 	return false, ""
 }
 
-func quotaWindowBlocked(window *officialQuotaWindow, threshold float64, now time.Time) bool {
+// quotaWindowThreshold lowers the stop point by however much more than the
+// base margin a single step has been seen to cost. With whole-percent telemetry
+// this is what turns "stop at 97" into a bound on the worst case instead of a
+// bound on the observed value.
+func quotaWindowThreshold(base, minMargin, maxStep float64) float64 {
+	margin := math.Max(minMargin, maxStep)
+	return base - (margin - minMargin)
+}
+
+func quotaWindowBlocked(window *officialQuotaWindow, base, minMargin, maxStep float64, now time.Time) bool {
 	if window == nil || window.ResetAt.IsZero() || !now.Before(window.ResetAt) {
 		return false
 	}
-	return window.UsedPercent >= threshold
+	return window.UsedPercent >= quotaWindowThreshold(base, minMargin, maxStep)
 }
 
 func (g *officialQuotaGuard) observeHeaders(accountID string, headers http.Header, now time.Time) {
@@ -459,19 +491,35 @@ func (g *officialQuotaGuard) observeWindow(accountID string, window officialQuot
 		return false
 	}
 	copy := window
+	maxStep := 0.0
+	step := 0.0
+	if current != nil && window.ResetAt.Equal(current.ResetAt) {
+		step = window.UsedPercent - current.UsedPercent
+	}
+	if step > 0 {
+		step = math.Min(step, 100)
+	}
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
 		state.FiveHour = &copy
+		if step > state.FiveHourMaxStep {
+			state.FiveHourMaxStep = step
+		}
+		maxStep = state.FiveHourMaxStep
 	} else {
 		state.Weekly = &copy
+		if step > state.WeeklyMaxStep {
+			state.WeeklyMaxStep = step
+		}
+		maxStep = state.WeeklyMaxStep
 	}
 	g.accounts[key] = state
 	g.latestAccount = key
 	g.mu.Unlock()
 
-	threshold := officialWeeklyStopPercent
+	threshold := quotaWindowThreshold(officialWeeklyStopPercent, officialWeeklyMinMargin, maxStep)
 	windowName := "weekly"
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
-		threshold = officialFiveHourStopPercent
+		threshold = quotaWindowThreshold(officialFiveHourStopPercent, officialFiveHourMinMargin, maxStep)
 		windowName = "five_hour"
 	}
 	g.logger.write(map[string]any{

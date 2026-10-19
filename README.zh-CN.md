@@ -93,7 +93,7 @@ consolidation_model = "wopal-ai/deepseek-v4.1-flash"
 
 | 额度窗口 | 保护阈值 |
 | --- | ---: |
-| 5 小时 | 使用达到 98% |
+| 5 小时 | 使用达到 97% |
 | 每周 | 使用达到 99% |
 
 保护粒度是每一次新的 sampling step，即每个 `response.create` / `response.append` 之前重新判断。

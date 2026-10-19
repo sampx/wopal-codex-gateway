@@ -26,13 +26,13 @@ func TestOfficialQuotaGuardThresholdsAndReset(t *testing.T) {
 		t.Fatalf("five-hour guard = blocked:%v reason:%q", blocked, reason)
 	}
 
-	guard.observeRateLimitPayload("acct-week", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":97,"window_minutes":300,"reset_at":1800000300},"secondary":{"used_percent":99,"window_minutes":10080,"reset_at":1800100000}}}`), now)
+	guard.observeRateLimitPayload("acct-week", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":96,"window_minutes":300,"reset_at":1800000300},"secondary":{"used_percent":99,"window_minutes":10080,"reset_at":1800100000}}}`), now)
 	blocked, reason = guard.blocked("acct-week", now)
 	if !blocked || reason != "weekly" {
 		t.Fatalf("weekly guard = blocked:%v reason:%q", blocked, reason)
 	}
 
-	guard.observeRateLimitPayload("acct-open", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":97,"window_minutes":300,"reset_at":1800000300},"secondary":{"used_percent":98,"window_minutes":10080,"reset_at":1800100000}}}`), now)
+	guard.observeRateLimitPayload("acct-open", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":96,"window_minutes":300,"reset_at":1800000300},"secondary":{"used_percent":98,"window_minutes":10080,"reset_at":1800100000}}}`), now)
 	if blocked, _ := guard.blocked("acct-open", now); blocked {
 		t.Fatal("guard blocked below both thresholds")
 	}
@@ -49,7 +49,7 @@ func TestOfficialQuotaGuardReadsHeadersByWindowLength(t *testing.T) {
 	headers.Set("X-Codex-Primary-Used-Percent", "99")
 	headers.Set("X-Codex-Primary-Window-Minutes", "10080")
 	headers.Set("X-Codex-Primary-Reset-At", "1800100000")
-	headers.Set("X-Codex-Secondary-Used-Percent", "97")
+	headers.Set("X-Codex-Secondary-Used-Percent", "96")
 	headers.Set("X-Codex-Secondary-Window-Minutes", "300")
 	headers.Set("X-Codex-Secondary-Reset-At", "1800000300")
 
@@ -481,5 +481,106 @@ func TestProtectedOfficialWebsocketReconnectUsesWopalAndFailsBack(t *testing.T) 
 	}
 	if !strings.Contains(closeErr.Text, "quota recovered") {
 		t.Fatalf("unexpected failback reason %q", closeErr.Text)
+	}
+}
+
+func TestOfficialQuotaGuardKeepsOnePercentForLargeSteps(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	resetAt := now.Add(2 * time.Hour)
+	guard := newOfficialQuotaGuard(nil)
+	observed := func(percent float64) {
+		guard.observeWindow("acct", officialQuotaWindow{
+			UsedPercent: percent, WindowMinutes: officialFiveHourWindowMinutes,
+			ResetAt: resetAt, ObservedAt: now,
+		})
+	}
+
+	// A single step costs two points: 96 is still allowed, 97 stops.
+	observed(96)
+	if blocked, _ := guard.blocked("acct", now); blocked {
+		t.Fatal("guard stopped at 96 with a two-point margin")
+	}
+	observed(97)
+	if blocked, _ := guard.blocked("acct", now); !blocked {
+		t.Fatal("guard did not stop at 97 with a two-point margin")
+	}
+
+	// A larger step tightens the margin automatically. After a four-point
+	// step the guard must stop at 95, not 97.
+	other := newOfficialQuotaGuard(nil)
+	observe := func(g *officialQuotaGuard, percent float64) {
+		g.observeWindow("acct", officialQuotaWindow{
+			UsedPercent: percent, WindowMinutes: officialFiveHourWindowMinutes,
+			ResetAt: resetAt, ObservedAt: now,
+		})
+	}
+	observe(other, 90)
+	observe(other, 94)
+	// A four-point step lowers the stop point to 95, so 94 is the last value
+	// that may still be forwarded and the worst case is 98.
+	if blocked, _ := other.blocked("acct", now); blocked {
+		t.Fatal("guard stopped before 95 after a four-point step")
+	}
+	observe(other, 95)
+	if blocked, _ := other.blocked("acct", now); !blocked {
+		t.Fatal("guard did not tighten to 95 after a four-point step")
+	}
+}
+
+func TestOfficialQuotaGuardStepMemorySurvivesWindowReset(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quota.json")
+	resetAt := now.Add(time.Hour)
+
+	guard := newOfficialQuotaGuardWithState(nil, path, now)
+	guard.observeWindow("acct", officialQuotaWindow{
+		UsedPercent: 90, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
+	})
+	guard.observeWindow("acct", officialQuotaWindow{
+		UsedPercent: 94, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
+	})
+	guard.persist(now)
+
+	reloaded := newOfficialQuotaGuardWithState(nil, path, resetAt.Add(time.Minute))
+	reloaded.observeWindow("acct", officialQuotaWindow{
+		UsedPercent: 94, WindowMinutes: officialFiveHourWindowMinutes,
+		ResetAt: resetAt.Add(5 * time.Hour), ObservedAt: resetAt.Add(time.Minute),
+	})
+	// The new window starts at 94. The learned four-point step must still lower
+	// the stop point to 95, so 94 is allowed and 95 blocks.
+	if blocked, _ := reloaded.blocked("acct", resetAt.Add(time.Minute)); blocked {
+		t.Fatal("reloaded guard stopped before 95")
+	}
+	reloaded.observeWindow("acct", officialQuotaWindow{
+		UsedPercent: 95, WindowMinutes: officialFiveHourWindowMinutes,
+		ResetAt: resetAt.Add(5 * time.Hour), ObservedAt: resetAt.Add(time.Minute),
+	})
+	if blocked, _ := reloaded.blocked("acct", resetAt.Add(time.Minute)); !blocked {
+		t.Fatal("learned step size did not survive a window reset")
+	}
+}
+
+func TestOfficialQuotaGuardStopsBeforeHundredWithWorstCaseStep(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	resetAt := now.Add(2 * time.Hour)
+	guard := newOfficialQuotaGuard(nil)
+	guard.observeWindow("acct", officialQuotaWindow{
+		UsedPercent: 94, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
+	})
+	guard.observeWindow("acct", officialQuotaWindow{
+		UsedPercent: 96, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
+	})
+
+	// 96 is the last value the guard lets through, and the largest step seen is
+	// two points, so the worst possible outcome is 98 - never 100.
+	if blocked, _ := guard.blocked("acct", now); blocked {
+		t.Fatal("guard stopped too early at 96")
+	}
+	guard.observeWindow("acct", officialQuotaWindow{
+		UsedPercent: 97, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
+	})
+	if blocked, _ := guard.blocked("acct", now); !blocked {
+		t.Fatal("guard allowed another step at 97 and could reach 100")
 	}
 }

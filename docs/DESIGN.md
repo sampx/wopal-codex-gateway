@@ -420,7 +420,7 @@ Quota 状态来自 ChatGPT 官方响应返回的 rate-limit metadata。窗口类
 
 | 窗口 | 时长 | 保护阈值 |
 | --- | ---: | ---: |
-| 5 小时 | 300 分钟 | 已使用 98% |
+| 5 小时 | 300 分钟 | 已使用 97% |
 | 每周 | 10080 分钟 | 已使用 99% |
 
 这些比例是当前产品策略，不是协议级不变量。
@@ -446,6 +446,19 @@ runtime/official-quota-state.json
 内部审批模型 `codex-auto-review` **不是**豁免模型：它和其他官方模型一样计费，因此进入保护区后必须 failover 到 `wopal-ai/deepseek-v4.1-flash`。它与普通模型有一处差别：它属于用户没有直接请求的内部流量，所以不覆盖 `failover.active` 里的 requested/effective model，也不重复发送用户可见通知。
 
 豁免列表属于明确策略，不能靠模型名称猜测。
+
+### 12.3.1 保护区余量必须保证最后 1%
+
+上游只回写整数百分比，因此「观测到 97 才停」只能保证**再放过一个 step**。为了确保额度永远不会到 100%（ChatGPT App 在 100% 时无法输入），保护区阈值必须覆盖单步最大消耗。
+
+实现：
+
+- 5 小时窗口基础阈值为 97，要求至少留 2 个百分点的步长余量；
+- 每周窗口基础阈值为 99，要求至少留 1 个百分点；
+- 网关记录该账户历史上观测到的**最大单步增量**；一旦单步超过基础余量，阈值按差值自动下调；
+- 学习结果按账户持久化，窗口 reset 不清空，避免在窗口边界重新冒险。
+
+不变式：**最后一次放行的观测值 + 已观测最大单步 < 100**。回归测试 `TestOfficialQuotaGuardStopsBeforeHundredWithWorstCaseStep` 锁死这一点。
 
 ### 12.4 Failover 状态机
 
@@ -755,7 +768,7 @@ Node 测试当前使用：
 | 专用 compaction 模型 | `wopal-ai/deepseek-v4.1-flash` |
 | Memory extraction 模型 | `wopal-ai/deepseek-v4.1-flash` |
 | Memory consolidation 模型 | `wopal-ai/deepseek-v4.1-flash` |
-| 5 小时窗口保护阈值 | 已使用 `98%` |
+| 5 小时窗口保护阈值 | 已使用 `97%` |
 | Weekly 保护阈值 | 已使用 `99%` |
 | Native compaction restore 超时 | 约 `3 分钟` |
 | Install health deadline | `90 秒` |

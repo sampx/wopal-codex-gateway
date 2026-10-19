@@ -93,7 +93,7 @@ Current policy:
 
 | Window | Protection threshold |
 | --- | ---: |
-| 5 hours | 98% used |
+| 5 hours | 97% used |
 | Weekly | 99% used |
 
 The guard checks before each new sampling step (`response.create` / `response.append`), not only once per outer user turn.

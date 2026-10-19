@@ -351,7 +351,7 @@ func TestQuotaGuardSkipsRecoveryWithoutFailover(t *testing.T) {
 	guard.scheduleAfter = func(time.Duration, func()) { scheduledCount++ }
 
 	now := time.Unix(1_800_000_000, 0)
-	guard.observeRateLimitPayload("acct", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":97,"window_minutes":300,"reset_at":1800010800}}}`), now)
+	guard.observeRateLimitPayload("acct", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":96,"window_minutes":300,"reset_at":1800010800}}}`), now)
 
 	if blocked, _ := guard.blockedModel("acct", "gpt-6.1-sol", now); blocked {
 		t.Fatal("official model was blocked below the threshold")
