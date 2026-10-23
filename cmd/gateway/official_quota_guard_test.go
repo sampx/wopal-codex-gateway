@@ -485,35 +485,63 @@ func TestProtectedOfficialWebsocketReconnectUsesWopalAndFailsBack(t *testing.T) 
 	}
 }
 
-func TestOfficialQuotaGuardDoesNotLowerThresholdForObservationGaps(t *testing.T) {
+func TestOfficialQuotaGuardDoesNotLowerThresholdForLongObservationGaps(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	resetAt := now.Add(2 * time.Hour)
 	guard := newOfficialQuotaGuard(nil)
-	observe := func(percent float64) {
+	observe := func(percent float64, offset time.Duration) {
 		guard.observeWindow("acct", officialQuotaWindow{
 			UsedPercent: percent, WindowMinutes: officialFiveHourWindowMinutes,
-			ResetAt: resetAt, ObservedAt: now,
+			ResetAt: resetAt, ObservedAt: now.Add(offset),
 		})
 	}
 
-	// The gap between observations can represent many turns or an idle period.
-	// It must not be treated as one sampling step and lower the fixed threshold.
-	observe(39)
-	observe(65)
+	// A gap wider than the sampling window can span many turns or an idle
+	// period. Its delta is not evidence about a single step.
+	observe(39, 0)
+	observe(65, 5*time.Minute)
 	if blocked, _ := guard.blocked("acct", now); blocked {
 		t.Fatal("guard lowered the threshold after an accumulated observation gap")
 	}
-	observe(96)
+	observe(96, 6*time.Minute)
 	if blocked, _ := guard.blocked("acct", now); blocked {
-		t.Fatal("guard stopped below the fixed 97 percent threshold")
+		t.Fatal("guard stopped below the base 97 percent threshold")
 	}
-	observe(97)
+	observe(97, 7*time.Minute)
 	if blocked, _ := guard.blocked("acct", now); !blocked {
-		t.Fatal("guard did not stop at the fixed 97 percent threshold")
+		t.Fatal("guard did not stop at the base 97 percent threshold")
 	}
 }
 
-func TestOfficialQuotaGuardIgnoresLegacyLearnedStepState(t *testing.T) {
+func TestOfficialQuotaGuardLowersThresholdForNearbyStep(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	resetAt := now.Add(2 * time.Hour)
+	guard := newOfficialQuotaGuard(nil)
+	observe := func(percent float64, offset time.Duration) {
+		guard.observeWindow("acct", officialQuotaWindow{
+			UsedPercent: percent, WindowMinutes: officialFiveHourWindowMinutes,
+			ResetAt: resetAt, ObservedAt: now.Add(offset),
+		})
+	}
+
+	observe(90, 0)
+	observe(93, 10*time.Second)
+	if step, _ := guard.status(now)["observed_five_hour_max_step"].(float64); step != 3 {
+		t.Fatalf("observed max step = %v, want 3", step)
+	}
+	if effective, _ := guard.status(now)["effective_five_hour_stop_percent"].(float64); effective != 96 {
+		t.Fatalf("effective stop = %v, want 96", effective)
+	}
+	if blocked, _ := guard.blocked("acct", now); blocked {
+		t.Fatal("guard stopped below the learned 96 percent threshold")
+	}
+	observe(96, 20*time.Second)
+	if blocked, _ := guard.blocked("acct", now); !blocked {
+		t.Fatal("guard did not stop at the learned 96 percent threshold")
+	}
+}
+
+func TestOfficialQuotaGuardDiscardsOverCapLearnedStep(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	resetAt := now.Add(2 * time.Hour)
 	path := filepath.Join(t.TempDir(), "quota.json")
@@ -524,8 +552,8 @@ func TestOfficialQuotaGuardIgnoresLegacyLearnedStepState(t *testing.T) {
 				"FiveHour": map[string]any{
 					"UsedPercent": 96, "WindowMinutes": 300, "ResetAt": resetAt, "ObservedAt": now,
 				},
-				"FiveHourMaxStep": 26,
-				"WeeklyMaxStep":   4,
+				"five_hour_max_step": 26,
+				"weekly_max_step":    4,
 			},
 		},
 	}
@@ -538,13 +566,31 @@ func TestOfficialQuotaGuardIgnoresLegacyLearnedStepState(t *testing.T) {
 	}
 
 	guard := newOfficialQuotaGuardWithState(nil, path, now)
-	if blocked, _ := guard.blocked("acct", now); blocked {
-		t.Fatal("legacy learned-step state still lowered the fixed threshold")
+	if step, _ := guard.status(now)["observed_five_hour_max_step"].(float64); step != 0 {
+		t.Fatalf("over-cap learned step survived load: %v", step)
 	}
+	if blocked, _ := guard.blocked("acct", now); blocked {
+		t.Fatal("guard stopped below the base threshold after loading an over-cap step")
+	}
+}
+
+func TestOfficialQuotaGuardKeepsLearnedStepAcrossWindows(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	resetAt := now.Add(2 * time.Hour)
+	guard := newOfficialQuotaGuard(nil)
 	guard.observeWindow("acct", officialQuotaWindow{
-		UsedPercent: 97, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
+		UsedPercent: 90, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
 	})
-	if blocked, _ := guard.blocked("acct", now); !blocked {
-		t.Fatal("guard did not stop at the fixed threshold after loading legacy state")
+	guard.observeWindow("acct", officialQuotaWindow{
+		UsedPercent: 93, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now.Add(10 * time.Second),
+	})
+
+	// The next window starts from scratch, but what a step costs is still known.
+	nextReset := resetAt.Add(5 * time.Hour)
+	guard.observeWindow("acct", officialQuotaWindow{
+		UsedPercent: 0, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: nextReset, ObservedAt: now.Add(3 * time.Hour),
+	})
+	if step, _ := guard.status(now.Add(3 * time.Hour))["observed_five_hour_max_step"].(float64); step != 3 {
+		t.Fatalf("learned step lost at window boundary: %v", step)
 	}
 }

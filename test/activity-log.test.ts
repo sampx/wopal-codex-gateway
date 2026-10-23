@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { logActivity } from '../src/activity-log.js';
-import { activityLogPath, configPath, logsDir, restoreStatePath, serviceErrorLogPath, serviceLogPath, stateDir } from '../src/config.js';
+import { activityLogPath, configPath, logsDir, projectRootDir, restoreStatePath, serviceErrorLogPath, serviceLogPath, stateDir } from '../src/config.js';
 
 test('activity logger writes metadata without serializing omitted content fields', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'wopal-gateway-log-'));
@@ -30,8 +30,10 @@ test('activity logger writes metadata without serializing omitted content fields
 test('runtime state and logs stay inside the project directory', () => {
   const runtime = stateDir();
   const logs = logsDir();
-  assert.match(runtime, /wopal-codex-gateway\/runtime$/);
-  assert.match(logs, /wopal-codex-gateway\/logs$/);
+  // Compare against the resolved project root so the assertion also holds when
+  // the checkout lives in a git worktree with a different directory name.
+  assert.equal(runtime, join(projectRootDir(), 'runtime'));
+  assert.equal(logs, join(projectRootDir(), 'logs'));
   assert.equal(configPath(), join(runtime, 'config.json'));
   assert.equal(restoreStatePath(), join(runtime, 'codex-restore.json'));
   assert.equal(activityLogPath(), join(logs, 'gateway.log'));

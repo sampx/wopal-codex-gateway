@@ -19,41 +19,47 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func main() {
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "wopal-codex-gateway: %v\n", err)
-		os.Exit(1)
+// runServe is the only daemon entry point. It owns the listener, the embedded
+// CLIProxyAPI service and every long-lived goroutine.
+func runServe(args []string) error {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	rootFlag := flags.String("project-root", "", "project root containing runtime/ and logs/")
+	configFlag := flags.String("config", "", "gateway config path")
+	if err := flags.Parse(args); err != nil {
+		return err
 	}
-}
-
-func run() error {
-	rootFlag := flag.String("project-root", "", "project root containing runtime/ and logs/")
-	configFlag := flag.String("config", "", "gateway config path")
-	flag.Parse()
 
 	root, err := resolveProjectRoot(*rootFlag)
 	if err != nil {
 		return err
 	}
+	configPath := *configFlag
+	if configPath == "" {
+		configPath = filepath.Join(root, "runtime", "config.json")
+	}
+
+	gateway, err := loadGatewayConfig(configPath)
+	if err != nil {
+		return err
+	}
+	if err := validateServeConfig(gateway); err != nil {
+		return fmt.Errorf("%s: %w", configPath, err)
+	}
+
+	wopalKey, err := getWopalAPIKey()
+	if err != nil {
+		return err
+	}
+
 	closeServiceLogs, err := redirectServiceLogs(root)
 	if err != nil {
 		return err
 	}
 	defer closeServiceLogs()
+
 	log.SetOutput(os.Stdout)
 	log.AddHook(errorOnlyHook{})
-	configPath := *configFlag
-	if configPath == "" {
-		configPath = filepath.Join(root, "runtime", "config.json")
-	}
-	gateway, err := loadGatewayConfig(configPath)
-	if err != nil {
-		return err
-	}
-	wopalKey, err := loadWopalAPIKey()
-	if err != nil {
-		return err
-	}
+
 	configureWopalCompactionKey(wopalKey)
 	cliConfig, cliConfigPath, err := buildCLIProxyConfig(root, gateway, wopalKey)
 	if err != nil {
@@ -196,24 +202,4 @@ func (errorOnlyHook) Fire(entry *log.Entry) error {
 	}
 	_, err = os.Stderr.WriteString(line)
 	return err
-}
-
-func resolveProjectRoot(explicit string) (string, error) {
-	if explicit != "" {
-		return filepath.Abs(explicit)
-	}
-	if executable, err := os.Executable(); err == nil {
-		candidate := filepath.Clean(filepath.Join(filepath.Dir(executable), "..", ".."))
-		if _, err := os.Stat(filepath.Join(candidate, "package.json")); err == nil {
-			return candidate, nil
-		}
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("resolve project root: %w", err)
-	}
-	if _, err := os.Stat(filepath.Join(cwd, "package.json")); err != nil {
-		return "", fmt.Errorf("cannot infer project root; pass --project-root")
-	}
-	return cwd, nil
 }

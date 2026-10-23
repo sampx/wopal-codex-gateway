@@ -2,11 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLI="$ROOT/dist/cli.js"
-LABEL="com.wopal.codex-gateway"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-DOMAIN="gui/$(id -u)"
-HEALTH_URL="http://127.0.0.1:11435/_health"
+BIN="$ROOT/runtime/bin/wopal-codex-gateway"
 
 usage() {
   cat <<'USAGE'
@@ -35,167 +31,38 @@ Models and auth:
   auth status        Show whether a key is configured
 
 Low-level passthrough:
-  config ...         Run gateway config command and refresh the catalog
+  config ...         Run a gateway config command
   catalog refresh    Rebuild model catalog
 USAGE
 }
 
 die() { echo "error: $*" >&2; exit 1; }
 
-require_cli() {
-  [[ -f "$CLI" ]] || die "built CLI not found at $CLI; run 'pnpm build' first"
-}
-
-run_cli() {
-  require_cli
-  node "$CLI" "$@"
-}
-
-
-proxy_loaded() {
-  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1
-}
-
-wait_health() {
-  local i
-  for i in {1..100}; do
-    if curl -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 0.1
-  done
-  return 1
-}
-
-bootstrap_proxy() {
-  local i output code
-  for i in {1..30}; do
-    if output="$(launchctl bootstrap "$DOMAIN" "$PLIST" 2>&1)"; then
-      return 0
-    else
-      code=$?
-    fi
-    # A previous bootout can still be completing inside launchd.
-    [[ "$code" -eq 37 ]] || die "launchctl bootstrap failed (exit $code): $output"
-    sleep 0.1
-  done
-  die "launchctl bootstrap remained busy (exit $code): $output"
-}
-
-start_proxy() {
-  [[ -f "$PLIST" ]] || die "proxy service is not installed; run 'scripts/gateway service install' (or full 'scripts/gateway install') first"
-  if proxy_loaded; then
-    launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null || die "launchctl kickstart failed; service registration was preserved"
-  else
-    # RunAtLoad starts the daemon during bootstrap; a second kickstart races it.
-    bootstrap_proxy
-  fi
-  wait_health || die "proxy started but health check failed: $HEALTH_URL"
-  echo "Proxy running: $HEALTH_URL"
-}
-
-stop_proxy() {
-  if proxy_loaded; then
-    launchctl bootout "$DOMAIN/$LABEL"
-    echo "Proxy stopped."
-  else
-    echo "Proxy already stopped."
-  fi
-}
-
-status_proxy() {
-  local installed=no loaded=no healthy=no
-  [[ -f "$PLIST" ]] && installed=yes
-  proxy_loaded && loaded=yes
-  curl -fsS --max-time 1 "$HEALTH_URL" >/dev/null 2>&1 && healthy=yes
-  printf 'installed=%s loaded=%s healthy=%s\n' "$installed" "$loaded" "$healthy"
-  [[ "$loaded" == yes && "$healthy" == yes ]]
+require_bin() {
+  [[ -x "$BIN" ]] || die "built gateway binary not found at $BIN; run 'go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway'"
 }
 
 cmd="${1:-help}"
 shift || true
 
 case "$cmd" in
-  start)
-    start_proxy
-    ;;
-  stop)
-    stop_proxy
-    ;;
-  restart)
-    start_proxy
-    ;;
-  status)
-    status_proxy
+  start|stop|restart|status)
+    require_bin
+    exec "$BIN" service "$cmd" "$@"
     ;;
   install)
-    run_cli codex install
+    require_bin
+    "$BIN" codex install "$@"
     echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
     ;;
   disable)
-    run_cli codex restore
+    require_bin
+    "$BIN" codex restore "$@"
     echo "Restart ChatGPT/Codex Desktop manually to reload the original configuration."
     ;;
-  models)
-    sub="${1:-}"
-    shift || true
-    case "$sub" in
-      list)
-        run_cli models list "$@"
-        ;;
-      sync)
-        run_cli models sync "$@"
-        echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
-        ;;
-      add)
-        run_cli models add "$@"
-        echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
-        ;;
-      set)
-        run_cli models set "$@"
-        echo "Restart/re-fork Codex sessions that already loaded this model catalog."
-        ;;
-      remove)
-        run_cli models remove "$@"
-        echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
-        ;;
-      *)
-        die "usage: scripts/gateway models <list|sync|add|set|remove>"
-        ;;
-    esac
-    ;;
-  service)
-    sub="${1:-}"
-    shift || true
-    case "$sub" in
-      install)
-        run_cli service install "$@"
-        wait_health || die "LaunchAgent installed but proxy health check failed: $HEALTH_URL"
-        echo "Proxy service is healthy: $HEALTH_URL"
-        ;;
-      uninstall)
-        run_cli service uninstall "$@"
-        ;;
-      *)
-        die "usage: scripts/gateway service <install|uninstall>"
-        ;;
-    esac
-    ;;
-  auth)
-    run_cli auth "$@"
-    ;;
-  config)
-    run_cli config "$@"
-    run_cli catalog refresh
-    if [[ -f "$PLIST" ]]; then
-      start_proxy
-    fi
-    echo "Restart ChatGPT/Codex Desktop manually if model/catalog settings changed."
-    ;;
-  catalog)
-    [[ "${1:-}" == refresh ]] || die "usage: scripts/gateway catalog refresh"
-    run_cli catalog refresh
-    echo "Restart ChatGPT/Codex Desktop manually to reload the model catalog."
+  models|service|auth|config|catalog)
+    require_bin
+    exec "$BIN" "$cmd" "$@"
     ;;
   help|-h|--help)
     usage
