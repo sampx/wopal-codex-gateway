@@ -60,6 +60,11 @@ func runServe(args []string) error {
 	log.SetOutput(os.Stdout)
 	log.AddHook(errorOnlyHook{})
 
+	// Install the log sink before the SDK builds its request logger, so no
+	// handler can ever create a body file.
+	if err := blockSDKRequestLogDir(filepath.Join(root, "runtime", "cliproxy-auth")); err != nil {
+		return err
+	}
 	configureWopalCompactionKey(wopalKey)
 	cliConfig, cliConfigPath, err := buildCLIProxyConfig(root, gateway, wopalKey)
 	if err != nil {
@@ -88,13 +93,14 @@ func runServe(args []string) error {
 				})
 				engine.GET("/_status", func(c *gin.Context) {
 					c.JSON(200, gin.H{
-						"ok":             true,
-						"listen":         fmt.Sprintf("%s:%d", gateway.Listen.Host, gateway.Listen.Port),
-						"official":       "native-pass-through",
-						"official_quota": quotaGuard.status(time.Now()),
-						"notifications":  quotaGuard.notificationStatus(),
-						"wopal":          "cliproxy-responses-to-chat",
-						"ollama":         "disabled",
+						"ok":                   true,
+						"listen":               fmt.Sprintf("%s:%d", gateway.Listen.Host, gateway.Listen.Port),
+						"official":             "native-pass-through",
+						"official_quota":       quotaGuard.status(time.Now()),
+						"notifications":        quotaGuard.notificationStatus(),
+						"wopal":                "cliproxy-responses-to-chat",
+						"ollama":               "disabled",
+						"request_body_logging": requestBodyLoggingState,
 					})
 				})
 			}),
@@ -106,7 +112,6 @@ func runServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	startRequestBodyLogJanitor(ctx, filepath.Join(root, "runtime", "cliproxy-auth"), logger)
 	logger.write(map[string]any{"event": "gateway_started", "architecture": "embedded-cliproxy", "port": gateway.Listen.Port})
 	if err := service.Run(ctx); err != nil && ctx.Err() == nil {
 		logger.write(map[string]any{"event": "gateway_failed", "error": err.Error()})
