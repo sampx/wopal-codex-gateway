@@ -109,6 +109,19 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 		}
 		if rewriteClientFrames && isDataFrame {
 			if message, ok := officialCompactionTriggerMessage(payload); ok {
+				// The official upstream owns this socket's incremental history;
+				// the dedicated compactor starts without it. A transport restart
+				// makes Codex resend the full input, including the trigger, before
+				// we generate a summary. Never summarize only an incremental tail.
+				if previousResponseID(message) != "" {
+					logger.write(map[string]any{"event": "official_compaction_replay_required", "transport": "websocket"})
+					sourceWriteMu.Lock()
+					_ = source.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(
+						websocket.CloseServiceRestart, "compaction requires full conversation input; reconnect and resend",
+					), time.Now().Add(time.Second))
+					sourceWriteMu.Unlock()
+					return
+				}
 				logger.write(map[string]any{"event": "official_compaction_intercepted", "compaction_model": dedicatedWopalCompactionModel, "transport": "websocket"})
 				runOfficialWebsocketCompaction(source, sourceWriteMu, logger, nativeReplay, clientRequest, message)
 				continue
@@ -128,8 +141,8 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 		if !rewriteClientFrames && isDataFrame {
 			quotaGuard.observeRateLimitPayload(accountID, payload, time.Now())
 		}
-		if rewriteClientFrames && isDataFrame && containsOfficialSanitizeMarker(payload) {
-			if rewritten, ok := sanitizeOfficialWebsocketFrame(payload); ok {
+		if rewriteClientFrames && isDataFrame {
+			if rewritten, ok := sanitizeOfficialWebsocketFrameLogged(payload, logger); ok {
 				payload = rewritten
 			}
 		}
@@ -186,7 +199,12 @@ func runOfficialWebsocketCompaction(client *websocket.Conn, clientWriteMu *sync.
 	session.finishTurn(cancel)
 }
 
+// sanitizeOfficialWebsocketFrame keeps the historical test-facing signature.
 func sanitizeOfficialWebsocketFrame(payload []byte) ([]byte, bool) {
+	return sanitizeOfficialWebsocketFrameLogged(payload, nil)
+}
+
+func sanitizeOfficialWebsocketFrameLogged(payload []byte, logger *activityLogger) ([]byte, bool) {
 	var message map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()
@@ -200,12 +218,27 @@ func sanitizeOfficialWebsocketFrame(payload []byte) ([]byte, bool) {
 	hadWopalCompaction := inputHasWopalCompactionCapsule(input)
 	hadLocalPreviousResponse := hasWopalLocalPreviousResponseID(message)
 	expanded, neutralized := sanitizeOfficialRequestInput(input)
-	if neutralized == 0 && !hadLocalPreviousResponse {
+	expanded, strippedIDs, droppedReferences, itemTypes := normalizeOfficialInputItems(expanded)
+	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse {
 		return nil, false
 	}
 	message["input"] = expanded
 	if hadWopalCompaction || hadLocalPreviousResponse {
 		delete(message, "previous_response_id")
+	}
+	loggerFields := map[string]any{
+		"event":              "official_wopal_items_neutralized",
+		"transport":          "websocket",
+		"model":              stringOrEmpty(message["model"]),
+		"item_count":         neutralized,
+		"stripped_item_ids":  strippedIDs,
+		"dropped_references": droppedReferences,
+	}
+	if logger != nil && len(itemTypes) > 0 {
+		loggerFields["item_types"] = itemTypes
+	}
+	if logger != nil {
+		logger.write(loggerFields)
 	}
 	rewritten, err := json.Marshal(message)
 	if err != nil {

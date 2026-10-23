@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,16 +19,6 @@ const (
 	officialWeeklyWindowMinutes   = 10080
 	officialFiveHourStopPercent   = 97.0
 	officialWeeklyStopPercent     = 99.0
-
-	// The upstream only reports whole percentages, and one sampling step can
-	// consume more than one point. The guard therefore stops earlier than the
-	// hard limit by the largest step it has actually observed, never less than
-	// these margins. The five-hour threshold of 97 with a two-point margin
-	// means the worst case ends at 98%, keeping two points in reserve for the
-	// app to stay usable. A larger observed step automatically tightens the
-	// margin.
-	officialFiveHourMinMargin = 2.0
-	officialWeeklyMinMargin   = 1.0
 )
 
 type officialQuotaWindow struct {
@@ -42,11 +31,6 @@ type officialQuotaWindow struct {
 type officialQuotaAccountState struct {
 	FiveHour *officialQuotaWindow
 	Weekly   *officialQuotaWindow
-	// Largest single-step increase ever observed for each window type. These
-	// live on the account, not the window, so a reset does not erase what the
-	// guard has learned about how much one sampling step can cost.
-	FiveHourMaxStep float64 `json:",omitempty"`
-	WeeklyMaxStep   float64 `json:",omitempty"`
 }
 
 type officialQuotaGuard struct {
@@ -56,6 +40,10 @@ type officialQuotaGuard struct {
 	persistencePath string
 	logger          *activityLogger
 	notifier        *quotaNotifier
+
+	// lastObserved deduplicates high-frequency quota telemetry by signature.
+	lastObservedMu sync.Mutex
+	lastObserved   string
 
 	failoverMu     sync.Mutex
 	failoverActive bool
@@ -89,9 +77,10 @@ func quotaAccountKey(accountID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// activeQuotaState drops expired windows but keeps the learned per-step cost.
-// Losing that memory at a window boundary would reintroduce exactly the risk
-// the margin exists to prevent.
+// activeQuotaState drops expired windows. Protection is based only on the
+// current window observation; quota deltas between observations are not a
+// reliable measure of a single sampling step because they can accumulate over
+// many turns or an idle period.
 func activeQuotaState(state officialQuotaAccountState, now time.Time) (officialQuotaAccountState, bool) {
 	if state.FiveHour != nil && !now.Before(state.FiveHour.ResetAt) {
 		state.FiveHour = nil
@@ -99,11 +88,7 @@ func activeQuotaState(state officialQuotaAccountState, now time.Time) (officialQ
 	if state.Weekly != nil && !now.Before(state.Weekly.ResetAt) {
 		state.Weekly = nil
 	}
-	active := state.FiveHour != nil || state.Weekly != nil
-	if !active && state.FiveHourMaxStep == 0 && state.WeeklyMaxStep == 0 {
-		return state, false
-	}
-	return state, true
+	return state, state.FiveHour != nil || state.Weekly != nil
 }
 
 func (g *officialQuotaGuard) loadPersisted(now time.Time) {
@@ -244,6 +229,7 @@ func (g *officialQuotaGuard) enterQuotaFailover(requestedModel, reason, accountI
 
 	g.failoverMu.Lock()
 	alreadyArmed := g.recoveryKey == key
+	firstEntry := !g.failoverActive
 	g.failoverActive = true
 	g.failoverSince = now
 	g.failoverModel = requestedModel
@@ -252,7 +238,23 @@ func (g *officialQuotaGuard) enterQuotaFailover(requestedModel, reason, accountI
 	}
 	g.failoverMu.Unlock()
 
-	g.notifier.notifyQuotaFailover(requestedModel, officialQuotaFailoverModel, reason, resetAt, now)
+	// The routing path logs every replaced request; record the switch itself once
+	// so the log shows one official -> Wopal transition per protection period.
+	if firstEntry {
+		g.logger.write(map[string]any{
+			"event": "official_quota_failover_entered", "requested_model": requestedModel,
+			"effective_model": officialQuotaFailoverModel, "reason": reason,
+			"reset_at": resetAt.UTC().Format(time.RFC3339),
+		})
+	}
+
+	notified := g.notifier.notifyQuotaFailover(requestedModel, officialQuotaFailoverModel, reason, resetAt, now)
+	if firstEntry {
+		g.logger.write(map[string]any{
+			"event": "official_quota_failover_notified", "requested_model": requestedModel,
+			"reason": reason, "notified": notified,
+		})
+	}
 	if alreadyArmed || resetAt.IsZero() {
 		return
 	}
@@ -266,6 +268,12 @@ func (g *officialQuotaGuard) enterQuotaFailover(requestedModel, reason, accountI
 		schedule = func(delay time.Duration, fn func()) { time.AfterFunc(delay, fn) }
 	}
 	schedule(delay, func() { g.notifyQuotaRecovered(requestedModel, reason, resetAt, key) })
+}
+
+// quotaObservationSignature captures everything an official_quota_observed entry
+// reports, so identical samples can be dropped.
+func quotaObservationSignature(window string, usedPercent float64, resetAt time.Time, reserveActive bool) string {
+	return fmt.Sprintf("%s|%.0f|%s|%t", window, usedPercent, resetAt.UTC().Format(time.RFC3339), reserveActive)
 }
 
 func quotaRecoveryKey(reason string, resetAt time.Time, requestedModel string) string {
@@ -348,29 +356,20 @@ func (g *officialQuotaGuard) blocked(accountID string, now time.Time) (bool, str
 }
 
 func quotaStateBlocked(state officialQuotaAccountState, now time.Time) (bool, string) {
-	if quotaWindowBlocked(state.FiveHour, officialFiveHourStopPercent, officialFiveHourMinMargin, state.FiveHourMaxStep, now) {
+	if quotaWindowBlocked(state.FiveHour, officialFiveHourStopPercent, now) {
 		return true, "five_hour"
 	}
-	if quotaWindowBlocked(state.Weekly, officialWeeklyStopPercent, officialWeeklyMinMargin, state.WeeklyMaxStep, now) {
+	if quotaWindowBlocked(state.Weekly, officialWeeklyStopPercent, now) {
 		return true, "weekly"
 	}
 	return false, ""
 }
 
-// quotaWindowThreshold lowers the stop point by however much more than the
-// base margin a single step has been seen to cost. With whole-percent telemetry
-// this is what turns "stop at 97" into a bound on the worst case instead of a
-// bound on the observed value.
-func quotaWindowThreshold(base, minMargin, maxStep float64) float64 {
-	margin := math.Max(minMargin, maxStep)
-	return base - (margin - minMargin)
-}
-
-func quotaWindowBlocked(window *officialQuotaWindow, base, minMargin, maxStep float64, now time.Time) bool {
+func quotaWindowBlocked(window *officialQuotaWindow, threshold float64, now time.Time) bool {
 	if window == nil || window.ResetAt.IsZero() || !now.Before(window.ResetAt) {
 		return false
 	}
-	return window.UsedPercent >= quotaWindowThreshold(base, minMargin, maxStep)
+	return window.UsedPercent >= threshold
 }
 
 func (g *officialQuotaGuard) observeHeaders(accountID string, headers http.Header, now time.Time) {
@@ -491,45 +490,42 @@ func (g *officialQuotaGuard) observeWindow(accountID string, window officialQuot
 		return false
 	}
 	copy := window
-	maxStep := 0.0
-	step := 0.0
-	if current != nil && window.ResetAt.Equal(current.ResetAt) {
-		step = window.UsedPercent - current.UsedPercent
-	}
-	if step > 0 {
-		step = math.Min(step, 100)
-	}
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
 		state.FiveHour = &copy
-		if step > state.FiveHourMaxStep {
-			state.FiveHourMaxStep = step
-		}
-		maxStep = state.FiveHourMaxStep
 	} else {
 		state.Weekly = &copy
-		if step > state.WeeklyMaxStep {
-			state.WeeklyMaxStep = step
-		}
-		maxStep = state.WeeklyMaxStep
 	}
 	g.accounts[key] = state
 	g.latestAccount = key
 	g.mu.Unlock()
 
-	threshold := quotaWindowThreshold(officialWeeklyStopPercent, officialWeeklyMinMargin, maxStep)
+	threshold := officialWeeklyStopPercent
 	windowName := "weekly"
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
-		threshold = quotaWindowThreshold(officialFiveHourStopPercent, officialFiveHourMinMargin, maxStep)
+		threshold = officialFiveHourStopPercent
 		windowName = "five_hour"
 	}
-	g.logger.write(map[string]any{
-		"event":          "official_quota_observed",
-		"window":         windowName,
-		"used_percent":   window.UsedPercent,
-		"stop_percent":   threshold,
-		"reset_at":       window.ResetAt.UTC().Format(time.RFC3339),
-		"reserve_active": window.UsedPercent >= threshold && window.ObservedAt.Before(window.ResetAt),
-	})
+	// Observe events fire on every upstream handshake, so only log a change in
+	// the rounded percentage or the protection state. Identical samples carry no
+	// information and used to dominate the activity log.
+	reserveActive := window.UsedPercent >= threshold && window.ObservedAt.Before(window.ResetAt)
+	signature := quotaObservationSignature(windowName, window.UsedPercent, window.ResetAt, reserveActive)
+	g.lastObservedMu.Lock()
+	changed := g.lastObserved != signature
+	if changed {
+		g.lastObserved = signature
+	}
+	g.lastObservedMu.Unlock()
+	if changed {
+		g.logger.write(map[string]any{
+			"event":          "official_quota_observed",
+			"window":         windowName,
+			"used_percent":   window.UsedPercent,
+			"stop_percent":   threshold,
+			"reset_at":       window.ResetAt.UTC().Format(time.RFC3339),
+			"reserve_active": reserveActive,
+		})
+	}
 	return true
 }
 

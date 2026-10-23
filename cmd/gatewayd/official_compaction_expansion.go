@@ -36,7 +36,9 @@ func isWopalReasoningID(id string) bool {
 func containsOfficialSanitizeMarker(payload []byte) bool {
 	return bytes.Contains(payload, []byte(wopalCompactionCapsulePrefix)) ||
 		bytes.Contains(payload, []byte(wopalCompactionResponseIDPrefix)) ||
-		bytes.Contains(payload, []byte(wopalReasoningIDPrefix)) || bytes.Contains(payload, []byte("rs_cmb-"))
+		bytes.Contains(payload, []byte(wopalReasoningIDPrefix)) ||
+		bytes.Contains(payload, []byte("rs_cmb-")) ||
+		bytes.Contains(payload, []byte(`"reasoning"`))
 }
 
 func hasWopalLocalPreviousResponseID(payload map[string]any) bool {
@@ -55,6 +57,20 @@ func reasoningItemID(item map[string]any) string {
 func wopalEncryptedContent(item map[string]any) string {
 	encoded, _ := item["encrypted_content"].(string)
 	return strings.TrimSpace(encoded)
+}
+
+// A reasoning item without encrypted content cannot be resolved by the
+// official API when the request uses store=false. That is true for Wopal-minted
+// reasoning items regardless of how their id was generated; the id prefix is
+// not a reliable provenance marker.
+func reasoningItemNeedsNeutralization(item map[string]any) bool {
+	if itemTypeOf(item) != "reasoning" {
+		return false
+	}
+	if isWopalReasoningID(reasoningItemID(item)) {
+		return true
+	}
+	return wopalEncryptedContent(item) == ""
 }
 
 // sanitizeOfficialRequestInput rewrites request input items for the official
@@ -97,8 +113,7 @@ func sanitizeOfficialRequestInput(input []any) ([]any, int) {
 			}
 			continue
 		}
-		if itemTypeOf(item) == "reasoning" &&
-			isWopalReasoningID(reasoningItemID(item)) {
+		if reasoningItemNeedsNeutralization(item) {
 			neutralized++
 			continue
 		}
@@ -159,9 +174,6 @@ func rewriteOfficialRequestBody(req *http.Request, logger *activityLogger) {
 		logger.write(map[string]any{"event": "official_sanitizer_decode_failed", "error": err.Error()})
 		return
 	}
-	if !containsOfficialSanitizeMarker(decoded) {
-		return
-	}
 	var payload map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(decoded))
 	decoder.UseNumber()
@@ -176,7 +188,8 @@ func rewriteOfficialRequestBody(req *http.Request, logger *activityLogger) {
 	hadWopalCompaction := inputHasWopalCompactionCapsule(input)
 	hadLocalPreviousResponse := hasWopalLocalPreviousResponseID(payload)
 	expanded, neutralized := sanitizeOfficialRequestInput(input)
-	if neutralized == 0 && !hadLocalPreviousResponse {
+	expanded, strippedIDs, droppedReferences, itemTypes := normalizeOfficialInputItems(expanded)
+	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse {
 		return
 	}
 	payload["input"] = expanded
@@ -192,9 +205,84 @@ func rewriteOfficialRequestBody(req *http.Request, logger *activityLogger) {
 	req.ContentLength = int64(len(body))
 	req.Header.Del("Content-Encoding")
 	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	logger.write(map[string]any{
-		"event":      "official_wopal_items_neutralized",
-		"model":      stringOrEmpty(payload["model"]),
-		"item_count": neutralized,
-	})
+	fields := map[string]any{
+		"event":              "official_wopal_items_neutralized",
+		"model":              stringOrEmpty(payload["model"]),
+		"item_count":         neutralized,
+		"stripped_item_ids":  strippedIDs,
+		"dropped_references": droppedReferences,
+	}
+	if len(itemTypes) > 0 {
+		fields["item_types"] = itemTypes
+	}
+	logger.write(fields)
+}
+
+// officialItemTypesKeepingID lists the item types whose id carries protocol
+// meaning for a stateless request: reasoning ids pair with encrypted_content
+// and compaction ids identify the capsule. Every other input item is
+// self-describing, so its id only invites a persisted-item lookup that the
+// upstream cannot perform when store is false.
+var officialItemTypesKeepingID = map[string]bool{
+	"reasoning":  true,
+	"compaction": true,
+}
+
+// officialContentKeys mark an item as carrying its own payload. An item with an
+// id and none of these keys can only be resolved by a server-side lookup.
+var officialContentKeys = []string{
+	"content", "tools", "arguments", "input", "output", "action", "call_id", "summary", "encrypted_content",
+}
+
+func officialItemHasPayload(item map[string]any) bool {
+	for _, key := range officialContentKeys {
+		if value, ok := item[key]; ok && value != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeOfficialInputItems makes an official-bound input list fully
+// self-describing. The official Responses backend rejects any input item that
+// can only be resolved through persisted-item lookup when store is false
+// ("Supplied input item IDs require persisted-item lookup that is not supported
+// by rustponsesapi"). Codex keeps thread items with stable ids, and item
+// references appear when a long thread is reconstructed, so the gateway strips
+// metadata ids and drops pure references before forwarding.
+func normalizeOfficialInputItems(input []any) ([]any, int, int, map[string]int) {
+	normalized := make([]any, 0, len(input))
+	strippedIDs := 0
+	droppedReferences := 0
+	types := make(map[string]int, 8)
+	for _, value := range input {
+		item, ok := value.(map[string]any)
+		if !ok {
+			normalized = append(normalized, value)
+			continue
+		}
+		itemType := itemTypeOf(item)
+		if _, ok := item["id"]; !ok {
+			normalized = append(normalized, item)
+			types[itemType]++
+			continue
+		}
+		if itemType == "item_reference" {
+			droppedReferences++
+			types["item_reference(dropped)"]++
+			continue
+		}
+		if !officialItemTypesKeepingID[itemType] && !officialItemHasPayload(item) {
+			droppedReferences++
+			types[itemType+"(dropped)"]++
+			continue
+		}
+		if !officialItemTypesKeepingID[itemType] {
+			delete(item, "id")
+			strippedIDs++
+		}
+		normalized = append(normalized, item)
+		types[itemType]++
+	}
+	return normalized, strippedIDs, droppedReferences, types
 }

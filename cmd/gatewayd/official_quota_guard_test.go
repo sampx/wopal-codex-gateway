@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -484,103 +485,66 @@ func TestProtectedOfficialWebsocketReconnectUsesWopalAndFailsBack(t *testing.T) 
 	}
 }
 
-func TestOfficialQuotaGuardKeepsOnePercentForLargeSteps(t *testing.T) {
+func TestOfficialQuotaGuardDoesNotLowerThresholdForObservationGaps(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	resetAt := now.Add(2 * time.Hour)
 	guard := newOfficialQuotaGuard(nil)
-	observed := func(percent float64) {
+	observe := func(percent float64) {
 		guard.observeWindow("acct", officialQuotaWindow{
 			UsedPercent: percent, WindowMinutes: officialFiveHourWindowMinutes,
 			ResetAt: resetAt, ObservedAt: now,
 		})
 	}
 
-	// A single step costs two points: 96 is still allowed, 97 stops.
-	observed(96)
+	// The gap between observations can represent many turns or an idle period.
+	// It must not be treated as one sampling step and lower the fixed threshold.
+	observe(39)
+	observe(65)
 	if blocked, _ := guard.blocked("acct", now); blocked {
-		t.Fatal("guard stopped at 96 with a two-point margin")
+		t.Fatal("guard lowered the threshold after an accumulated observation gap")
 	}
-	observed(97)
+	observe(96)
+	if blocked, _ := guard.blocked("acct", now); blocked {
+		t.Fatal("guard stopped below the fixed 97 percent threshold")
+	}
+	observe(97)
 	if blocked, _ := guard.blocked("acct", now); !blocked {
-		t.Fatal("guard did not stop at 97 with a two-point margin")
-	}
-
-	// A larger step tightens the margin automatically. After a four-point
-	// step the guard must stop at 95, not 97.
-	other := newOfficialQuotaGuard(nil)
-	observe := func(g *officialQuotaGuard, percent float64) {
-		g.observeWindow("acct", officialQuotaWindow{
-			UsedPercent: percent, WindowMinutes: officialFiveHourWindowMinutes,
-			ResetAt: resetAt, ObservedAt: now,
-		})
-	}
-	observe(other, 90)
-	observe(other, 94)
-	// A four-point step lowers the stop point to 95, so 94 is the last value
-	// that may still be forwarded and the worst case is 98.
-	if blocked, _ := other.blocked("acct", now); blocked {
-		t.Fatal("guard stopped before 95 after a four-point step")
-	}
-	observe(other, 95)
-	if blocked, _ := other.blocked("acct", now); !blocked {
-		t.Fatal("guard did not tighten to 95 after a four-point step")
+		t.Fatal("guard did not stop at the fixed 97 percent threshold")
 	}
 }
 
-func TestOfficialQuotaGuardStepMemorySurvivesWindowReset(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "quota.json")
-	resetAt := now.Add(time.Hour)
-
-	guard := newOfficialQuotaGuardWithState(nil, path, now)
-	guard.observeWindow("acct", officialQuotaWindow{
-		UsedPercent: 90, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
-	})
-	guard.observeWindow("acct", officialQuotaWindow{
-		UsedPercent: 94, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
-	})
-	guard.persist(now)
-
-	reloaded := newOfficialQuotaGuardWithState(nil, path, resetAt.Add(time.Minute))
-	reloaded.observeWindow("acct", officialQuotaWindow{
-		UsedPercent: 94, WindowMinutes: officialFiveHourWindowMinutes,
-		ResetAt: resetAt.Add(5 * time.Hour), ObservedAt: resetAt.Add(time.Minute),
-	})
-	// The new window starts at 94. The learned four-point step must still lower
-	// the stop point to 95, so 94 is allowed and 95 blocks.
-	if blocked, _ := reloaded.blocked("acct", resetAt.Add(time.Minute)); blocked {
-		t.Fatal("reloaded guard stopped before 95")
-	}
-	reloaded.observeWindow("acct", officialQuotaWindow{
-		UsedPercent: 95, WindowMinutes: officialFiveHourWindowMinutes,
-		ResetAt: resetAt.Add(5 * time.Hour), ObservedAt: resetAt.Add(time.Minute),
-	})
-	if blocked, _ := reloaded.blocked("acct", resetAt.Add(time.Minute)); !blocked {
-		t.Fatal("learned step size did not survive a window reset")
-	}
-}
-
-func TestOfficialQuotaGuardStopsBeforeHundredWithWorstCaseStep(t *testing.T) {
+func TestOfficialQuotaGuardIgnoresLegacyLearnedStepState(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	resetAt := now.Add(2 * time.Hour)
-	guard := newOfficialQuotaGuard(nil)
-	guard.observeWindow("acct", officialQuotaWindow{
-		UsedPercent: 94, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
-	})
-	guard.observeWindow("acct", officialQuotaWindow{
-		UsedPercent: 96, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
-	})
+	path := filepath.Join(t.TempDir(), "quota.json")
+	legacy := map[string]any{
+		"version": 1,
+		"accounts": map[string]any{
+			quotaAccountKey("acct"): map[string]any{
+				"FiveHour": map[string]any{
+					"UsedPercent": 96, "WindowMinutes": 300, "ResetAt": resetAt, "ObservedAt": now,
+				},
+				"FiveHourMaxStep": 26,
+				"WeeklyMaxStep":   4,
+			},
+		},
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
 
-	// 96 is the last value the guard lets through, and the largest step seen is
-	// two points, so the worst possible outcome is 98 - never 100.
+	guard := newOfficialQuotaGuardWithState(nil, path, now)
 	if blocked, _ := guard.blocked("acct", now); blocked {
-		t.Fatal("guard stopped too early at 96")
+		t.Fatal("legacy learned-step state still lowered the fixed threshold")
 	}
 	guard.observeWindow("acct", officialQuotaWindow{
 		UsedPercent: 97, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
 	})
 	if blocked, _ := guard.blocked("acct", now); !blocked {
-		t.Fatal("guard allowed another step at 97 and could reach 100")
+		t.Fatal("guard did not stop at the fixed threshold after loading legacy state")
 	}
 }

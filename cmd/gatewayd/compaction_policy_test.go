@@ -189,6 +189,7 @@ func TestOfficialWebsocketCompactionTriggerUsesDedicatedWopalCompactor(t *testin
 	officialURL, _ := url.Parse(official.URL + "/backend-api/codex")
 
 	compactorModels := make(chan string, 1)
+	compactorInputs := make(chan string, 1)
 	engine := ginTestEngine()
 	engine.Use(routingMiddlewareWithTargets(nil, officialURL, officialURL))
 	engine.POST("/v1/responses", func(c *gin.Context) {
@@ -198,6 +199,8 @@ func TestOfficialWebsocketCompactionTriggerUsesDedicatedWopalCompactor(t *testin
 			return
 		}
 		compactorModels <- strings.TrimSpace(fmt.Sprint(request["model"]))
+		input, _ := json.Marshal(request["input"])
+		compactorInputs <- string(input)
 		c.Header("Content-Type", "text/event-stream")
 		fmt.Fprint(c.Writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"summary-ws\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Portable WS-COMPACT-TOKEN summary\"}]}]}}\n\n")
 	})
@@ -217,6 +220,32 @@ func TestOfficialWebsocketCompactionTriggerUsesDedicatedWopalCompactor(t *testin
 	case <-time.After(time.Second):
 		t.Fatal("official websocket did not connect")
 	}
+
+	// Codex normally sends only the trigger on a reused official socket. The
+	// compactor cannot resolve that provider-owned response ID; retire the
+	// connection so Codex replays the full history instead of reporting empty.
+	if err := conn.WriteJSON(map[string]any{
+		"type": "response.create", "model": "gpt-6.1-sol",
+		"previous_response_id": "resp_official_previous",
+		"input":                []any{map[string]any{"type": "compaction_trigger"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, payload, err := conn.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseServiceRestart) {
+		t.Fatalf("incremental compaction must request full replay, got payload=%s err=%v", payload, err)
+	}
+	select {
+	case <-compactorModels:
+		t.Fatal("incremental compaction summarized without conversation history")
+	default:
+	}
+	conn.Close()
+	conn, _, err = websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
 
 	if err := conn.WriteJSON(map[string]any{
 		"type": "response.create", "model": "gpt-6.1-sol", "input": []any{
@@ -251,6 +280,9 @@ func TestOfficialWebsocketCompactionTriggerUsesDedicatedWopalCompactor(t *testin
 	default:
 		t.Fatal("dedicated compactor was not called")
 	}
+	if input := <-compactorInputs; !strings.Contains(input, "WS-COMPACT-TOKEN") || strings.Contains(input, "compaction_trigger") {
+		t.Fatalf("compactor did not receive replayed history: %s", input)
+	}
 	select {
 	case payload := <-officialFrames:
 		t.Fatalf("compaction trigger leaked to official upstream: %s", payload)
@@ -267,5 +299,22 @@ func TestOfficialWebsocketCompactionTriggerUsesDedicatedWopalCompactor(t *testin
 	}
 	if capsule.Model != dedicatedWopalCompactionModel {
 		t.Fatalf("websocket capsule model = %q", capsule.Model)
+	}
+	// After compacting, the official model must receive both the preserved
+	// summary and the new user message, without a gateway-local response ID.
+	if err := conn.WriteJSON(map[string]any{
+		"type": "response.create", "model": "gpt-6.1-sol",
+		"previous_response_id": completed["id"],
+		"input":                []any{item, map[string]any{"type": "message", "role": "user", "content": "continue officially"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case payload := <-officialFrames:
+		if !strings.Contains(string(payload), "WS-COMPACT-TOKEN") || !strings.Contains(string(payload), "continue officially") || strings.Contains(string(payload), "previous_response_id") {
+			t.Fatalf("official continuation lost compacted history or leaked local ID: %s", payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("official continuation never reached upstream")
 	}
 }

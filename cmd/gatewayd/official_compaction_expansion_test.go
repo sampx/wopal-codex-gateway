@@ -111,6 +111,28 @@ func TestSanitizeOfficialInputDropsWopalReasoningItems(t *testing.T) {
 	}
 }
 
+func TestSanitizeOfficialInputDropsReasoningWithoutEncryptedContent(t *testing.T) {
+	const staleID = "rs_0217926475864278eedaf36e20f5141b2bc84e877dea1f72da2f2_0"
+	input := []any{
+		map[string]any{"type": "message", "role": "user", "content": "hello"},
+		map[string]any{"type": "reasoning", "id": staleID, "encrypted_content": "", "summary": []any{}},
+		map[string]any{"type": "reasoning", "id": "rs_official_reasoning", "encrypted_content": "openai-reasoning-ciphertext"},
+	}
+	expanded, count := sanitizeOfficialRequestInput(input)
+	if count != 1 {
+		t.Fatalf("neutralized count = %d, want 1", count)
+	}
+	if len(expanded) != 2 {
+		t.Fatalf("expanded length = %d, want 2", len(expanded))
+	}
+	for _, raw := range expanded {
+		item, ok := raw.(map[string]any)
+		if ok && item["type"] == "reasoning" && item["id"] != "rs_official_reasoning" {
+			t.Fatalf("stale stateless reasoning item survived: %v", item)
+		}
+	}
+}
+
 func TestSanitizeOfficialInputDropsCapsulePrefixWhenRequestCarriesTools(t *testing.T) {
 	configureWopalCompactionKey("unit-test-secret")
 	sealed, err := sealWopalCompactionCapsule(wopalCompactionCapsule{
@@ -229,6 +251,39 @@ func TestRewriteOfficialRequestExpandsGzippedWopalCapsule(t *testing.T) {
 	}
 	if !strings.Contains(expanded, "remember SPARK-GB10") {
 		t.Fatalf("expanded body missing expanded summary: %s", expanded)
+	}
+}
+
+func TestRewriteOfficialRequestDropsStatelessReasoningItem(t *testing.T) {
+	const staleID = "rs_0217926475864278eedaf36e20f5141b2bc84e877dea1f72da2f2_0"
+	payload, err := json.Marshal(map[string]any{
+		"model": "gpt-6.1-sol",
+		"store": false,
+		"input": []any{
+			map[string]any{"type": "reasoning", "id": staleID, "encrypted_content": "", "summary": []any{}},
+			map[string]any{"type": "message", "role": "user", "content": "continue"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsOfficialSanitizeMarker(payload) {
+		t.Fatal("stopping-point reasoning item did not trigger sanitization")
+	}
+	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1/v1/responses", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewriteOfficialRequestBody(request, nil)
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), staleID) {
+		t.Fatalf("body still contains stale reasoning id: %s", body)
+	}
+	if !strings.Contains(string(body), `"role":"user"`) {
+		t.Fatalf("user message was lost: %s", body)
 	}
 }
 
@@ -395,9 +450,11 @@ func TestOfficialSanitizerDropsLocalPreviousResponseAfterWopalCompaction(t *test
 		t.Fatalf("HTTP sanitizer produced no input: %s", rewritten)
 	}
 	summaryMessage, _ := rewrittenInput[0].(map[string]any)
-	summaryID := strings.TrimSpace(fmt.Sprint(summaryMessage["id"]))
-	if !strings.HasPrefix(summaryID, "msg_") || len(summaryID) > 64 {
-		t.Fatalf("HTTP sanitizer produced invalid official message id %q", summaryID)
+	if rawID, ok := summaryMessage["id"]; ok {
+		summaryID := strings.TrimSpace(fmt.Sprint(rawID))
+		if !strings.HasPrefix(summaryID, "msg_") || len(summaryID) > 64 {
+			t.Fatalf("HTTP sanitizer produced invalid official message id %q", summaryID)
+		}
 	}
 
 	frame := append([]byte(nil), body...)
@@ -417,9 +474,11 @@ func TestOfficialSanitizerDropsLocalPreviousResponseAfterWopalCompaction(t *test
 	}
 	frameInput, _ := framePayload["input"].([]any)
 	frameSummary, _ := frameInput[0].(map[string]any)
-	frameSummaryID := strings.TrimSpace(fmt.Sprint(frameSummary["id"]))
-	if !strings.HasPrefix(frameSummaryID, "msg_") || len(frameSummaryID) > 64 {
-		t.Fatalf("websocket sanitizer produced invalid official message id %q", frameSummaryID)
+	if rawID, ok := frameSummary["id"]; ok {
+		frameSummaryID := strings.TrimSpace(fmt.Sprint(rawID))
+		if !strings.HasPrefix(frameSummaryID, "msg_") || len(frameSummaryID) > 64 {
+			t.Fatalf("websocket sanitizer produced invalid official message id %q", frameSummaryID)
+		}
 	}
 }
 
@@ -463,5 +522,56 @@ func TestWopalCompactionSummaryIDsFitOfficialLimit(t *testing.T) {
 	}
 	if fallbackID != id {
 		t.Fatalf("summary id mismatch: normal=%q fallback=%q", id, fallbackID)
+	}
+}
+
+func TestNormalizeOfficialInputStripsSelfDescribingItemIDs(t *testing.T) {
+	input := []any{
+		map[string]any{"type": "message", "id": "msg_01abc", "role": "user", "content": "hello"},
+		map[string]any{"type": "function_call", "id": "fc_01abc", "call_id": "call_1", "name": "exec_command", "arguments": "{}"},
+		map[string]any{"type": "reasoning", "id": "rs_official", "encrypted_content": "cipher", "summary": []any{}},
+	}
+	got, stripped, dropped, _ := normalizeOfficialInputItems(input)
+	if stripped != 2 || dropped != 0 {
+		t.Fatalf("stripped=%d dropped=%d, want 2/0", stripped, dropped)
+	}
+	if _, ok := got[0].(map[string]any)["id"]; ok {
+		t.Fatal("message id was not stripped")
+	}
+	if _, ok := got[1].(map[string]any)["id"]; ok {
+		t.Fatal("function_call id was not stripped")
+	}
+	if got[2].(map[string]any)["id"] != "rs_official" {
+		t.Fatal("reasoning id must be preserved")
+	}
+}
+
+func TestNormalizeOfficialInputDropsReferencesAndIDOnlyItems(t *testing.T) {
+	input := []any{
+		map[string]any{"type": "item_reference", "id": "msg_persisted"},
+		map[string]any{"type": "mystery", "id": "mystery_1"},
+		map[string]any{"type": "message", "role": "user", "content": "hi"},
+	}
+	got, stripped, dropped, _ := normalizeOfficialInputItems(input)
+	if dropped != 2 || stripped != 0 {
+		t.Fatalf("dropped=%d stripped=%d, want 2/0", dropped, stripped)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len=%d, want 1", len(got))
+	}
+}
+
+func TestSanitizeOfficialRequestInputStillNeutralizesWopalReasoning(t *testing.T) {
+	input := []any{
+		map[string]any{"type": "reasoning", "id": "rs_chatcmpl-abc_0", "encrypted_content": ""},
+		map[string]any{"type": "message", "id": "msg_1", "role": "user", "content": "hi"},
+	}
+	got, neutralized := sanitizeOfficialRequestInput(input)
+	got, stripped, dropped, _ := normalizeOfficialInputItems(got)
+	if neutralized != 1 || stripped != 1 || dropped != 0 {
+		t.Fatalf("neutralized=%d stripped=%d dropped=%d", neutralized, stripped, dropped)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len=%d, want 1", len(got))
 	}
 }
