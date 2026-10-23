@@ -18,8 +18,12 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/compaction"
 	"wopal-codex-gateway/internal/config"
 	"wopal-codex-gateway/internal/keychain"
+	"wopal-codex-gateway/internal/notify"
+	"wopal-codex-gateway/internal/proxy"
+	"wopal-codex-gateway/internal/quota"
 )
 
 // runServe is the only daemon entry point. It owns the listener, the embedded
@@ -68,7 +72,7 @@ func runServe(args []string) error {
 	if err := blockSDKRequestLogDir(filepath.Join(root, "runtime", "cliproxy-auth")); err != nil {
 		return err
 	}
-	configureWopalCompactionKey(wopalKey)
+	compaction.ConfigureKey(wopalKey)
 	cliConfig, cliConfigPath, err := config.BuildCLIProxyConfig(root, gateway, wopalKey)
 	if err != nil {
 		return err
@@ -81,15 +85,15 @@ func runServe(args []string) error {
 		"event": "gateway_starting", "host": gateway.Listen.Host, "port": gateway.Listen.Port,
 		"wopal_models": len(gateway.WopalAI.Models), "ollama_enabled": false, "relay_port": nil,
 	})
-	quotaGuard := newOfficialQuotaGuardWithState(logger, filepath.Join(root, "runtime", "official-quota-state.json"), time.Now())
-	quotaGuard.notifier = newQuotaNotifier(logger, gateway.Notifications)
-	logger.Write(map[string]any{"event": "quota_notification_configured", "status": quotaGuard.notifier.status()})
+	quotaGuard := quota.NewGuardWithState(logger, filepath.Join(root, "runtime", "official-quota-state.json"), time.Now())
+	quotaGuard.SetNotifier(notify.NewQuotaNotifier(logger, gateway.Notifications))
+	logger.Write(map[string]any{"event": "quota_notification_configured", "status": quotaGuard.NotificationStatus()})
 
 	builder := cliproxy.NewBuilder().
 		WithConfig(cliConfig).
 		WithConfigPath(cliConfigPath).
 		WithServerOptions(
-			sdkapi.WithMiddleware(routingMiddlewareWithQuotaGuard(logger, quotaGuard)),
+			sdkapi.WithMiddleware(proxy.RoutingMiddleware(logger, quotaGuard)),
 			sdkapi.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *sdkconfig.Config) {
 				engine.GET("/_health", func(c *gin.Context) {
 					c.JSON(200, gin.H{"ok": true, "mode": "single-process", "wopal_models": len(gateway.WopalAI.Models)})
@@ -99,8 +103,8 @@ func runServe(args []string) error {
 						"ok":                   true,
 						"listen":               fmt.Sprintf("%s:%d", gateway.Listen.Host, gateway.Listen.Port),
 						"official":             "native-pass-through",
-						"official_quota":       quotaGuard.status(time.Now()),
-						"notifications":        quotaGuard.notificationStatus(),
+						"official_quota":       quotaGuard.Status(time.Now()),
+						"notifications":        quotaGuard.NotificationStatus(),
 						"wopal":                "cliproxy-responses-to-chat",
 						"ollama":               "disabled",
 						"request_body_logging": requestBodyLoggingState,
@@ -149,7 +153,7 @@ func redirectServiceLogs(root string, cfg config.Logs) (func(), error) {
 	}
 	cleanups = append(cleanups, stdout)
 
-	stderr, err := captureStream(filepath.Join(logsDirectory, "service-error.log"), os.Stderr, newAbortHandlerFilterWriter, cfg)
+	stderr, err := captureStream(filepath.Join(logsDirectory, "service-error.log"), os.Stderr, activity.NewAbortHandlerFilterWriter, cfg)
 	if err != nil {
 		closeAll()
 		return nil, fmt.Errorf("redirect stderr: %w", err)
@@ -176,10 +180,10 @@ func captureStream(path string, target *os.File, wrap func(io.Writer) io.Writer,
 
 	out := activity.NewRotatingWriter(path, cfg)
 	var sink io.Writer = out
-	var filtered *abortHandlerFilterWriter
+	var filtered *activity.AbortHandlerFilterWriter
 	if wrap != nil {
 		sink = wrap(out)
-		filtered, _ = sink.(*abortHandlerFilterWriter)
+		filtered, _ = sink.(*activity.AbortHandlerFilterWriter)
 	}
 	done := make(chan struct{})
 	go func() {
@@ -191,7 +195,7 @@ func captureStream(path string, target *os.File, wrap func(io.Writer) io.Writer,
 		_ = reader.Close()
 		<-done
 		if filtered != nil {
-			filtered.flush()
+			filtered.Flush()
 		}
 		_ = out.Close()
 	}, nil

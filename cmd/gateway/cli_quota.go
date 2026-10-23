@@ -6,6 +6,7 @@ import (
 
 	"wopal-codex-gateway/internal/activity"
 	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/quota"
 )
 
 // runQuotaCommand owns the quota maintenance commands. These run as short-lived
@@ -15,7 +16,7 @@ func runQuotaCommand(subcommand string, args []string) error {
 	switch subcommand {
 	case "reset-learning":
 		path := filepath.Join(config.StateDir(), "official-quota-state.json")
-		cleared, err := resetQuotaLearning(path)
+		cleared, err := quota.ResetLearning(path)
 		if err != nil {
 			return err
 		}
@@ -26,7 +27,7 @@ func runQuotaCommand(subcommand string, args []string) error {
 			logger.Close()
 		}
 		fmt.Printf("Quota learning reset: %d account(s) cleared; five_hour=%.0f, weekly=%.0f.\n",
-			cleared, officialFiveHourStopPercent, officialWeeklyStopPercent)
+			cleared, quota.FiveHourStopPercent, quota.WeeklyStopPercent)
 		return nil
 	}
 
