@@ -110,7 +110,7 @@ wopal-codex-gateway service uninstall
 wopal-codex-gateway quota reset-learning
 ```
 
-`serve` 是唯一 daemon 入口。`quota reset-learning` 清除已观测最大单步，并写一条 metadata 日志。`config`、`auth`、`models`、`catalog`、`codex`、`service`、`quota` 都是同一个二进制上的子命令组。`service install` 与 `codex install` 在报告成功前都必须通过 `/_health`。
+`serve` 是唯一 daemon 入口。`quota reset-learning` 清除已观测最大单步，并写一条 metadata 日志；状态文件尚不存在时按“已无学习值”成功返回。`config`、`auth`、`models`、`catalog`、`codex`、`service`、`quota` 都是同一个二进制上的子命令组。`service install` 与 `codex install` 在报告成功前都必须先确认配置端口已释放，再通过 `/_health`。
 
 ### HTTP
 
@@ -139,7 +139,8 @@ wopal-codex-gateway quota reset-learning
     "excludedModels": []
   },
   "notifications": { "enabled": true, "sound": "default", "tool": "" },
-  "logs": { "maxSizeMb": 10, "maxBackups": 5 }
+  "logs": { "maxSizeMb": 10, "maxBackups": 5 },
+  "quota": { "maxStepCap": 5 }
 }
 ```
 
@@ -149,6 +150,8 @@ wopal-codex-gateway quota reset-learning
 - `listen.host` 默认 `127.0.0.1`，`listen.port` 默认 `11435`。
 - `wopalAi.models` 是唯一模型来源；`excludedModels` 只影响 `models sync`。
 - `logs.maxSizeMb` 与 `logs.maxBackups` 控制日志轮转。
+- `quota.maxStepCap` 是已观测最大单步的上限，默认 `5`，允许范围 `1–10`；缺省、`<= 0` 或超出范围时按默认 `5`。
+- `maxStepCap` 只约束学习值，不改变基础阈值（5 小时 `97`、每周 `99`）与最小余量（`2`、`1`）的语义。
 - 写入使用临时文件加 rename，权限 `0600`。
 
 ### Logs config
@@ -217,8 +220,10 @@ wopal-codex-gateway quota reset-learning
 
 日志与临时文件规则：
 
-- request logger 使用 no-op 实现，不实现 file-body source。
-- 请求正文只在内存中处理，不写入 `logs/` 或 runtime 目录。
+- `serve` 在构建 SDK 前把进程环境变量 `WRITABLE_PATH` 固定到 `runtime/cliproxy`，使 SDK 日志目录解析的第一优先级始终落在这里。
+- `runtime/cliproxy/logs` 与 `runtime/cliproxy-auth/logs` 都被替换为普通文件，SDK 的 request logger 与 body source 无法在这些路径下创建目录或文件。
+- 任一封堵失败时 `serve` 直接启动失败；只有两处封堵全部成功时，`/_status` 才报告 `request_body_logging: "disabled"`。
+- 请求正文只在内存中处理，不写入 `logs/`、`runtime/cliproxy*` 或其他 runtime 目录。
 - 错误诊断只记录状态码、模型、错误码、request id 和耗时。
 
 ## Reference Documents

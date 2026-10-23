@@ -132,6 +132,13 @@ func stubHealthError(t *testing.T, probeErr error) {
 	t.Cleanup(func() { launchd.HealthClient = original })
 }
 
+func stubPortProbeFree(t *testing.T) {
+	t.Helper()
+	original := launchd.PortProbe
+	launchd.PortProbe = func(string, time.Duration) error { return errors.New("connection refused") }
+	t.Cleanup(func() { launchd.PortProbe = original })
+}
+
 func withHealthTiming(t *testing.T, timeout, retry time.Duration) {
 	t.Helper()
 	previousTimeout, previousRetry := launchd.HealthWaitTimeout, launchd.HealthRetryDelay
@@ -167,6 +174,7 @@ func TestServiceCommandInstallWaitsForHealth(t *testing.T) {
 	writeLaunchAgentTemplate(t, testLaunchAgentTemplate)
 	stubLaunchctl(t, nil)
 	stubHealthClient(t, http.StatusOK)
+	stubPortProbeFree(t)
 
 	stdout, err := captureStdout(t, func() error { return runServiceCommand("install", nil) })
 	if err != nil {
@@ -188,6 +196,7 @@ func TestServiceCommandInstallReportsHealthFailure(t *testing.T) {
 	writeLaunchAgentTemplate(t, testLaunchAgentTemplate)
 	stubLaunchctl(t, nil)
 	stubHealthError(t, errors.New("connection refused"))
+	stubPortProbeFree(t)
 	withHealthTiming(t, 60*time.Millisecond, 5*time.Millisecond)
 
 	stdout, err := captureStdout(t, func() error { return runServiceCommand("install", nil) })

@@ -53,14 +53,33 @@ func TestQuotaResetLearningClearsObservedSteps(t *testing.T) {
 	}
 }
 
-func TestQuotaResetLearningReportsMissingStatePath(t *testing.T) {
+func TestQuotaResetLearningTreatsMissingStateAsCleared(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "official-quota-state.json")
+	cleared, err := ResetLearning(path)
+	if err != nil {
+		t.Fatalf("ResetLearning on a missing state: %v", err)
+	}
+	if cleared != 0 {
+		t.Fatalf("cleared accounts = %d, want 0", cleared)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("reset created a state file for an absent state: %v", statErr)
+	}
+}
+
+func TestQuotaResetLearningReportsCorruptStatePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "official-quota-state.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	_, err := ResetLearning(path)
 	if err == nil {
-		t.Fatal("expected an error for a missing state file")
+		t.Fatal("expected an error for a corrupt state file")
 	}
-	if !strings.Contains(err.Error(), path) {
-		t.Fatalf("error does not name the state path: %v", err)
+	for _, want := range []string{path, "parse quota state"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
 	}
 }
 

@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,8 @@ const (
 	healthRequestTimeout = 500 * time.Millisecond
 	// StatusHealthTimeout bounds the single probe used by `service status`.
 	StatusHealthTimeout = time.Second
+	// portProbeTimeout bounds one port-availability dial.
+	portProbeTimeout = 200 * time.Millisecond
 )
 
 // HealthWaitTimeout and HealthRetryDelay are variables so tests can exercise
@@ -28,11 +32,26 @@ const (
 var (
 	HealthWaitTimeout = 90 * time.Second
 	HealthRetryDelay  = 250 * time.Millisecond
+
+	// PortReleaseTimeout and PortReleaseRetryDelay bound how long an install
+	// waits for the previous listener to disappear after bootout.
+	PortReleaseTimeout    = 3 * time.Second
+	PortReleaseRetryDelay = 50 * time.Millisecond
 )
 
 // HealthClient performs every health probe. Tests replace it so no test needs a
 // live gateway.
 var HealthClient = &http.Client{Timeout: StatusHealthTimeout}
+
+// PortProbe reports whether something is listening on addr. It is a seam so
+// tests never dial the real gateway port.
+var PortProbe = func(addr string, timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
 
 // RunLaunchctl is the only place this binary talks to launchd. Tests replace it
 // so no test can bootstrap, kickstart or bootout a real user job.
@@ -95,8 +114,9 @@ func RequireGatewayBinary() error {
 	return nil
 }
 
-// InstallLaunchAgent renders the plist, bootstraps it and kickstarts the job.
-func InstallLaunchAgent() error {
+// InstallLaunchAgent renders the plist, waits for the configured port to be
+// free, bootstraps the job and kickstarts it.
+func InstallLaunchAgent(host string, port int) error {
 	root, err := config.ProjectRootDir()
 	if err != nil {
 		return err
@@ -136,6 +156,9 @@ func InstallLaunchAgent() error {
 	domain := LaunchdDomain()
 	// A previous job may still be registered; that is expected before install.
 	_ = RunLaunchctl("bootout", domain, path)
+	if err := WaitPortAvailable(host, port); err != nil {
+		return err
+	}
 	if err := RunLaunchctl("bootstrap", domain, path); err != nil {
 		return fmt.Errorf("launchctl bootstrap %s failed: %w", path, err)
 	}
@@ -143,6 +166,40 @@ func InstallLaunchAgent() error {
 		return fmt.Errorf("launchctl kickstart %s failed: %w", LaunchAgentTarget(), err)
 	}
 	return nil
+}
+
+// WaitPortAvailable polls until the configured address has no listener. A
+// launchd install must not report success when an older or unrelated process
+// still owns the port and the new job therefore cannot bind it.
+func WaitPortAvailable(host string, port int) error {
+	addr := net.JoinHostPort(probeHost(host), strconv.Itoa(port))
+	deadline := time.Now().Add(PortReleaseTimeout)
+	for {
+		if err := PortProbe(addr, portProbeTimeout); err != nil {
+			return nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		pause := PortReleaseRetryDelay
+		if remaining < pause {
+			pause = remaining
+		}
+		time.Sleep(pause)
+	}
+	return fmt.Errorf("port %s:%d is still in use after stopping the previous service; stop the process holding it and retry", host, port)
+}
+
+// probeHost maps wildcard bind addresses onto loopback; dialing 0.0.0.0 or ::
+// does not reliably probe the process that owns the port.
+func probeHost(host string) string {
+	switch strings.TrimSpace(host) {
+	case "", "0.0.0.0", "::", "[::]":
+		return "127.0.0.1"
+	default:
+		return host
+	}
 }
 
 // UninstallLaunchAgent boots the job out and removes the plist.

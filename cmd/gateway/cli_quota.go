@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"wopal-codex-gateway/internal/activity"
@@ -20,11 +21,17 @@ func runQuotaCommand(subcommand string, args []string) error {
 		if err != nil {
 			return err
 		}
-		if logger, logErr := activity.New(config.LogsDir(), config.Logs{}); logErr == nil {
+		logConfig, configErr := quotaLogsConfig()
+		if configErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: using default log rotation: %v\n", configErr)
+		}
+		if logger, logErr := activity.New(config.LogsDir(), logConfig); logErr == nil {
 			logger.Write(map[string]any{
 				"event": "official_quota_learning_reset", "accounts_cleared": cleared,
 			})
 			logger.Close()
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: write quota reset metadata: %v\n", logErr)
 		}
 		fmt.Printf("Quota learning reset: %d account(s) cleared; five_hour=%.0f, weekly=%.0f.\n",
 			cleared, quota.FiveHourStopPercent, quota.WeeklyStopPercent)
@@ -32,4 +39,14 @@ func runQuotaCommand(subcommand string, args []string) error {
 	}
 
 	return fmt.Errorf("usage: %s quota reset-learning", binaryName)
+}
+
+// quotaLogsConfig keeps the short-lived reset command on the same rotation
+// policy as the daemon it reports against.
+func quotaLogsConfig() (config.Logs, error) {
+	cfg, err := config.LoadGatewayConfig(config.ConfigPath())
+	if err != nil {
+		return config.Logs{}, err
+	}
+	return cfg.Logs, nil
 }

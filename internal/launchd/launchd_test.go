@@ -144,6 +144,22 @@ func withHealthTiming(t *testing.T, timeout, retry time.Duration) {
 	})
 }
 
+func stubPortProbe(t *testing.T, probeErr error) {
+	t.Helper()
+	original := PortProbe
+	PortProbe = func(string, time.Duration) error { return probeErr }
+	t.Cleanup(func() { PortProbe = original })
+}
+
+func withPortTiming(t *testing.T, timeout, retry time.Duration) {
+	t.Helper()
+	previousTimeout, previousRetry := PortReleaseTimeout, PortReleaseRetryDelay
+	PortReleaseTimeout, PortReleaseRetryDelay = timeout, retry
+	t.Cleanup(func() {
+		PortReleaseTimeout, PortReleaseRetryDelay = previousTimeout, previousRetry
+	})
+}
+
 func hostPortFromURL(t *testing.T, raw string) (string, int) {
 	t.Helper()
 	parsed, err := url.Parse(raw)
@@ -212,8 +228,9 @@ func TestLaunchAgentInstallWritesPlistAndLoadsJob(t *testing.T) {
 		}
 		return nil
 	})
+	stubPortProbe(t, errors.New("connection refused"))
 
-	if err := InstallLaunchAgent(); err != nil {
+	if err := InstallLaunchAgent("127.0.0.1", 11435); err != nil {
 		t.Fatalf("installLaunchAgent: %v", err)
 	}
 
@@ -279,8 +296,9 @@ func TestLaunchAgentInstallReportsBootstrapFailure(t *testing.T) {
 		}
 		return nil
 	})
+	stubPortProbe(t, errors.New("connection refused"))
 
-	err := InstallLaunchAgent()
+	err := InstallLaunchAgent("127.0.0.1", 11435)
 	if err == nil {
 		t.Fatal("installLaunchAgent succeeded after bootstrap failed")
 	}
@@ -293,6 +311,50 @@ func TestLaunchAgentInstallReportsBootstrapFailure(t *testing.T) {
 		if call[0] == "kickstart" {
 			t.Fatalf("kickstart ran after bootstrap failed: %v", *calls)
 		}
+	}
+}
+
+func TestLaunchAgentInstallFailsWhenPortStaysBusy(t *testing.T) {
+	useTempGatewayRoot(t)
+	writeLaunchAgentTemplate(t, testLaunchAgentTemplate)
+	calls := stubLaunchctl(t, nil)
+	stubPortProbe(t, nil) // no error means a listener answered
+	withPortTiming(t, 60*time.Millisecond, 5*time.Millisecond)
+
+	err := InstallLaunchAgent("127.0.0.1", 11435)
+	if err == nil {
+		t.Fatal("installLaunchAgent succeeded while the port was still in use")
+	}
+	if !strings.Contains(err.Error(), "port 127.0.0.1:11435 is still in use after stopping the previous service; stop the process holding it and retry") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, call := range *calls {
+		if call[0] == "bootstrap" || call[0] == "kickstart" {
+			t.Fatalf("install continued after the port stayed busy: %v", *calls)
+		}
+	}
+}
+
+func TestLaunchAgentInstallBootstrapsWhenPortIsFree(t *testing.T) {
+	useTempGatewayRoot(t)
+	writeLaunchAgentTemplate(t, testLaunchAgentTemplate)
+	calls := stubLaunchctl(t, nil)
+	stubPortProbe(t, errors.New("connection refused"))
+
+	if err := InstallLaunchAgent("127.0.0.1", 11435); err != nil {
+		t.Fatalf("installLaunchAgent: %v", err)
+	}
+	var bootstrapped, kickstarted bool
+	for _, call := range *calls {
+		switch call[0] {
+		case "bootstrap":
+			bootstrapped = true
+		case "kickstart":
+			kickstarted = true
+		}
+	}
+	if !bootstrapped || !kickstarted {
+		t.Fatalf("install did not bootstrap/kickstart with a free port: %v", *calls)
 	}
 }
 

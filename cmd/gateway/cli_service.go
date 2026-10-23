@@ -32,16 +32,17 @@ func runServiceCommand(subcommand string, args []string) error {
 
 func serviceInstall() error {
 	// Fail before touching launchd when the install cannot possibly run.
-	if _, err := config.LoadInstallConfig(); err != nil {
+	gateway, err := config.LoadInstallConfig()
+	if err != nil {
 		return err
 	}
 	if err := launchd.RequireGatewayBinary(); err != nil {
 		return err
 	}
-	if err := launchd.InstallLaunchAgent(); err != nil {
+	if err := launchd.InstallLaunchAgent(gateway.Listen.Host, gateway.Listen.Port); err != nil {
 		return err
 	}
-	host, port := serviceListenAddress()
+	host, port := gateway.Listen.Host, gateway.Listen.Port
 	if err := launchd.WaitForHealth(host, port); err != nil {
 		return fmt.Errorf("proxy health check failed: %w; check %s and %s", err, config.ServiceLogPath(), config.ServiceErrorLogPath())
 	}

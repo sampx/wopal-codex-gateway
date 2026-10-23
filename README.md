@@ -79,7 +79,7 @@ Base protection thresholds:
 
 The guard checks before each new sampling step (`response.create` / `response.append`), not only once per outer user turn.
 
-The upstream reports whole percentages, so one step can consume more than one point. To avoid overshooting, the guard lowers the stop point by however much the largest observed single step exceeds a minimum margin: 2 points for the 5-hour window and 1 point for the weekly window. The observed step is capped at 5 points, so the lowest effective thresholds are 94% and 95%. With no large steps observed, the effective threshold equals the base threshold.
+The upstream reports whole percentages, so one step can consume more than one point. To avoid overshooting, the guard lowers the stop point by however much the largest observed single step exceeds a minimum margin: 2 points for the 5-hour window and 1 point for the weekly window. The observed step is capped at 5 points by default (`quota.maxStepCap`, range 1–10), so with the default cap the lowest effective thresholds are 94% and 95%. With no large steps observed, the effective threshold equals the base threshold.
 
 When protected:
 
@@ -180,7 +180,8 @@ An existing file must contain `"version": 1`. Full schema:
   "listen": { "host": "127.0.0.1", "port": 11435 },
   "wopalAi": { "baseUrl": "", "models": [], "excludedModels": [] },
   "notifications": { "enabled": true, "sound": "default", "tool": "" },
-  "logs": { "maxSizeMb": 10, "maxBackups": 5 }
+  "logs": { "maxSizeMb": 10, "maxBackups": 5 },
+  "quota": { "maxStepCap": 5 }
 }
 ```
 
@@ -189,6 +190,7 @@ Rules:
 - `version` must be `1`; any other value is rejected before startup.
 - Missing `listen` values default to `127.0.0.1:11435`.
 - Missing `logs` values default to 10 MB per file and 5 backups.
+- `quota.maxStepCap` bounds the largest learned single step. It defaults to `5` and accepts `1–10`; a missing, non-positive, or out-of-range value falls back to `5`.
 - `wopalAi.models` is the configured model list; `excludedModels` only affects `models sync`.
 - If `wopalAi.models` is omitted, the built-in default entry is used.
 
@@ -959,7 +961,7 @@ Runtime configuration, logs, built binaries, auth state, and other local operati
 
 ## 14. Development
 
-The implementation is one Go program under `cmd/gateway/`. The same package parses subcommands, loads and validates configuration, integrates with Codex, builds the model catalog, talks to Keychain and LaunchAgent, and runs routing, quota, compaction, notifications, and activity logging.
+The CLI and dependency assembly live in `cmd/gateway/`. Business capabilities are split across `internal/*`: `internal/config` (versioned config), `internal/codex` (Codex takeover/restore), `internal/catalog` (model catalog), `internal/keychain`, `internal/launchd` (LaunchAgent lifecycle), `internal/routing`, `internal/proxy`, `internal/quota`, `internal/compaction`, `internal/notify`, and `internal/activity`. `cmd/gateway` only parses subcommands and wires those packages into the process.
 
 CLIProxyAPI is not launched as a separate proxy process. The project imports:
 

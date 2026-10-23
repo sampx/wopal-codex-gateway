@@ -34,7 +34,7 @@ func InstallIntoCodex(cfg *config.GatewayConfig) (*catalog.CatalogRefreshResult,
 	if err := launchd.RequireGatewayBinary(); err != nil {
 		return nil, err
 	}
-	if err := launchd.InstallLaunchAgent(); err != nil {
+	if err := launchd.InstallLaunchAgent(cfg.Listen.Host, cfg.Listen.Port); err != nil {
 		return nil, err
 	}
 	if err := launchd.WaitForHealth(cfg.Listen.Host, cfg.Listen.Port); err != nil {

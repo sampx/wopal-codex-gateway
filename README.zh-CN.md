@@ -77,7 +77,7 @@ consolidation_model = "wopal-ai/deepseek-v4.1-flash"
 
 保护粒度是每一次新的 sampling step，即每个 `response.create` / `response.append` 之前重新判断，而不是每个用户回合只判断一次。
 
-上游只上报整数百分比，一步可能消耗不止 1 个点。为避免越过阈值，Gateway 会按「已观测最大单步超出最小余量的部分」提前停：5 小时窗口最小余量 2 个点，每周窗口最小余量 1 个点。观测步长最多按 5 个点计算，因此有效阈值最低分别为 94% 和 95%。没有观测到大步长时，有效阈值等于基础阈值。
+上游只上报整数百分比，一步可能消耗不止 1 个点。为避免越过阈值，Gateway 会按「已观测最大单步超出最小余量的部分」提前停：5 小时窗口最小余量 2 个点，每周窗口最小余量 1 个点。观测步长默认最多按 5 个点计算（`quota.maxStepCap`，范围 1–10），因此在默认上限下有效阈值最低分别为 94% 和 95%。没有观测到大步长时，有效阈值等于基础阈值。
 
 进入保护区后：
 
@@ -178,7 +178,8 @@ Gateway 读取 `runtime/config.json`。文件不存在时使用默认配置；�
   "listen": { "host": "127.0.0.1", "port": 11435 },
   "wopalAi": { "baseUrl": "", "models": [], "excludedModels": [] },
   "notifications": { "enabled": true, "sound": "default", "tool": "" },
-  "logs": { "maxSizeMb": 10, "maxBackups": 5 }
+  "logs": { "maxSizeMb": 10, "maxBackups": 5 },
+  "quota": { "maxStepCap": 5 }
 }
 ```
 
@@ -187,6 +188,7 @@ Gateway 读取 `runtime/config.json`。文件不存在时使用默认配置；�
 - `version` 必须是 `1`；其他值会在启动前被拒绝。
 - 缺少 `listen` 时默认 `127.0.0.1:11435`。
 - 缺少 `logs` 时默认单文件 10 MB、保留 5 份备份。
+- `quota.maxStepCap` 是已观测最大单步的上限，默认 `5`，允许范围 `1–10`；缺省、`<= 0` 或超出范围时按默认 `5`。
 - `wopalAi.models` 是配置的模型列表；`excludedModels` 只影响 `models sync`。
 - `wopalAi.models` 缺失时使用内置默认项。
 
@@ -967,7 +969,7 @@ runtime/codex-restore.json
 
 ## 14. 开发与验证
 
-实现是一个 Go 程序，全部位于 `cmd/gateway/`：同一个包负责子命令解析、配置读写与校验、Codex 接入、模型目录、Keychain、LaunchAgent，以及路由、额度、压缩、通知与 activity 日志。
+CLI 与依赖装配位于 `cmd/gateway/`。业务能力拆分在 `internal/*`：`internal/config`（版本化配置）、`internal/codex`（Codex 接管/恢复）、`internal/catalog`（模型目录）、`internal/keychain`、`internal/launchd`（LaunchAgent 生命周期）、`internal/routing`、`internal/proxy`、`internal/quota`、`internal/compaction`、`internal/notify`、`internal/activity`。`cmd/gateway` 只解析子命令并把它们装配进进程。
 
 CLIProxyAPI 不是独立运行的第二个 Proxy。项目把：
 

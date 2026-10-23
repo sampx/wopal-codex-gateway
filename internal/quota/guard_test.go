@@ -177,6 +177,54 @@ func TestOfficialQuotaGuardLowersThresholdForNearbyStep(t *testing.T) {
 	}
 }
 
+func TestOfficialQuotaGuardUsesConfiguredMaxStepCap(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	// The threshold formula is unchanged: base - (clamped step - min margin),
+	// with 2 points of margin for five-hour and 1 for weekly.
+	configured := NewGuardWithStateAndMaxStep(nil, "", now, 3)
+	if got := configured.effectiveFiveHourStopPercent(10); got != 96 {
+		t.Fatalf("configured five-hour floor = %v, want 96", got)
+	}
+	if got := configured.effectiveWeeklyStopPercent(10); got != 97 {
+		t.Fatalf("configured weekly floor = %v, want 97", got)
+	}
+
+	defaultGuard := NewGuard(nil)
+	if got := defaultGuard.effectiveFiveHourStopPercent(10); got != 94 {
+		t.Fatalf("default five-hour floor = %v, want 94", got)
+	}
+	if got := defaultGuard.effectiveWeeklyStopPercent(10); got != 95 {
+		t.Fatalf("default weekly floor = %v, want 95", got)
+	}
+}
+
+func TestOfficialQuotaGuardDiscardsStepsAboveConfiguredCap(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	resetAt := now.Add(2 * time.Hour)
+	observe := func(guard *Guard) {
+		guard.ObserveWindow("acct", Window{
+			UsedPercent: 90, WindowMinutes: officialFiveHourWindowMinutes,
+			ResetAt: resetAt, ObservedAt: now,
+		})
+		guard.ObserveWindow("acct", Window{
+			UsedPercent: 94, WindowMinutes: officialFiveHourWindowMinutes,
+			ResetAt: resetAt, ObservedAt: now.Add(10 * time.Second),
+		})
+	}
+
+	configured := NewGuardWithStateAndMaxStep(nil, "", now, 3)
+	observe(configured)
+	if step, _ := configured.Status(now)["observed_five_hour_max_step"].(float64); step != 0 {
+		t.Fatalf("configured guard learned step above its cap: %v", step)
+	}
+
+	defaultGuard := NewGuard(nil)
+	observe(defaultGuard)
+	if step, _ := defaultGuard.Status(now)["observed_five_hour_max_step"].(float64); step != 4 {
+		t.Fatalf("default guard did not learn a 4-point step: %v", step)
+	}
+}
+
 func TestOfficialQuotaGuardDiscardsOverCapLearnedStep(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	resetAt := now.Add(2 * time.Hour)

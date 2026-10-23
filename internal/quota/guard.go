@@ -31,12 +31,10 @@ const (
 	officialFiveHourMinMargin = 2.0
 	officialWeeklyMinMargin   = 1.0
 
-	// officialMaxStepCap bounds how far a single observed step may lower a stop
-	// point, which is also the hard floor for the effective thresholds:
-	// five-hour 97-(5-2)=94, weekly 99-(5-1)=95. A larger delta is treated as an
-	// accumulated gap rather than one step, so the quota can never be pulled
-	// arbitrarily low by one noisy sample.
-	officialMaxStepCap = 5.0
+	// defaultMaxStepCap is used when the caller does not inject a configured
+	// cap. A larger delta is treated as an accumulated gap rather than one step,
+	// so the quota can never be pulled arbitrarily low by one noisy sample.
+	defaultMaxStepCap = 5.0
 
 	// officialMaxStepSampleGap is how close two samples must be to count their
 	// delta as one sampling step. A wider gap can span many turns or an idle
@@ -76,6 +74,9 @@ type Guard struct {
 	persistencePath string
 	logger          *activity.Logger
 	notifier        Notifier
+	// maxStepCap bounds how far one observed step may lower a stop point. It is
+	// injected at construction and never changes afterwards.
+	maxStepCap float64
 
 	// lastObserved deduplicates high-frequency quota telemetry by signature.
 	lastObservedMu sync.Mutex
@@ -104,14 +105,27 @@ type PersistedState struct {
 }
 
 func NewGuard(logger *activity.Logger) *Guard {
-	return &Guard{accounts: make(map[string]AccountState), logger: logger}
+	return newGuard(logger, defaultMaxStepCap)
 }
 
 func NewGuardWithState(logger *activity.Logger, statePath string, now time.Time) *Guard {
-	guard := NewGuard(logger)
+	return NewGuardWithStateAndMaxStep(logger, statePath, now, defaultMaxStepCap)
+}
+
+// NewGuardWithStateAndMaxStep constructs a guard with an explicit single-step
+// cap. Values <= 0 fall back to the package default.
+func NewGuardWithStateAndMaxStep(logger *activity.Logger, statePath string, now time.Time, maxStepCap float64) *Guard {
+	guard := newGuard(logger, maxStepCap)
 	guard.persistencePath = strings.TrimSpace(statePath)
 	guard.loadPersisted(now)
 	return guard
+}
+
+func newGuard(logger *activity.Logger, maxStepCap float64) *Guard {
+	if maxStepCap <= 0 || math.IsNaN(maxStepCap) {
+		maxStepCap = defaultMaxStepCap
+	}
+	return &Guard{accounts: make(map[string]AccountState), logger: logger, maxStepCap: maxStepCap}
 }
 
 // SetNotifier attaches the notification implementation after construction.
@@ -153,29 +167,33 @@ func activeQuotaState(state AccountState, now time.Time) (AccountState, bool) {
 
 // clampMaxStep bounds a learned step to the configured cap. Anything above the
 // cap is not trustworthy evidence about a single sampling step.
-func clampMaxStep(step float64) float64 {
+func (g *Guard) clampMaxStep(step float64) float64 {
 	if step <= 0 || math.IsNaN(step) {
 		return 0
 	}
-	if step > officialMaxStepCap {
-		return officialMaxStepCap
+	cap := defaultMaxStepCap
+	if g != nil && g.maxStepCap > 0 {
+		cap = g.maxStepCap
+	}
+	if step > cap {
+		return cap
 	}
 	return step
 }
 
 // quotaWindowThreshold lowers a base stop point by however much more than the
 // minimum margin a single step has been seen to cost.
-func quotaWindowThreshold(base, minMargin, maxStep float64) float64 {
-	margin := math.Max(minMargin, clampMaxStep(maxStep))
+func (g *Guard) quotaWindowThreshold(base, minMargin, maxStep float64) float64 {
+	margin := math.Max(minMargin, g.clampMaxStep(maxStep))
 	return base - (margin - minMargin)
 }
 
-func effectiveFiveHourStopPercent(maxStep float64) float64 {
-	return quotaWindowThreshold(FiveHourStopPercent, officialFiveHourMinMargin, maxStep)
+func (g *Guard) effectiveFiveHourStopPercent(maxStep float64) float64 {
+	return g.quotaWindowThreshold(FiveHourStopPercent, officialFiveHourMinMargin, maxStep)
 }
 
-func effectiveWeeklyStopPercent(maxStep float64) float64 {
-	return quotaWindowThreshold(WeeklyStopPercent, officialWeeklyMinMargin, maxStep)
+func (g *Guard) effectiveWeeklyStopPercent(maxStep float64) float64 {
+	return g.quotaWindowThreshold(WeeklyStopPercent, officialWeeklyMinMargin, maxStep)
 }
 
 func (g *Guard) loadPersisted(now time.Time) {
@@ -198,10 +216,10 @@ func (g *Guard) loadPersisted(now time.Time) {
 		// A value above the cap can only come from the older accumulator logic
 		// that mistook an accumulated gap for one step; it is not evidence and
 		// must not permanently lower the stop point.
-		if state.FiveHourMaxStep > officialMaxStepCap {
+		if state.FiveHourMaxStep > g.maxStepCap {
 			state.FiveHourMaxStep = 0
 		}
-		if state.WeeklyMaxStep > officialMaxStepCap {
+		if state.WeeklyMaxStep > g.maxStepCap {
 			state.WeeklyMaxStep = 0
 		}
 		if active, ok := activeQuotaState(state, now); ok {
@@ -454,14 +472,14 @@ func (g *Guard) Blocked(accountID string, now time.Time) (bool, string) {
 	if !ok {
 		return false, ""
 	}
-	return quotaStateBlocked(state, now)
+	return g.quotaStateBlocked(state, now)
 }
 
-func quotaStateBlocked(state AccountState, now time.Time) (bool, string) {
-	if quotaWindowBlocked(state.FiveHour, effectiveFiveHourStopPercent(state.FiveHourMaxStep), now) {
+func (g *Guard) quotaStateBlocked(state AccountState, now time.Time) (bool, string) {
+	if quotaWindowBlocked(state.FiveHour, g.effectiveFiveHourStopPercent(state.FiveHourMaxStep), now) {
 		return true, "five_hour"
 	}
-	if quotaWindowBlocked(state.Weekly, effectiveWeeklyStopPercent(state.WeeklyMaxStep), now) {
+	if quotaWindowBlocked(state.Weekly, g.effectiveWeeklyStopPercent(state.WeeklyMaxStep), now) {
 		return true, "weekly"
 	}
 	return false, ""
@@ -602,7 +620,7 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 		!window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() &&
 		window.ObservedAt.Sub(current.ObservedAt) <= officialMaxStepSampleGap {
 		delta := window.UsedPercent - current.UsedPercent
-		if delta > 0 && delta <= officialMaxStepCap {
+		if delta > 0 && delta <= g.maxStepCap {
 			step = delta
 		}
 	}
@@ -622,10 +640,10 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 	threshold := WeeklyStopPercent
 	windowName := "weekly"
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
-		threshold = effectiveFiveHourStopPercent(state.FiveHourMaxStep)
+		threshold = g.effectiveFiveHourStopPercent(state.FiveHourMaxStep)
 		windowName = "five_hour"
 	} else {
-		threshold = effectiveWeeklyStopPercent(state.WeeklyMaxStep)
+		threshold = g.effectiveWeeklyStopPercent(state.WeeklyMaxStep)
 	}
 	g.mu.Unlock()
 	// Observe events fire on every upstream handshake, so only log a change in
@@ -675,10 +693,10 @@ func (g *Guard) Status(now time.Time) map[string]any {
 	}
 	result["observed_five_hour_max_step"] = state.FiveHourMaxStep
 	result["observed_weekly_max_step"] = state.WeeklyMaxStep
-	result["effective_five_hour_stop_percent"] = effectiveFiveHourStopPercent(state.FiveHourMaxStep)
-	result["effective_weekly_stop_percent"] = effectiveWeeklyStopPercent(state.WeeklyMaxStep)
+	result["effective_five_hour_stop_percent"] = g.effectiveFiveHourStopPercent(state.FiveHourMaxStep)
+	result["effective_weekly_stop_percent"] = g.effectiveWeeklyStopPercent(state.WeeklyMaxStep)
 	result["state"] = "open"
-	if blocked, reason := quotaStateBlocked(state, now); blocked {
+	if blocked, reason := g.quotaStateBlocked(state, now); blocked {
 		result["state"] = "protected"
 		result["reason"] = reason
 	}

@@ -52,6 +52,13 @@ func runServe(args []string) error {
 	if err := config.ValidateServeConfig(gateway); err != nil {
 		return fmt.Errorf("%s: %w", gatewayConfigPath, err)
 	}
+	// Pin the SDK log directory before any SDK code can resolve it. This must
+	// happen before the service is built and before the keychain is touched so
+	// an unsafe log layout always fails the startup.
+	requestBodyLogging, err := installSDKLogProtection(root)
+	if err != nil {
+		return err
+	}
 
 	wopalKey, err := keychain.GetWopalAPIKey()
 	if err != nil {
@@ -67,11 +74,6 @@ func runServe(args []string) error {
 	log.SetOutput(os.Stdout)
 	log.AddHook(errorOnlyHook{})
 
-	// Install the log sink before the SDK builds its request logger, so no
-	// handler can ever create a body file.
-	if err := blockSDKRequestLogDir(filepath.Join(root, "runtime", "cliproxy-auth")); err != nil {
-		return err
-	}
 	compaction.ConfigureKey(wopalKey)
 	cliConfig, cliConfigPath, err := config.BuildCLIProxyConfig(root, gateway, wopalKey)
 	if err != nil {
@@ -85,7 +87,7 @@ func runServe(args []string) error {
 		"event": "gateway_starting", "host": gateway.Listen.Host, "port": gateway.Listen.Port,
 		"wopal_models": len(gateway.WopalAI.Models), "ollama_enabled": false, "relay_port": nil,
 	})
-	quotaGuard := quota.NewGuardWithState(logger, filepath.Join(root, "runtime", "official-quota-state.json"), time.Now())
+	quotaGuard := quota.NewGuardWithStateAndMaxStep(logger, filepath.Join(root, "runtime", "official-quota-state.json"), time.Now(), gateway.Quota.MaxStepCap)
 	quotaGuard.SetNotifier(notify.NewQuotaNotifier(logger, gateway.Notifications))
 	logger.Write(map[string]any{"event": "quota_notification_configured", "status": quotaGuard.NotificationStatus()})
 
@@ -107,7 +109,7 @@ func runServe(args []string) error {
 						"notifications":        quotaGuard.NotificationStatus(),
 						"wopal":                "cliproxy-responses-to-chat",
 						"ollama":               "disabled",
-						"request_body_logging": requestBodyLoggingState,
+						"request_body_logging": requestBodyLogging,
 					})
 				})
 			}),

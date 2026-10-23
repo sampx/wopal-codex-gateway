@@ -68,6 +68,51 @@ func TestGatewayConfigDefaultsAndLogs(t *testing.T) {
 	}
 }
 
+func TestGatewayConfigQuotaMaxStepCap(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want float64
+	}{
+		{
+			name: "configured",
+			body: `{"version":1,"wopalAi":{"baseUrl":"https://example.test/v1"},"quota":{"maxStepCap":3}}`,
+			want: 3,
+		},
+		{
+			name: "missing",
+			body: `{"version":1,"wopalAi":{"baseUrl":"https://example.test/v1"}}`,
+			want: DefaultQuotaMaxStepCap,
+		},
+		{
+			name: "zero",
+			body: `{"version":1,"wopalAi":{"baseUrl":"https://example.test/v1"},"quota":{"maxStepCap":0}}`,
+			want: DefaultQuotaMaxStepCap,
+		},
+		{
+			name: "above range",
+			body: `{"version":1,"wopalAi":{"baseUrl":"https://example.test/v1"},"quota":{"maxStepCap":11}}`,
+			want: DefaultQuotaMaxStepCap,
+		},
+		{
+			name: "below range",
+			body: `{"version":1,"wopalAi":{"baseUrl":"https://example.test/v1"},"quota":{"maxStepCap":0.5}}`,
+			want: DefaultQuotaMaxStepCap,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg, err := LoadGatewayConfig(writeGatewayConfigFile(t, testCase.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Quota.MaxStepCap != testCase.want {
+				t.Fatalf("maxStepCap = %v, want %v", cfg.Quota.MaxStepCap, testCase.want)
+			}
+		})
+	}
+}
+
 func TestGatewayConfigMissingFileYieldsVersionedDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent.json")
 	cfg, err := LoadGatewayConfig(path)

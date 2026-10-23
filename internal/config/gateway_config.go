@@ -21,6 +21,12 @@ const (
 
 	DefaultLogMaxSizeMB  = 10
 	DefaultLogMaxBackups = 5
+
+	// DefaultQuotaMaxStepCap is the default upper bound for one observed quota
+	// sampling step. Operators may lower or raise it within [1, 10].
+	DefaultQuotaMaxStepCap = 5
+	minQuotaMaxStepCap     = 1
+	maxQuotaMaxStepCap     = 10
 )
 
 // ExternalModelConfig is one Wopal AI model entry in runtime/config.json. The
@@ -66,6 +72,13 @@ type Logs struct {
 	MaxBackups int `json:"maxBackups,omitempty"`
 }
 
+// QuotaConfig tunes the learned quota guard. An absent or out-of-range value
+// falls back to DefaultQuotaMaxStepCap, so a malformed config never disables
+// the protection floor.
+type QuotaConfig struct {
+	MaxStepCap float64 `json:"maxStepCap,omitempty"`
+}
+
 type OllamaConfig struct {
 	Enabled bool   `json:"enabled,omitempty"`
 	BaseURL string `json:"baseUrl,omitempty"`
@@ -80,6 +93,7 @@ type GatewayConfig struct {
 	WopalAI       WopalAIConfig       `json:"wopalAi"`
 	Notifications NotificationsConfig `json:"notifications,omitempty"`
 	Logs          Logs                `json:"logs,omitempty"`
+	Quota         QuotaConfig         `json:"quota,omitempty"`
 	Ollama        OllamaConfig        `json:"ollama,omitempty"`
 }
 
@@ -123,7 +137,8 @@ func DefaultGatewayConfig() *GatewayConfig {
 			}},
 			ExcludedModels: []string{},
 		},
-		Logs: Logs{MaxSizeMB: DefaultLogMaxSizeMB, MaxBackups: DefaultLogMaxBackups},
+		Logs:  Logs{MaxSizeMB: DefaultLogMaxSizeMB, MaxBackups: DefaultLogMaxBackups},
+		Quota: QuotaConfig{MaxStepCap: DefaultQuotaMaxStepCap},
 	}
 }
 
@@ -175,7 +190,15 @@ func MergeGatewayConfig(saved *GatewayConfig) *GatewayConfig {
 	if merged.Logs.MaxBackups <= 0 {
 		merged.Logs.MaxBackups = DefaultLogMaxBackups
 	}
+	merged.Quota.MaxStepCap = normalizeQuotaMaxStepCap(merged.Quota.MaxStepCap)
 	return &merged
+}
+
+func normalizeQuotaMaxStepCap(value float64) float64 {
+	if value < minQuotaMaxStepCap || value > maxQuotaMaxStepCap {
+		return DefaultQuotaMaxStepCap
+	}
+	return value
 }
 
 // ValidateServeConfig rejects configurations the daemon cannot serve. It runs

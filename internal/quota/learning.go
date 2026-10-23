@@ -2,6 +2,7 @@ package quota
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,8 +53,8 @@ func (g *Guard) adoptExternalLearningReset() {
 		}
 		// Keep the smaller value: the daemon only adopts a reset, never growth
 		// written by somebody else.
-		state.FiveHourMaxStep = minFloat(state.FiveHourMaxStep, clampMaxStep(saved.FiveHourMaxStep))
-		state.WeeklyMaxStep = minFloat(state.WeeklyMaxStep, clampMaxStep(saved.WeeklyMaxStep))
+		state.FiveHourMaxStep = minFloat(state.FiveHourMaxStep, g.clampMaxStep(saved.FiveHourMaxStep))
+		state.WeeklyMaxStep = minFloat(state.WeeklyMaxStep, g.clampMaxStep(saved.WeeklyMaxStep))
 		g.accounts[key] = state
 	}
 	g.mu.Unlock()
@@ -88,7 +89,7 @@ func readQuotaStateFile(path string) (PersistedState, error) {
 func writeQuotaStateFile(path string, state PersistedState) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create quota state directory %s: %w", dir, err)
+		return fmt.Errorf("create quota state directory %s for %s: %w", dir, path, err)
 	}
 	payload, err := json.Marshal(state)
 	if err != nil {
@@ -125,6 +126,11 @@ func writeQuotaStateFile(path string, state PersistedState) error {
 func ResetLearning(path string) (int, error) {
 	state, err := readQuotaStateFile(path)
 	if err != nil {
+		// No state file means the guard never learned a step, which is already
+		// the requested outcome. Only a real read/write failure is an error.
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
 		return 0, err
 	}
 
@@ -139,8 +145,11 @@ func ResetLearning(path string) (int, error) {
 		changed++
 	}
 
+	if changed == 0 {
+		return 0, nil
+	}
 	if err := writeQuotaStateFile(path, state); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("clear learned quota steps in %s: %w", path, err)
 	}
 	return changed, nil
 }
