@@ -27,6 +27,8 @@ const testLaunchAgentTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <string>serve</string>
     <string>--project-root</string>
     <string>{{PROJECT_ROOT}}</string>
+    <string>--instance</string>
+    <string>{{INSTANCE}}</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -132,6 +134,15 @@ func stubHealthError(t *testing.T, probeErr error) {
 	t.Cleanup(func() { launchd.HealthClient = original })
 }
 
+// stubInstanceGate replaces the launch-scoped health gate so the orchestration
+// tests can assert plist/bootstrap ordering without a real daemon.
+func stubInstanceGate(t *testing.T, err error) {
+	t.Helper()
+	original := launchd.WaitForInstanceHook
+	launchd.WaitForInstanceHook = func(string, int, string) error { return err }
+	t.Cleanup(func() { launchd.WaitForInstanceHook = original })
+}
+
 func stubPortProbeFree(t *testing.T) {
 	t.Helper()
 	original := launchd.PortProbe
@@ -175,6 +186,7 @@ func TestServiceCommandInstallWaitsForHealth(t *testing.T) {
 	stubLaunchctl(t, nil)
 	stubHealthClient(t, http.StatusOK)
 	stubPortProbeFree(t)
+	stubInstanceGate(t, nil)
 
 	stdout, err := captureStdout(t, func() error { return runServiceCommand("install", nil) })
 	if err != nil {

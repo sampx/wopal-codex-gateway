@@ -39,13 +39,13 @@ func serviceInstall() error {
 	if err := launchd.RequireGatewayBinary(); err != nil {
 		return err
 	}
+	// InstallLaunchAgent already bootstraps, kickstarts and requires the
+	// launch-scoped instance to answer /_health, so success here means the
+	// daemon this install started is up.
 	if err := launchd.InstallLaunchAgent(gateway.Listen.Host, gateway.Listen.Port); err != nil {
 		return err
 	}
 	host, port := gateway.Listen.Host, gateway.Listen.Port
-	if err := launchd.WaitForHealth(host, port); err != nil {
-		return fmt.Errorf("proxy health check failed: %w; check %s and %s", err, config.ServiceLogPath(), config.ServiceErrorLogPath())
-	}
 	fmt.Println("LaunchAgent installed and proxy started.")
 	fmt.Printf("Proxy service is healthy: %s\n", launchd.HealthURL(host, port))
 	return nil

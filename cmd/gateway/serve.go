@@ -32,6 +32,7 @@ func runServe(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	rootFlag := flags.String("project-root", "", "project root containing runtime/ and logs/")
 	configFlag := flags.String("config", "", "gateway config path")
+	instanceFlag := flags.String("instance", "", "launch-scoped instance id echoed by /_health")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -98,7 +99,12 @@ func runServe(args []string) error {
 			sdkapi.WithMiddleware(proxy.RoutingMiddleware(logger, quotaGuard)),
 			sdkapi.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *sdkconfig.Config) {
 				engine.GET("/_health", func(c *gin.Context) {
-					c.JSON(200, gin.H{"ok": true, "mode": "single-process", "wopal_models": len(gateway.WopalAI.Models)})
+					c.JSON(200, gin.H{
+						"ok":           true,
+						"mode":         "single-process",
+						"wopal_models": len(gateway.WopalAI.Models),
+						"instance":     *instanceFlag,
+					})
 				})
 				engine.GET("/_status", func(c *gin.Context) {
 					c.JSON(200, gin.H{

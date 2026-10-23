@@ -30,6 +30,8 @@ const testLaunchAgentTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <string>serve</string>
     <string>--project-root</string>
     <string>{{PROJECT_ROOT}}</string>
+    <string>--instance</string>
+    <string>{{INSTANCE}}</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -144,6 +146,15 @@ func withHealthTiming(t *testing.T, timeout, retry time.Duration) {
 	})
 }
 
+// stubInstanceGate replaces the launch-scoped health gate so orchestration
+// tests can assert plist/bootstrap ordering without a real daemon.
+func stubInstanceGate(t *testing.T, err error) {
+	t.Helper()
+	original := WaitForInstanceHook
+	WaitForInstanceHook = func(string, int, string) error { return err }
+	t.Cleanup(func() { WaitForInstanceHook = original })
+}
+
 func stubPortProbe(t *testing.T, probeErr error) {
 	t.Helper()
 	original := PortProbe
@@ -229,6 +240,7 @@ func TestLaunchAgentInstallWritesPlistAndLoadsJob(t *testing.T) {
 		return nil
 	})
 	stubPortProbe(t, errors.New("connection refused"))
+	stubInstanceGate(t, nil)
 
 	if err := InstallLaunchAgent("127.0.0.1", 11435); err != nil {
 		t.Fatalf("installLaunchAgent: %v", err)
@@ -340,6 +352,7 @@ func TestLaunchAgentInstallBootstrapsWhenPortIsFree(t *testing.T) {
 	writeLaunchAgentTemplate(t, testLaunchAgentTemplate)
 	calls := stubLaunchctl(t, nil)
 	stubPortProbe(t, errors.New("connection refused"))
+	stubInstanceGate(t, nil)
 
 	if err := InstallLaunchAgent("127.0.0.1", 11435); err != nil {
 		t.Fatalf("installLaunchAgent: %v", err)
@@ -427,5 +440,57 @@ func TestWaitForHealthTimesOutWithLastError(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err, want)
 		}
+	}
+}
+
+func TestWaitForInstanceRejectsHealthyForeignInstance(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"instance":"someone-else"}`))
+	}))
+	defer server.Close()
+
+	withHealthTiming(t, 150*time.Millisecond, 10*time.Millisecond)
+	host, port := hostPortFromURL(t, server.URL)
+	err := WaitForInstance(host, port, "mine")
+	if err == nil {
+		t.Fatal("WaitForInstance accepted a healthy daemon from another instance")
+	}
+	for _, want := range []string{"someone-else", "mine"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+}
+
+func TestWaitForInstanceAcceptsMatchingInstance(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"instance":"mine"}`))
+	}))
+	defer server.Close()
+
+	withHealthTiming(t, 2*time.Second, 10*time.Millisecond)
+	host, port := hostPortFromURL(t, server.URL)
+	if err := WaitForInstance(host, port, "mine"); err != nil {
+		t.Fatalf("WaitForInstance: %v", err)
+	}
+}
+
+func TestWaitForInstanceRejectsLegacyHealthWithoutInstance(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"mode":"single-process"}`))
+	}))
+	defer server.Close()
+
+	withHealthTiming(t, 150*time.Millisecond, 10*time.Millisecond)
+	host, port := hostPortFromURL(t, server.URL)
+	err := WaitForInstance(host, port, "mine")
+	if err == nil {
+		t.Fatal("WaitForInstance accepted a health response without an instance id")
+	}
+	if !strings.Contains(err.Error(), "no instance id") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

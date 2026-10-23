@@ -2,6 +2,9 @@ package launchd
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +45,11 @@ var (
 // HealthClient performs every health probe. Tests replace it so no test needs a
 // live gateway.
 var HealthClient = &http.Client{Timeout: StatusHealthTimeout}
+
+// WaitForInstanceHook is the install-time health gate. It is a variable so
+// orchestration tests can isolate plist/bootstrap ordering; WaitForInstance
+// itself is covered directly against httptest.
+var WaitForInstanceHook = WaitForInstance
 
 // PortProbe reports whether something is listening on addr. It is a seam so
 // tests never dial the real gateway port.
@@ -136,13 +144,25 @@ func InstallLaunchAgent(host string, port int) error {
 	if err != nil {
 		return fmt.Errorf("read LaunchAgent template: %w", err)
 	}
+	// A launch-scoped nonce keeps the health check bound to the daemon this
+	// install starts: any 2xx from an unrelated process on the same port does
+	// not carry it.
+	instance, err := newInstanceID()
+	if err != nil {
+		return err
+	}
 	plist := RenderLaunchAgentPlist(string(template), LaunchAgentTemplateValues{
+		Instance:     instance,
 		Label:        config.LaunchAgentLabel,
 		ProgramPath:  config.GatewayBinaryPath(),
 		ProjectRoot:  root,
 		LogPath:      config.ServiceLogPath(),
 		ErrorLogPath: config.ServiceErrorLogPath(),
 	})
+
+	if !strings.Contains(plist, instance) {
+		return fmt.Errorf("rendered LaunchAgent plist is missing the instance id; check %s for {{INSTANCE}}", config.LaunchAgentTemplatePath())
+	}
 
 	path := config.LaunchAgentPath()
 	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
@@ -165,7 +185,21 @@ func InstallLaunchAgent(host string, port int) error {
 	if err := RunLaunchctl("kickstart", "-k", LaunchAgentTarget()); err != nil {
 		return fmt.Errorf("launchctl kickstart %s failed: %w", LaunchAgentTarget(), err)
 	}
+	// Wait for the daemon to load this exact instance, not just any healthy
+	// process that happens to answer on the port.
+	if err := WaitForInstanceHook(host, port, instance); err != nil {
+		return fmt.Errorf("%w; check %s and %s", err, config.ServiceLogPath(), config.ServiceErrorLogPath())
+	}
 	return nil
+}
+
+// newInstanceID returns a launch-scoped identifier for one `service install`.
+func newInstanceID() (string, error) {
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", fmt.Errorf("generate install instance id: %w", err)
+	}
+	return hex.EncodeToString(buffer), nil
 }
 
 // WaitPortAvailable polls until the configured address has no listener. A
@@ -216,6 +250,10 @@ func UninstallLaunchAgent() error {
 // LaunchAgentTemplateValues are the placeholder values substituted into the
 // plist template.
 type LaunchAgentTemplateValues struct {
+	// Instance identifies this launch. `service install` generates it, writes it
+	// into the plist and then requires /_health to echo it back, so a health
+	// 2xx can only come from the daemon this install started.
+	Instance     string
 	Label        string
 	ProgramPath  string
 	ProjectRoot  string
@@ -232,6 +270,7 @@ func RenderLaunchAgentPlist(template string, values LaunchAgentTemplateValues) s
 		"{{PROJECT_ROOT}}", xmlEscape(values.ProjectRoot),
 		"{{LOG_PATH}}", xmlEscape(values.LogPath),
 		"{{ERROR_LOG_PATH}}", xmlEscape(values.ErrorLogPath),
+		"{{INSTANCE}}", xmlEscape(values.Instance),
 	)
 	return replacer.Replace(template)
 }
@@ -253,6 +292,91 @@ func HealthURL(host string, port int) string {
 }
 
 // WaitForHealth blocks until /_health reports a 2xx status or 90s pass.
+// InstanceHealth is the /_health payload the installer can verify against.
+type InstanceHealth struct {
+	OK       bool   `json:"ok"`
+	Instance string `json:"instance,omitempty"`
+}
+
+// ProbeInstance reads /_health and reports the instance that answered. Any
+// non-2xx response is an error, so a startup-in-progress is retried.
+func ProbeInstance(url string, timeout time.Duration) (InstanceHealth, error) {
+	var health InstanceHealth
+	if timeout <= 0 {
+		timeout = time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return health, fmt.Errorf("build health request: %w", err)
+	}
+	response, err := HealthClient.Do(request)
+	if err != nil {
+		return health, err
+	}
+	defer response.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return health, fmt.Errorf("health returned HTTP %d", response.StatusCode)
+	}
+	if readErr != nil {
+		return health, fmt.Errorf("read health response: %w", readErr)
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		return health, fmt.Errorf("health response is not a JSON object: %w", err)
+	}
+	return health, nil
+}
+
+// WaitForInstance waits until /_health reports the expected instance id. A
+// different instance id means some other daemon holds the port, which is a
+// failure even though its health check succeeded.
+func WaitForInstance(host string, port int, instance string) error {
+	if instance == "" {
+		return WaitForHealth(host, port)
+	}
+	url := HealthURL(host, port)
+	deadline := time.Now().Add(HealthWaitTimeout)
+	var lastErr error
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		requestTimeout := healthRequestTimeout
+		if remaining < requestTimeout {
+			requestTimeout = remaining
+		}
+		health, err := ProbeInstance(url, requestTimeout)
+		switch {
+		case err != nil:
+			lastErr = err
+		case health.Instance == instance:
+			return nil
+		case health.Instance == "":
+			lastErr = fmt.Errorf("health response carries no instance id (expected %s); is an older gateway still serving %s?", instance, url)
+		default:
+			lastErr = fmt.Errorf("health is answered by instance %s, expected %s", health.Instance, instance)
+		}
+
+		pause := HealthRetryDelay
+		if left := time.Until(deadline); left < pause {
+			pause = left
+		}
+		if pause > 0 {
+			time.Sleep(pause)
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("no health request completed")
+	}
+	return fmt.Errorf("gateway instance %s did not become healthy at %s within %dms: %v", instance, url, HealthWaitTimeout.Milliseconds(), lastErr)
+}
+
 func WaitForHealth(host string, port int) error {
 	url := HealthURL(host, port)
 	deadline := time.Now().Add(HealthWaitTimeout)
