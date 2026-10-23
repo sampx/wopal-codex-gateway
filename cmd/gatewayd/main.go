@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -34,9 +35,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := redirectServiceLogs(root); err != nil {
+	closeServiceLogs, err := redirectServiceLogs(root)
+	if err != nil {
 		return err
 	}
+	defer closeServiceLogs()
 	log.SetOutput(os.Stdout)
 	log.AddHook(errorOnlyHook{})
 	configPath := *configFlag
@@ -97,6 +100,7 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	startRequestBodyLogJanitor(ctx, filepath.Join(root, "runtime", "cliproxy-auth"), logger)
 	logger.write(map[string]any{"event": "gateway_started", "architecture": "embedded-cliproxy", "port": gateway.Listen.Port})
 	if err := service.Run(ctx); err != nil && ctx.Err() == nil {
 		logger.write(map[string]any{"event": "gateway_failed", "error": err.Error()})
@@ -106,33 +110,77 @@ func run() error {
 	return nil
 }
 
-func redirectServiceLogs(root string) error {
+// redirectServiceLogs sends the embedded service's stdout and stderr to
+// size-rotated files. The process keeps writing to an inherited descriptor, so
+// each stream is captured through a pipe and copied into a rotating writer;
+// handing the file descriptor straight to Dup2 would bypass rotation and keep
+// appending to the renamed file forever.
+func redirectServiceLogs(root string) (func(), error) {
 	logsDir := filepath.Join(root, "logs")
 	if err := os.MkdirAll(logsDir, 0o700); err != nil {
-		return fmt.Errorf("create logs directory: %w", err)
+		return nil, fmt.Errorf("create logs directory: %w", err)
 	}
-	stdout, err := os.OpenFile(filepath.Join(logsDir, "service.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+
+	var cleanups []func()
+	closeAll := func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
+	}
+
+	stdout, err := captureStream(filepath.Join(logsDir, "service.log"), os.Stdout, nil)
 	if err != nil {
-		return fmt.Errorf("open service log: %w", err)
+		closeAll()
+		return nil, fmt.Errorf("redirect stdout: %w", err)
 	}
-	stderr, err := os.OpenFile(filepath.Join(logsDir, "service-error.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	cleanups = append(cleanups, stdout)
+
+	stderr, err := captureStream(filepath.Join(logsDir, "service-error.log"), os.Stderr, newAbortHandlerFilterWriter)
 	if err != nil {
-		_ = stdout.Close()
-		return fmt.Errorf("open service error log: %w", err)
+		closeAll()
+		return nil, fmt.Errorf("redirect stderr: %w", err)
 	}
-	if err := syscall.Dup2(int(stdout.Fd()), int(os.Stdout.Fd())); err != nil {
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return fmt.Errorf("redirect stdout: %w", err)
+	cleanups = append(cleanups, stderr)
+
+	return closeAll, nil
+}
+
+// captureStream points target at a pipe and copies the pipe into a rotating
+// writer in the background. The returned func stops the copy and closes both
+// ends so the final bytes are flushed.
+func captureStream(path string, target *os.File, wrap func(io.Writer) io.Writer) (func(), error) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, err
 	}
-	if err := syscall.Dup2(int(stderr.Fd()), int(os.Stderr.Fd())); err != nil {
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return fmt.Errorf("redirect stderr: %w", err)
+	if err := syscall.Dup2(int(writer.Fd()), int(target.Fd())); err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return nil, err
 	}
-	_ = stdout.Close()
-	_ = stderr.Close()
-	return nil
+	_ = writer.Close()
+
+	out := newRotatingWriter(path)
+	var sink io.Writer = out
+	var filtered *abortHandlerFilterWriter
+	if wrap != nil {
+		sink = wrap(out)
+		filtered, _ = sink.(*abortHandlerFilterWriter)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(sink, reader)
+	}()
+
+	return func() {
+		_ = reader.Close()
+		<-done
+		if filtered != nil {
+			filtered.flush()
+		}
+		_ = out.Close()
+	}, nil
 }
 
 type errorOnlyHook struct{}
