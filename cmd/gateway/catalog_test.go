@@ -456,3 +456,56 @@ func catalogTestStubCommand(t *testing.T, output catalogCommandOutput, resolveEr
 	}
 	catalogExecuteCodex = func(string) catalogCommandOutput { return output }
 }
+
+// TestRefreshCatalogKeepsPreviousCatalogWhenCodexFails protects AC#5: a failed
+// refresh must report the cause and leave the last usable catalog in place.
+func TestRefreshCatalogKeepsPreviousCatalogWhenCodexFails(t *testing.T) {
+	oldResolve := catalogResolveCodex
+	oldExecute := catalogExecuteCodex
+	t.Cleanup(func() {
+		catalogResolveCodex = oldResolve
+		catalogExecuteCodex = oldExecute
+	})
+
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	path := codexGatewayCatalogPath()
+	previous := []byte("{\"models\":[{\"slug\":\"wopal-ai/previous\"}]}\n")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://example.test/v1"
+
+	for name, setup := range map[string]func(){
+		"missing command": func() {
+			catalogResolveCodex = func() (string, error) {
+				return "", errors.New("codex command not found")
+			}
+		},
+		"invalid output": func() {
+			catalogResolveCodex = func() (string, error) { return "/usr/bin/codex", nil }
+			catalogExecuteCodex = func(string) catalogCommandOutput {
+				return catalogCommandOutput{stdout: []byte("not json")}
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setup()
+			if _, err := refreshCatalog(cfg); err == nil {
+				t.Fatal("refresh succeeded although Codex failed")
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(previous) {
+				t.Fatalf("previous catalog was overwritten: %s", got)
+			}
+		})
+	}
+}
