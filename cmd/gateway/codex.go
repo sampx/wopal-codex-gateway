@@ -26,6 +26,9 @@ func installIntoCodex(cfg *GatewayConfig) (*CatalogRefreshResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := requireGatewayBinary(); err != nil {
+		return nil, err
+	}
 	if err := installLaunchAgent(); err != nil {
 		return nil, err
 	}

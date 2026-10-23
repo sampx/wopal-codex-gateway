@@ -28,6 +28,13 @@ func runServiceCommand(subcommand string, args []string) error {
 }
 
 func serviceInstall() error {
+	// Fail before touching launchd when the install cannot possibly run.
+	if _, err := loadInstallConfig(); err != nil {
+		return err
+	}
+	if err := requireGatewayBinary(); err != nil {
+		return err
+	}
 	if err := installLaunchAgent(); err != nil {
 		return err
 	}

@@ -13,6 +13,14 @@ const (
 	defaultListenPort     = 11435
 	defaultContextWindow  = 262144
 	defaultWopalModelName = "qwen3-coder"
+
+	// gatewayConfigVersion is the only schema version this binary understands.
+	// A file with a missing or different version is rejected before any side
+	// effect, so an old or future schema never half-starts a service.
+	gatewayConfigVersion = 1
+
+	defaultLogMaxSizeMB  = 10
+	defaultLogMaxBackups = 5
 )
 
 // ExternalModelConfig is one Wopal AI model entry in runtime/config.json. The
@@ -79,7 +87,8 @@ func defaultGatewayConfig() *GatewayConfig {
 	contextWindow := defaultContextWindow
 	reasoning := true
 	return &GatewayConfig{
-		Listen: listenConfig{Host: defaultListenHost, Port: defaultListenPort},
+		Version: gatewayConfigVersion,
+		Listen:  listenConfig{Host: defaultListenHost, Port: defaultListenPort},
 		WopalAI: wopalAIConfig{
 			Models: []ExternalModelConfig{{
 				Name:          defaultWopalModelName,
@@ -88,6 +97,7 @@ func defaultGatewayConfig() *GatewayConfig {
 			}},
 			ExcludedModels: []string{},
 		},
+		Logs: logsConfig{MaxSizeMB: defaultLogMaxSizeMB, MaxBackups: defaultLogMaxBackups},
 	}
 }
 
@@ -107,6 +117,9 @@ func loadGatewayConfig(path string) (*GatewayConfig, error) {
 	if err := json.Unmarshal(data, &saved); err != nil {
 		return nil, fmt.Errorf("parse gateway config %s: %w", path, err)
 	}
+	if saved.Version != gatewayConfigVersion {
+		return nil, fmt.Errorf("%s: unsupported gateway config version %d (expected %d)", path, saved.Version, gatewayConfigVersion)
+	}
 	return mergeGatewayConfig(&saved), nil
 }
 
@@ -122,12 +135,19 @@ func mergeGatewayConfig(saved *GatewayConfig) *GatewayConfig {
 	if merged.Listen.Port == 0 {
 		merged.Listen.Port = defaults.Listen.Port
 	}
+	merged.Version = gatewayConfigVersion
 	merged.WopalAI.BaseURL = strings.TrimSpace(merged.WopalAI.BaseURL)
 	if merged.WopalAI.Models == nil {
 		merged.WopalAI.Models = defaults.WopalAI.Models
 	}
 	if merged.WopalAI.ExcludedModels == nil {
 		merged.WopalAI.ExcludedModels = []string{}
+	}
+	if merged.Logs.MaxSizeMB <= 0 {
+		merged.Logs.MaxSizeMB = defaultLogMaxSizeMB
+	}
+	if merged.Logs.MaxBackups <= 0 {
+		merged.Logs.MaxBackups = defaultLogMaxBackups
 	}
 	return &merged
 }
@@ -144,8 +164,24 @@ func validateServeConfig(cfg *GatewayConfig) error {
 	return nil
 }
 
+// loadInstallConfig validates the configuration an install depends on before
+// any filesystem or launchd side effect.
+func loadInstallConfig() (*GatewayConfig, error) {
+	cfg, err := loadGatewayConfig(configPath())
+	if err != nil {
+		return nil, err
+	}
+	if err := validateServeConfig(cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", configPath(), err)
+	}
+	return cfg, nil
+}
+
 // saveGatewayConfig writes the configuration atomically with 0600 permissions.
 func saveGatewayConfig(cfg *GatewayConfig) error {
+	// Every write stamps the current schema version, so a file this binary
+	// produced can never be rejected by the next run.
+	cfg.Version = gatewayConfigVersion
 	path := configPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create runtime directory: %w", err)

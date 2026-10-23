@@ -75,6 +75,24 @@ func launchAgentTarget() string {
 	return launchdDomain() + "/" + launchAgentLabel
 }
 
+// requireGatewayBinary makes an install refuse to register a job that launchd
+// could never start. Without it `service install` would report a launchd
+// success while the daemon is missing.
+func requireGatewayBinary() error {
+	path := gatewayBinaryPath()
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("gateway binary is missing at %s; build it with: go build -o %s ./cmd/gateway", path, path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("gateway binary path %s is a directory", path)
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("gateway binary at %s is not executable", path)
+	}
+	return nil
+}
+
 // installLaunchAgent renders the plist, bootstraps it and kickstarts the job.
 func installLaunchAgent() error {
 	root, err := projectRootDir()

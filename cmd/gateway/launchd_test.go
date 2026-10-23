@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -51,6 +52,33 @@ func useTempGatewayRoot(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+// prepareServiceInstall writes the two preconditions `service install` now
+// checks before it touches launchd: a valid versioned config and a runnable
+// binary at the path the plist will reference.
+func prepareServiceInstall(t *testing.T) {
+	t.Helper()
+	root := mustProjectRoot()
+	if root == "" {
+		t.Fatal("test did not set up a project root")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "runtime", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://example.test/v1"
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "runtime", "config.json"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gatewayBinaryPath(), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeLaunchAgentTemplate(t *testing.T, body string) {
@@ -362,6 +390,7 @@ func TestWaitForHealthTimesOutWithLastError(t *testing.T) {
 
 func TestServiceCommandInstallWaitsForHealth(t *testing.T) {
 	useTempGatewayRoot(t)
+	prepareServiceInstall(t)
 	writeLaunchAgentTemplate(t, testLaunchAgentTemplate)
 	stubLaunchctl(t, nil)
 	stubHealthClient(t, http.StatusOK)
@@ -382,6 +411,7 @@ func TestServiceCommandInstallWaitsForHealth(t *testing.T) {
 
 func TestServiceCommandInstallReportsHealthFailure(t *testing.T) {
 	useTempGatewayRoot(t)
+	prepareServiceInstall(t)
 	writeLaunchAgentTemplate(t, testLaunchAgentTemplate)
 	stubLaunchctl(t, nil)
 	stubHealthError(t, errors.New("connection refused"))
