@@ -46,6 +46,16 @@ var (
 // live gateway.
 var HealthClient = &http.Client{Timeout: StatusHealthTimeout}
 
+// InstallLaunchAgentHook, WaitForHealthHook and RequireGatewayBinaryHook are
+// seams so a caller can prove the install/restore flow without touching the
+// real LaunchAgent.
+var (
+	InstallLaunchAgentHook   = InstallLaunchAgent
+	WaitForHealthHook        = WaitForHealth
+	RequireGatewayBinaryHook = RequireGatewayBinary
+	UninstallLaunchAgentHook = UninstallLaunchAgent
+)
+
 // WaitForInstanceHook is the install-time health gate. It is a variable so
 // orchestration tests can isolate plist/bootstrap ordering; WaitForInstance
 // itself is covered directly against httptest.

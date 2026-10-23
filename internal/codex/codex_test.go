@@ -3,7 +3,13 @@ package codex
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"wopal-codex-gateway/internal/catalog"
+	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/keychain"
+	"wopal-codex-gateway/internal/launchd"
 )
 
 func TestCodexFileAtomicWriteUsesPrivatePermissions(t *testing.T) {
@@ -42,5 +48,154 @@ func TestCodexFileAtomicWriteUsesPrivatePermissions(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary files left behind: %v", matches)
+	}
+}
+
+// installForTest runs the real install/restore code paths with launchd and the
+// catalog baseline replaced by seams, so the config.toml takeover can be proven
+// without touching the user's LaunchAgent.
+func installForTest(t *testing.T, cfg *config.GatewayConfig) error {
+	t.Helper()
+
+	previousInstall := launchd.InstallLaunchAgentHook
+	previousHealth := launchd.WaitForHealthHook
+	previousBinary := launchd.RequireGatewayBinaryHook
+	previousRefresh := catalog.RefreshCatalogHook
+	previousHasKey := keychain.HasAPIKeyHook
+	previousResolve := catalog.ResolveCodexHook
+	previousExecute := catalog.ExecuteCodexHook
+	t.Cleanup(func() {
+		launchd.InstallLaunchAgentHook = previousInstall
+		launchd.WaitForHealthHook = previousHealth
+		launchd.RequireGatewayBinaryHook = previousBinary
+		catalog.RefreshCatalogHook = previousRefresh
+		keychain.HasAPIKeyHook = previousHasKey
+		catalog.ResolveCodexHook = previousResolve
+		catalog.ExecuteCodexHook = previousExecute
+	})
+
+	launchd.InstallLaunchAgentHook = func(string, int) error { return nil }
+	launchd.WaitForHealthHook = func(string, int) error { return nil }
+	launchd.RequireGatewayBinaryHook = func() error { return nil }
+	keychain.HasAPIKeyHook = func() bool { return true }
+	catalog.ResolveCodexHook = func() (string, error) { return "/usr/bin/codex", nil }
+	catalog.ExecuteCodexHook = func(string) catalog.CatalogCommandOutput {
+		return catalog.CatalogCommandOutput{}
+	}
+	catalog.RefreshCatalogHook = func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error) {
+		return &catalog.CatalogRefreshResult{Native: 2, NativeVisible: 1, NativeHidden: 1}, nil
+	}
+
+	_, err := InstallIntoCodex(cfg)
+	return err
+}
+
+func restoreForTest(t *testing.T) error {
+	t.Helper()
+	previousUninstall := launchd.UninstallLaunchAgentHook
+	t.Cleanup(func() { launchd.UninstallLaunchAgentHook = previousUninstall })
+	launchd.UninstallLaunchAgentHook = func() error { return nil }
+	return RestoreCodex()
+}
+
+func TestInstallLeavesModelAloneAndRestoreKeepsOfficialChoice(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	restoreRoot := config.SetProjectRootForTest(root)
+	t.Cleanup(restoreRoot)
+	if err := os.MkdirAll(config.StateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(config.CodexConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	original := "model = \"gpt-6.1-sol\"\n\n[other]\nkeep = true\n"
+	writeConfig := func(body string) {
+		if err := os.WriteFile(config.CodexConfigPath(), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readConfig := func() string {
+		data, err := os.ReadFile(config.CodexConfigPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	writeConfig(original)
+
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://example.test/v1"
+	if err := installForTest(t, cfg); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	afterInstall := readConfig()
+	if !strings.Contains(afterInstall, `model = "gpt-6.1-sol"`) {
+		t.Fatalf("install rewrote the current model:\n%s", afterInstall)
+	}
+	if !strings.Contains(afterInstall, "model_catalog_json") || !strings.Contains(afterInstall, "openai_base_url") {
+		t.Fatalf("install did not take over the managed keys:\n%s", afterInstall)
+	}
+	if !strings.Contains(afterInstall, "[other]") || !strings.Contains(afterInstall, "keep = true") {
+		t.Fatalf("install dropped an unrelated section:\n%s", afterInstall)
+	}
+
+	// The user later picks an official model; restore must keep that choice.
+	writeConfig(strings.Replace(afterInstall, `model = "gpt-6.1-sol"`, `model = "gpt-6.1-luna"`, 1))
+	if err := restoreForTest(t); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	afterRestore := readConfig()
+	if !strings.Contains(afterRestore, `model = "gpt-6.1-luna"`) {
+		t.Fatalf("restore overwrote the user's official model:\n%s", afterRestore)
+	}
+	if strings.Contains(afterRestore, "wopal-codex-gateway-models.json") || strings.Contains(afterRestore, "openai_base_url") {
+		t.Fatalf("restore left a gateway reference behind:\n%s", afterRestore)
+	}
+}
+
+func TestRestoreReturnsToPreInstallModelWhenStillOnWopal(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	restoreRoot := config.SetProjectRootForTest(root)
+	t.Cleanup(restoreRoot)
+	if err := os.MkdirAll(config.StateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(config.CodexConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	original := "model = \"gpt-6.1-sol\"\n"
+	if err := os.WriteFile(config.CodexConfigPath(), []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://example.test/v1"
+	if err := installForTest(t, cfg); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	installed, err := os.ReadFile(config.CodexConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.CodexConfigPath(), []byte(strings.Replace(string(installed), `model = "gpt-6.1-sol"`, `model = "wopal-ai/glm-5.3-flash"`, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := restoreForTest(t); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	restored, err := os.ReadFile(config.CodexConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(restored), `model = "gpt-6.1-sol"`) {
+		t.Fatalf("restore did not return to the pre-install model:\n%s", restored)
 	}
 }

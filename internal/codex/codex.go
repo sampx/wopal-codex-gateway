@@ -23,21 +23,21 @@ func InstallIntoCodex(cfg *config.GatewayConfig) (*catalog.CatalogRefreshResult,
 	if strings.TrimSpace(cfg.WopalAI.BaseURL) == "" {
 		return nil, fmt.Errorf("Wopal AI base URL is not configured. Run: wopal-codex-gateway config wopal --base-url <url>")
 	}
-	if !keychain.HasWopalAPIKey() {
+	if !keychain.HasAPIKeyHook() {
 		return nil, fmt.Errorf("Wopal AI API key is not configured. Run: wopal-codex-gateway auth set")
 	}
 
-	refresh, err := catalog.RefreshCatalog(cfg)
+	refresh, err := catalog.RefreshCatalogHook(cfg)
 	if err != nil {
 		return nil, err
 	}
-	if err := launchd.RequireGatewayBinary(); err != nil {
+	if err := launchd.RequireGatewayBinaryHook(); err != nil {
 		return nil, err
 	}
-	if err := launchd.InstallLaunchAgent(cfg.Listen.Host, cfg.Listen.Port); err != nil {
+	if err := launchd.InstallLaunchAgentHook(cfg.Listen.Host, cfg.Listen.Port); err != nil {
 		return nil, err
 	}
-	if err := launchd.WaitForHealth(cfg.Listen.Host, cfg.Listen.Port); err != nil {
+	if err := launchd.WaitForHealthHook(cfg.Listen.Host, cfg.Listen.Port); err != nil {
 		return nil, err
 	}
 
@@ -103,7 +103,7 @@ func RestoreCodex() error {
 	if err := writeCodexFileAtomic(configFile, restoreGatewayConfig(currentText, state)); err != nil {
 		return err
 	}
-	if err := launchd.UninstallLaunchAgent(); err != nil {
+	if err := launchd.UninstallLaunchAgentHook(); err != nil {
 		return err
 	}
 	if err := removeCodexFileIfExists(config.RestoreStatePath()); err != nil {

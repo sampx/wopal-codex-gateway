@@ -43,6 +43,21 @@ func ResolveProjectRoot(explicit string) (string, error) {
 // lazily on first use so `help` never touches the filesystem.
 var resolvedRoot string
 
+// SetProjectRoot pins the project root for this process. `serve` gets it from
+// the LaunchAgent, and the control-plane commands accept the same flag so they
+// always act on the runtime the operator named instead of guessing from cwd.
+func SetProjectRoot(root string) error {
+	if root == "" {
+		return fmt.Errorf("project root is required")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve project root: %w", err)
+	}
+	resolvedRoot = abs
+	return nil
+}
+
 // SetProjectRootForTest replaces the cached project root and returns a restore
 // function, so tests can isolate every path helper in a temp directory.
 func SetProjectRootForTest(root string) func() {

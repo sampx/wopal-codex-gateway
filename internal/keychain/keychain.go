@@ -41,6 +41,10 @@ func GetWopalAPIKey() (string, error) {
 	return key, nil
 }
 
+// HasAPIKeyHook is a seam so install flows can be proven without a real
+// Keychain entry. Production always uses HasWopalAPIKey.
+var HasAPIKeyHook = HasWopalAPIKey
+
 // HasWopalAPIKey reports whether a usable key is stored.
 func HasWopalAPIKey() bool {
 	_, err := GetWopalAPIKey()

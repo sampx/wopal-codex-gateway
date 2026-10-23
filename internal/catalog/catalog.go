@@ -21,16 +21,28 @@ type CatalogRefreshResult struct {
 	WopalAI       int
 }
 
-type catalogCommandOutput struct {
+// CatalogCommandOutput is the captured result of `codex debug models`.
+type CatalogCommandOutput struct {
 	stdout   []byte
 	stderr   []byte
 	exitCode int
 	err      error
 }
 
+// catalogCommandOutput keeps the internal call sites terse.
+type catalogCommandOutput = CatalogCommandOutput
+
 var (
 	catalogResolveCodex = resolveCodexCommand
 	catalogExecuteCodex = runCodexDebugModels
+)
+
+// ResolveCodexHook, ExecuteCodexHook and RefreshCatalogHook are seams so the
+// install flow can run end to end without the real codex binary.
+var (
+	ResolveCodexHook   = func() (string, error) { return catalogResolveCodex() }
+	ExecuteCodexHook   = func(command string) CatalogCommandOutput { return catalogExecuteCodex(command) }
+	RefreshCatalogHook = RefreshCatalog
 )
 
 var catalogReasoningLevels = []any{

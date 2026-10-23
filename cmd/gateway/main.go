@@ -26,6 +26,17 @@ func run(args []string) error {
 	}
 
 	command, rest := args[0], args[1:]
+
+	// Every command group accepts --project-root so a CLI invocation always
+	// operates on the runtime the operator named, not on whatever the binary
+	// happens to sit next to. `serve` parses it through its own FlagSet.
+	if command != "serve" {
+		var err error
+		if rest, err = applyProjectRootFlag(rest); err != nil {
+			return err
+		}
+	}
+
 	switch command {
 	case "help", "--help", "-h":
 		printHelp()
@@ -65,6 +76,27 @@ func runCommandGroup(group string, args []string) error {
 	return fmt.Errorf("unknown command group: %s", group)
 }
 
+// applyProjectRootFlag consumes --project-root <dir> from a command group and
+// pins it for the rest of the process. The flag is removed from the argument
+// list so subcommands keep their existing parsers.
+func applyProjectRootFlag(args []string) ([]string, error) {
+	remaining := make([]string, 0, len(args))
+	for index := 0; index < len(args); index++ {
+		if args[index] != "--project-root" {
+			remaining = append(remaining, args[index])
+			continue
+		}
+		if index+1 >= len(args) {
+			return nil, fmt.Errorf("--project-root requires a directory")
+		}
+		if err := config.SetProjectRoot(args[index+1]); err != nil {
+			return nil, err
+		}
+		index++
+	}
+	return remaining, nil
+}
+
 func printHelp() {
 	fmt.Print(helpText)
 }
@@ -72,7 +104,7 @@ func printHelp() {
 const helpText = `wopal-codex-gateway
 
 Commands:
-  serve                                                                       Run the gateway daemon
+  serve --project-root <dir>                                                  Run the gateway daemon
   config show                                                                 Print the gateway configuration
   config wopal --base-url <url> [--model <name>...] [--context-window 262144] [--vision] [--no-reasoning]
   auth set                                                                    Store and validate the Wopal AI API key
