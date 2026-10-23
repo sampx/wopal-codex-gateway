@@ -59,6 +59,7 @@ Wopal Codex Gateway 是 macOS 上的本地模型路由网关。它让 Codex Desk
 | `internal/catalog` | bundled catalog 读取与 Wopal 模型合并 | `internal/catalog/` |
 | `internal/keychain` | macOS Keychain 读写 | `internal/keychain/` |
 | `internal/launchd` | plist 渲染、launchctl、健康等待 | `internal/launchd/` |
+| `internal/routing` | 模型命名空间分类与无状态请求工具；只依赖标准库 | `internal/routing/` |
 | `internal/proxy` | 路由 middleware、官方直通、Wopal HTTP/WS | `internal/proxy/` |
 | `internal/quota` | 额度窗口、阈值、failover 状态机 | `internal/quota/` |
 | `internal/compaction` | `wgcp1`、native restore、官方边界展开 | `internal/compaction/` |
@@ -224,6 +225,5 @@ wopal-codex-gateway quota reset-learning
 
 | Document | Purpose |
 | --- | --- |
-| `./GAPS.md` | 当前实现与本文目标态的差距；差距全部关闭后删除 |
 | `../README.zh-CN.md` | 中文使用说明 |
 | `../README.md` | English user guide |
