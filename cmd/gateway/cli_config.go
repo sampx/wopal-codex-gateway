@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"wopal-codex-gateway/internal/config"
 )
 
 func runConfigCommand(subcommand string, args []string) error {
@@ -19,7 +21,7 @@ func runConfigCommand(subcommand string, args []string) error {
 }
 
 func runConfigShow() error {
-	cfg, err := loadGatewayConfig(configPath())
+	cfg, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
 		return err
 	}
@@ -32,7 +34,7 @@ func runConfigShow() error {
 }
 
 func runConfigWopal(args []string) error {
-	cfg, err := loadGatewayConfig(configPath())
+	cfg, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
 		return err
 	}
@@ -56,14 +58,14 @@ func runConfigWopal(args []string) error {
 			return err
 		}
 		if contextWindow == 0 {
-			contextWindow = defaultContextWindow
+			contextWindow = config.DefaultContextWindow
 		}
 		vision := hasFlag(args, "--vision")
 		reasoning := !hasFlag(args, "--no-reasoning")
 
-		cfg.WopalAI.Models = make([]ExternalModelConfig, 0, len(names))
+		cfg.WopalAI.Models = make([]config.ExternalModelConfig, 0, len(names))
 		for _, name := range names {
-			cfg.WopalAI.Models = append(cfg.WopalAI.Models, ExternalModelConfig{
+			cfg.WopalAI.Models = append(cfg.WopalAI.Models, config.ExternalModelConfig{
 				Name:          name,
 				ContextWindow: &contextWindow,
 				Vision:        &vision,
@@ -84,7 +86,7 @@ func runConfigWopal(args []string) error {
 		cfg.WopalAI.ExcludedModels = excluded
 	}
 
-	if err := saveGatewayConfig(cfg); err != nil {
+	if err := config.SaveGatewayConfig(cfg); err != nil {
 		return err
 	}
 

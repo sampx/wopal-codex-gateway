@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/config"
 )
 
 type recordedNotification struct {
@@ -17,7 +20,7 @@ type recordedNotification struct {
 func newRecordingNotifier(t *testing.T, enabled bool) (*quotaNotifier, chan recordedNotification) {
 	t.Helper()
 	dispatched := make(chan recordedNotification, 8)
-	notifier := newQuotaNotifier(nil, notificationsConfig{Enabled: boolPtr(enabled)})
+	notifier := newQuotaNotifier(nil, config.NotificationsConfig{Enabled: boolPtr(enabled)})
 	notifier.tool = "/usr/bin/true"
 	notifier.run = func(_ context.Context, name string, args ...string) error {
 		dispatched <- recordedNotification{name: name, args: append([]string(nil), args...)}
@@ -192,11 +195,11 @@ func TestQuotaNotifierDescribesTheTransition(t *testing.T) {
 
 func TestQuotaNotifierReportsMissingTool(t *testing.T) {
 	root := t.TempDir()
-	logger, err := newActivityLogger(root)
+	logger, err := activity.New(filepath.Join(root, "logs"), config.Logs{})
 	if err != nil {
 		t.Fatalf("logger: %v", err)
 	}
-	notifier := newQuotaNotifier(logger, notificationsConfig{Enabled: boolPtr(true), Tool: ""})
+	notifier := newQuotaNotifier(logger, config.NotificationsConfig{Enabled: boolPtr(true), Tool: ""})
 	notifier.tool = ""
 	notifier.run = func(context.Context, string, ...string) error {
 		t.Fatal("missing tool must not be executed")

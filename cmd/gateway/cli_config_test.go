@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"wopal-codex-gateway/internal/config"
 )
 
 func setupConfigAuthTestRoot(t *testing.T) string {
 	t.Helper()
-	original := resolvedRoot
 	root := t.TempDir()
-	resolvedRoot = root
-	t.Cleanup(func() { resolvedRoot = original })
+	t.Cleanup(config.SetProjectRootForTest(root))
 	if err := os.MkdirAll(filepath.Join(root, "runtime"), 0o700); err != nil {
 		t.Fatalf("create runtime directory: %v", err)
 	}
@@ -47,20 +47,20 @@ func captureConfigAuthTestStdout(t *testing.T, fn func() error) (string, error) 
 
 func TestConfigCommandShowPrintsLoadedJSON(t *testing.T) {
 	setupConfigAuthTestRoot(t)
-	cfg, err := loadGatewayConfig(configPath())
+	cfg, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
-		t.Fatalf("loadGatewayConfig() error = %v", err)
+		t.Fatalf("config.LoadGatewayConfig() error = %v", err)
 	}
 	cfg.WopalAI.BaseURL = "https://api.example.com/v1"
-	if err := saveGatewayConfig(cfg); err != nil {
-		t.Fatalf("saveGatewayConfig() error = %v", err)
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatalf("config.SaveGatewayConfig() error = %v", err)
 	}
 
 	output, err := captureConfigAuthTestStdout(t, func() error { return runConfigCommand("show", nil) })
 	if err != nil {
 		t.Fatalf("runConfigCommand(show) error = %v", err)
 	}
-	var printed GatewayConfig
+	var printed config.GatewayConfig
 	if err := json.Unmarshal([]byte(output), &printed); err != nil {
 		t.Fatalf("config show output is not JSON: %v\n%s", err, output)
 	}
@@ -71,13 +71,13 @@ func TestConfigCommandShowPrintsLoadedJSON(t *testing.T) {
 
 func TestConfigCommandWopalSavesModelsAndClearsExclusions(t *testing.T) {
 	setupConfigAuthTestRoot(t)
-	cfg, err := loadGatewayConfig(configPath())
+	cfg, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
-		t.Fatalf("loadGatewayConfig() error = %v", err)
+		t.Fatalf("config.LoadGatewayConfig() error = %v", err)
 	}
 	cfg.WopalAI.ExcludedModels = []string{"a", "keep"}
-	if err := saveGatewayConfig(cfg); err != nil {
-		t.Fatalf("saveGatewayConfig() error = %v", err)
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatalf("config.SaveGatewayConfig() error = %v", err)
 	}
 
 	output, err := captureConfigAuthTestStdout(t, func() error {
@@ -97,9 +97,9 @@ func TestConfigCommandWopalSavesModelsAndClearsExclusions(t *testing.T) {
 		t.Fatalf("output = %q, want %q", output, wantOutput)
 	}
 
-	saved, err := loadGatewayConfig(configPath())
+	saved, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
-		t.Fatalf("loadGatewayConfig() error = %v", err)
+		t.Fatalf("config.LoadGatewayConfig() error = %v", err)
 	}
 	if saved.WopalAI.BaseURL != "https://api.example.com" {
 		t.Fatalf("base URL = %q", saved.WopalAI.BaseURL)
@@ -169,12 +169,12 @@ func TestConfigCommandWopalUsesDefaultMetadataAndReasoningFlag(t *testing.T) {
 	if !strings.Contains(output, "(base URL not set)") {
 		t.Fatalf("output = %q", output)
 	}
-	saved, err := loadGatewayConfig(configPath())
+	saved, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
-		t.Fatalf("loadGatewayConfig() error = %v", err)
+		t.Fatalf("config.LoadGatewayConfig() error = %v", err)
 	}
 	model := saved.WopalAI.Models[0]
-	if model.ContextWindow == nil || *model.ContextWindow != defaultContextWindow {
+	if model.ContextWindow == nil || *model.ContextWindow != config.DefaultContextWindow {
 		t.Fatalf("ContextWindow = %v", model.ContextWindow)
 	}
 	if model.Vision == nil || *model.Vision {

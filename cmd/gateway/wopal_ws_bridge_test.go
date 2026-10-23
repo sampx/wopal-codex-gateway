@@ -13,11 +13,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/config"
 )
 
 func TestWopalWebsocketBridgeKeepsSocketOpenAfterUpstreamError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	logger, err := newActivityLogger(t.TempDir())
+	logger, err := activity.New(t.TempDir(), config.Logs{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +104,7 @@ func TestWopalWebsocketBridgeKeepsSocketOpenAfterUpstreamError(t *testing.T) {
 
 func TestWopalWebsocketBridgeExpandsIncrementalHistory(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	logger, err := newActivityLogger(t.TempDir())
+	logger, err := activity.New(t.TempDir(), config.Logs{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +196,7 @@ func TestWopalWebsocketBridgeExpandsIncrementalHistory(t *testing.T) {
 
 func TestWopalWebsocketBridgeCarriesPrewarmInputIntoNextTurn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	logger, err := newActivityLogger(t.TempDir())
+	logger, err := activity.New(t.TempDir(), config.Logs{})
 	if err != nil {
 		t.Fatal(err)
 	}

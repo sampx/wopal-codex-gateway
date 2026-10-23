@@ -1,4 +1,4 @@
-package main
+package catalog
 
 import (
 	"net/http"
@@ -26,13 +26,13 @@ func TestWopalAPIFetchModelsSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	got, err := fetchWopalModels(server.URL+"/v1///", "test-key")
+	got, err := FetchWopalModels(server.URL+"/v1///", "test-key")
 	if err != nil {
-		t.Fatalf("fetchWopalModels() error = %v", err)
+		t.Fatalf("FetchWopalModels() error = %v", err)
 	}
 	want := []string{"alpha", "beta", "alpha"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("fetchWopalModels() = %#v, want %#v", got, want)
+		t.Fatalf("FetchWopalModels() = %#v, want %#v", got, want)
 	}
 }
 
@@ -43,9 +43,9 @@ func TestWopalAPIFetchModelsHTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := fetchWopalModels(server.URL, "test-key")
+	_, err := FetchWopalModels(server.URL, "test-key")
 	if err == nil || err.Error() != "Wopal AI validation failed: HTTP 401: invalid key" {
-		t.Fatalf("fetchWopalModels() error = %v", err)
+		t.Fatalf("FetchWopalModels() error = %v", err)
 	}
 }
 
@@ -55,9 +55,9 @@ func TestWopalAPIFetchModelsNonJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := fetchWopalModels(server.URL, "test-key")
+	_, err := FetchWopalModels(server.URL, "test-key")
 	if err == nil || err.Error() != "Wopal AI validation failed: /models did not return JSON" {
-		t.Fatalf("fetchWopalModels() error = %v", err)
+		t.Fatalf("FetchWopalModels() error = %v", err)
 	}
 }
 
@@ -72,9 +72,9 @@ func TestWopalAPIFetchModelsMissingData(t *testing.T) {
 			}))
 			defer server.Close()
 
-			_, err := fetchWopalModels(server.URL, "test-key")
+			_, err := FetchWopalModels(server.URL, "test-key")
 			if err == nil || err.Error() != "Wopal AI validation failed: /models response is missing data[]" {
-				t.Fatalf("fetchWopalModels() error = %v", err)
+				t.Fatalf("FetchWopalModels() error = %v", err)
 			}
 		})
 	}

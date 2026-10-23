@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"wopal-codex-gateway/internal/config"
 )
 
-const binaryName = "wopal-codex-gateway"
+const binaryName = config.BinaryName
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {

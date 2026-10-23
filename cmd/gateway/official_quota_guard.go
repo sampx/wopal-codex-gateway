@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"wopal-codex-gateway/internal/activity"
 )
 
 const (
@@ -63,7 +65,7 @@ type officialQuotaGuard struct {
 	accounts        map[string]officialQuotaAccountState
 	latestAccount   string
 	persistencePath string
-	logger          *activityLogger
+	logger          *activity.Logger
 	notifier        *quotaNotifier
 
 	// lastObserved deduplicates high-frequency quota telemetry by signature.
@@ -92,11 +94,11 @@ type officialQuotaPersistedState struct {
 	LatestAccount string                               `json:"latest_account,omitempty"`
 }
 
-func newOfficialQuotaGuard(logger *activityLogger) *officialQuotaGuard {
+func newOfficialQuotaGuard(logger *activity.Logger) *officialQuotaGuard {
 	return &officialQuotaGuard{accounts: make(map[string]officialQuotaAccountState), logger: logger}
 }
 
-func newOfficialQuotaGuardWithState(logger *activityLogger, statePath string, now time.Time) *officialQuotaGuard {
+func newOfficialQuotaGuardWithState(logger *activity.Logger, statePath string, now time.Time) *officialQuotaGuard {
 	guard := newOfficialQuotaGuard(logger)
 	guard.persistencePath = strings.TrimSpace(statePath)
 	guard.loadPersisted(now)
@@ -159,13 +161,13 @@ func (g *officialQuotaGuard) loadPersisted(now time.Time) {
 	raw, err := os.ReadFile(g.persistencePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			g.logger.write(map[string]any{"event": "official_quota_state_load_failed", "error": err.Error()})
+			g.logger.Write(map[string]any{"event": "official_quota_state_load_failed", "error": err.Error()})
 		}
 		return
 	}
 	var persisted officialQuotaPersistedState
 	if json.Unmarshal(raw, &persisted) != nil || persisted.Version != 1 {
-		g.logger.write(map[string]any{"event": "official_quota_state_load_failed", "error": "invalid persisted quota state"})
+		g.logger.Write(map[string]any{"event": "official_quota_state_load_failed", "error": "invalid persisted quota state"})
 		return
 	}
 	for key, state := range persisted.Accounts {
@@ -192,7 +194,7 @@ func (g *officialQuotaGuard) loadPersisted(now time.Time) {
 		}
 	}
 	if len(g.accounts) > 0 {
-		g.logger.write(map[string]any{"event": "official_quota_state_restored"})
+		g.logger.Write(map[string]any{"event": "official_quota_state_restored"})
 	}
 }
 
@@ -213,17 +215,17 @@ func (g *officialQuotaGuard) persist(now time.Time) {
 	g.mu.RUnlock()
 	payload, err := json.Marshal(officialQuotaPersistedState{Version: 1, Accounts: accounts, LatestAccount: latest})
 	if err != nil {
-		g.logger.write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
+		g.logger.Write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
 		return
 	}
 	dir := filepath.Dir(g.persistencePath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		g.logger.write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
+		g.logger.Write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
 		return
 	}
 	tmp, err := os.CreateTemp(dir, ".official-quota-state-*.tmp")
 	if err != nil {
-		g.logger.write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
+		g.logger.Write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
 		return
 	}
 	tmpPath := tmp.Name()
@@ -242,7 +244,7 @@ func (g *officialQuotaGuard) persist(now time.Time) {
 		ok = err == nil
 	}
 	if !ok {
-		g.logger.write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
+		g.logger.Write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
 		return
 	}
 	if info, statErr := os.Stat(g.persistencePath); statErr == nil {
@@ -317,7 +319,7 @@ func (g *officialQuotaGuard) enterQuotaFailover(requestedModel, reason, accountI
 	// The routing path logs every replaced request; record the switch itself once
 	// so the log shows one official -> Wopal transition per protection period.
 	if firstEntry {
-		g.logger.write(map[string]any{
+		g.logger.Write(map[string]any{
 			"event": "official_quota_failover_entered", "requested_model": requestedModel,
 			"effective_model": officialQuotaFailoverModel, "reason": reason,
 			"reset_at": resetAt.UTC().Format(time.RFC3339),
@@ -326,7 +328,7 @@ func (g *officialQuotaGuard) enterQuotaFailover(requestedModel, reason, accountI
 
 	notified := g.notifier.notifyQuotaFailover(requestedModel, officialQuotaFailoverModel, reason, resetAt, now)
 	if firstEntry {
-		g.logger.write(map[string]any{
+		g.logger.Write(map[string]any{
 			"event": "official_quota_failover_notified", "requested_model": requestedModel,
 			"reason": reason, "notified": notified,
 		})
@@ -614,7 +616,7 @@ func (g *officialQuotaGuard) observeWindow(accountID string, window officialQuot
 	}
 	g.lastObservedMu.Unlock()
 	if changed {
-		g.logger.write(map[string]any{
+		g.logger.Write(map[string]any{
 			"event":          "official_quota_observed",
 			"window":         windowName,
 			"used_percent":   window.UsedPercent,

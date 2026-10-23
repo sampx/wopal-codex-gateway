@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"wopal-codex-gateway/internal/config"
 )
 
 // Model changes must never send a request through the previous provider's
@@ -60,7 +61,7 @@ func TestWebsocketModelSwitchReconnectsBeforeForwarding(t *testing.T) {
 				engine.Use(routingMiddlewareWithTargets(nil, target, target))
 				engine.POST("/v1/responses", func(c *gin.Context) {
 					wopalCalls.Add(1)
-					if c.GetHeader("Authorization") != "Bearer "+localAccessKey || c.GetHeader("ChatGPT-Account-ID") != "" {
+					if c.GetHeader("Authorization") != "Bearer "+config.LocalAccessKey || c.GetHeader("ChatGPT-Account-ID") != "" {
 						t.Error("third-party request used official authentication")
 					}
 					var message map[string]any

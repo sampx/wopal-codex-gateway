@@ -1,9 +1,8 @@
-package main
+package codex
 
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -43,15 +42,5 @@ func TestCodexFileAtomicWriteUsesPrivatePermissions(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary files left behind: %v", matches)
-	}
-}
-
-func TestCodexCommandRejectsUnknownSubcommand(t *testing.T) {
-	err := runCodexCommand("bogus", nil)
-	if err == nil {
-		t.Fatal("expected usage error")
-	}
-	if !strings.Contains(err.Error(), "codex install|restore") {
-		t.Fatalf("error = %q, want explicit usage", err)
 	}
 }

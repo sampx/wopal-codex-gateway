@@ -1,4 +1,4 @@
-package main
+package catalog
 
 import (
 	"encoding/json"
@@ -11,8 +11,8 @@ import (
 
 var wopalModelsHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
-// fetchWopalModels lists the model ids exposed by the Wopal AI /models endpoint.
-func fetchWopalModels(baseURL, apiKey string) ([]string, error) {
+// FetchWopalModels lists the model ids exposed by the Wopal AI /models endpoint.
+func FetchWopalModels(baseURL, apiKey string) ([]string, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + "/models"
 	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {

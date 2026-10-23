@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"wopal-codex-gateway/internal/activity"
 )
 
 // Official-branch request sanitization. OpenAI verifies compaction and
@@ -156,7 +158,7 @@ func stringOrEmpty(value any) string {
 // rewriteOfficialRequestBody neutralizes gateway-issued items in an
 // official-bound HTTP request body. Requests without gateway-issued items keep
 // their exact bytes, headers, and compression.
-func rewriteOfficialRequestBody(req *http.Request, logger *activityLogger) {
+func rewriteOfficialRequestBody(req *http.Request, logger *activity.Logger) {
 	if req.Method != http.MethodPost || req.Body == nil {
 		return
 	}
@@ -171,14 +173,14 @@ func rewriteOfficialRequestBody(req *http.Request, logger *activityLogger) {
 	}
 	decoded, err := decodeRoutingBody(raw, req.Header.Get("Content-Encoding"))
 	if err != nil {
-		logger.write(map[string]any{"event": "official_sanitizer_decode_failed", "error": err.Error()})
+		logger.Write(map[string]any{"event": "official_sanitizer_decode_failed", "error": err.Error()})
 		return
 	}
 	var payload map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(decoded))
 	decoder.UseNumber()
 	if err := decoder.Decode(&payload); err != nil {
-		logger.write(map[string]any{"event": "official_sanitizer_decode_failed", "error": err.Error()})
+		logger.Write(map[string]any{"event": "official_sanitizer_decode_failed", "error": err.Error()})
 		return
 	}
 	input, ok := payload["input"].([]any)
@@ -198,7 +200,7 @@ func rewriteOfficialRequestBody(req *http.Request, logger *activityLogger) {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		logger.write(map[string]any{"event": "official_sanitizer_encode_failed", "error": err.Error()})
+		logger.Write(map[string]any{"event": "official_sanitizer_encode_failed", "error": err.Error()})
 		return
 	}
 	req.Body = io.NopCloser(bytes.NewReader(body))
@@ -215,7 +217,7 @@ func rewriteOfficialRequestBody(req *http.Request, logger *activityLogger) {
 	if len(itemTypes) > 0 {
 		fields["item_types"] = itemTypes
 	}
-	logger.write(fields)
+	logger.Write(fields)
 }
 
 // officialItemTypesKeepingID lists the item types whose id carries protocol

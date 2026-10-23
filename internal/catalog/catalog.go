@@ -1,4 +1,4 @@
-package main
+package catalog
 
 import (
 	"bytes"
@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"wopal-codex-gateway/internal/config"
 )
 
 // CatalogRefreshResult summarises one catalog rebuild.
@@ -38,7 +40,7 @@ var catalogReasoningLevels = []any{
 	map[string]any{"effort": "high", "description": "Greater reasoning depth for complex work"},
 }
 
-func buildCatalog(native []map[string]any, wopalModels []ExternalModelConfig) []map[string]any {
+func buildCatalog(native []map[string]any, wopalModels []config.ExternalModelConfig) []map[string]any {
 	catalog := make([]map[string]any, 0, len(wopalModels)+len(native))
 	for index, model := range wopalModels {
 		catalog = append(catalog, wopalCatalogEntry(model, -200+index))
@@ -54,16 +56,16 @@ func buildCatalog(native []map[string]any, wopalModels []ExternalModelConfig) []
 	return catalog
 }
 
-func wopalCatalogEntry(model ExternalModelConfig, priority int) map[string]any {
-	contextWindow := model.contextWindow()
+func wopalCatalogEntry(model config.ExternalModelConfig, priority int) map[string]any {
+	contextWindow := model.EffectiveContextWindow()
 	reasoningLevels := catalogReasoningLevels
 	defaultReasoningLevel := "high"
-	if !model.supportsReasoning() {
+	if !model.SupportsReasoning() {
 		reasoningLevels = catalogReasoningLevels[:1]
 		defaultReasoningLevel = "none"
 	}
 	inputModalities := []any{"text"}
-	if model.supportsVision() {
+	if model.SupportsVision() {
 		inputModalities = []any{"text", "image"}
 	}
 
@@ -108,7 +110,7 @@ func wopalCatalogEntry(model ExternalModelConfig, priority int) map[string]any {
 }
 
 func resolveCodexCommand() (string, error) {
-	local := filepath.Join(homeDir(), ".local", "bin", "codex")
+	local := filepath.Join(config.HomeDir(), ".local", "bin", "codex")
 	if info, err := os.Stat(local); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
 		return local, nil
 	}
@@ -235,9 +237,9 @@ func writeCatalog(path string, catalog []map[string]any) error {
 	return nil
 }
 
-// refreshCatalog rebuilds ~/.codex/wopal-codex-gateway-models.json from the
+// RefreshCatalog rebuilds ~/.codex/wopal-codex-gateway-models.json from the
 // bundled Codex baseline plus the configured Wopal AI models.
-func refreshCatalog(cfg *GatewayConfig) (*CatalogRefreshResult, error) {
+func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("refresh model catalog: gateway config is nil")
 	}
@@ -248,7 +250,7 @@ func refreshCatalog(cfg *GatewayConfig) (*CatalogRefreshResult, error) {
 	}
 	catalog := buildCatalog(native, cfg.WopalAI.Models)
 
-	path := codexGatewayCatalogPath()
+	path := config.CodexGatewayCatalogPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create Codex directory: %w", err)
 	}

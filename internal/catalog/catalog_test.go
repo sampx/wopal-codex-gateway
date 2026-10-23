@@ -1,4 +1,4 @@
-package main
+package catalog
 
 import (
 	"encoding/json"
@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"wopal-codex-gateway/internal/config"
 )
 
 var catalogEntryKeys = []string{
@@ -72,7 +74,7 @@ func TestBuildCatalogWopalContractAndNativeCopy(t *testing.T) {
 	contextWindow := 128000
 	vision := true
 	reasoning := false
-	wopalModels := []ExternalModelConfig{
+	wopalModels := []config.ExternalModelConfig{
 		{Name: "vision-model", ContextWindow: &contextWindow, Vision: &vision, Reasoning: &reasoning},
 		{Name: "default-model"},
 	}
@@ -146,8 +148,8 @@ func TestBuildCatalogWopalContractAndNativeCopy(t *testing.T) {
 	if value, ok := catalogTestValue(t, second, "priority").(int); !ok || value != -199 {
 		t.Fatalf("second priority = %#v, want int -199", second["priority"])
 	}
-	if value, ok := catalogTestValue(t, second, "context_window").(int); !ok || value != defaultContextWindow {
-		t.Fatalf("default context_window = %#v, want %d", second["context_window"], defaultContextWindow)
+	if value, ok := catalogTestValue(t, second, "context_window").(int); !ok || value != config.DefaultContextWindow {
+		t.Fatalf("default context_window = %#v, want %d", second["context_window"], config.DefaultContextWindow)
 	}
 	if value := catalogTestValue(t, second, "input_modalities"); !reflect.DeepEqual(value, []any{"text"}) {
 		t.Fatalf("default input_modalities = %#v, want [text]", value)
@@ -336,8 +338,8 @@ func TestCatalogLoadBundledExecutesResolvedCodexCommand(t *testing.T) {
 }
 
 func TestRefreshCatalogWritesNativeAndWopalModels(t *testing.T) {
-	codexHome := filepath.Join(t.TempDir(), "nested", "codex")
-	t.Setenv("CODEX_HOME", codexHome)
+	nestedCodexHome := filepath.Join(t.TempDir(), "nested", "codex")
+	t.Setenv("CODEX_HOME", nestedCodexHome)
 	catalogTestStubCommand(t, catalogCommandOutput{
 		stdout: []byte(`{"models":[
 			{"slug":"native-hidden","visibility":"hide"},
@@ -345,19 +347,19 @@ func TestRefreshCatalogWritesNativeAndWopalModels(t *testing.T) {
 		]}`),
 	}, nil)
 
-	cfg := &GatewayConfig{WopalAI: wopalAIConfig{Models: []ExternalModelConfig{
+	cfg := &config.GatewayConfig{WopalAI: config.WopalAIConfig{Models: []config.ExternalModelConfig{
 		{Name: "first"},
 		{Name: "second"},
 	}}}
-	result, err := refreshCatalog(cfg)
+	result, err := RefreshCatalog(cfg)
 	if err != nil {
-		t.Fatalf("refreshCatalog() error = %v", err)
+		t.Fatalf("RefreshCatalog() error = %v", err)
 	}
 	if result.Native != 2 || result.NativeVisible != 1 || result.NativeHidden != 1 || result.WopalAI != 2 {
 		t.Fatalf("refresh result = %#v", result)
 	}
 
-	path := filepath.Join(codexHome, "wopal-codex-gateway-models.json")
+	path := filepath.Join(nestedCodexHome, "wopal-codex-gateway-models.json")
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("catalog file missing: %v", err)
@@ -469,7 +471,7 @@ func TestRefreshCatalogKeepsPreviousCatalogWhenCodexFails(t *testing.T) {
 
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
-	path := codexGatewayCatalogPath()
+	path := config.CodexGatewayCatalogPath()
 	previous := []byte("{\"models\":[{\"slug\":\"wopal-ai/previous\"}]}\n")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -478,7 +480,7 @@ func TestRefreshCatalogKeepsPreviousCatalogWhenCodexFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := defaultGatewayConfig()
+	cfg := config.DefaultGatewayConfig()
 	cfg.WopalAI.BaseURL = "https://example.test/v1"
 
 	for name, setup := range map[string]func(){
@@ -496,7 +498,7 @@ func TestRefreshCatalogKeepsPreviousCatalogWhenCodexFails(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			setup()
-			if _, err := refreshCatalog(cfg); err == nil {
+			if _, err := RefreshCatalog(cfg); err == nil {
 				t.Fatal("refresh succeeded although Codex failed")
 			}
 			got, err := os.ReadFile(path)

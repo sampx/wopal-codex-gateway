@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -10,30 +10,30 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
-const localAccessKey = "wopal-codex-gateway-local"
+const LocalAccessKey = "wopal-codex-gateway-local"
 
-// buildCLIProxyConfig turns the gateway configuration into the embedded
+// BuildCLIProxyConfig turns the gateway configuration into the embedded
 // CLIProxyAPI config. The Wopal API key is injected into the parsed struct only,
 // so the file written next to the config never contains the credential.
-func buildCLIProxyConfig(root string, gateway *GatewayConfig, wopalKey string) (*sdkconfig.Config, string, error) {
+func BuildCLIProxyConfig(root string, gateway *GatewayConfig, wopalKey string) (*sdkconfig.Config, string, error) {
 	models := make([]map[string]any, 0, len(gateway.WopalAI.Models))
 	for _, model := range gateway.WopalAI.Models {
 		entry := map[string]any{
 			"name":               model.Name,
 			"alias":              "wopal-ai/" + model.Name,
 			"display-name":       "Wopal AI / " + model.Name,
-			"max-context-length": model.contextWindow(),
+			"max-context-length": model.EffectiveContextWindow(),
 			"force-mapping":      true,
 			"input-modalities":   []string{"text"},
 		}
-		if model.supportsVision() {
+		if model.SupportsVision() {
 			entry["input-modalities"] = []string{"text", "image"}
 		}
 		models = append(models, entry)
 	}
 
 	runtimeDir := filepath.Join(root, "runtime")
-	configPath := filepath.Join(runtimeDir, "cliproxy-runtime.json")
+	runtimeConfigPath := filepath.Join(runtimeDir, "cliproxy-runtime.json")
 	authDir := filepath.Join(runtimeDir, "cliproxy-auth")
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		return nil, "", fmt.Errorf("create CLIProxyAPI auth dir: %w", err)
@@ -43,7 +43,7 @@ func buildCLIProxyConfig(root string, gateway *GatewayConfig, wopalKey string) (
 	raw := map[string]any{
 		"host":                     gateway.Listen.Host,
 		"port":                     gateway.Listen.Port,
-		"api-keys":                 []string{localAccessKey},
+		"api-keys":                 []string{LocalAccessKey},
 		"auth-dir":                 authDir,
 		"logging-to-file":          false,
 		"usage-statistics-enabled": false,
@@ -65,7 +65,7 @@ func buildCLIProxyConfig(root string, gateway *GatewayConfig, wopalKey string) (
 	if err != nil {
 		return nil, "", fmt.Errorf("encode CLIProxyAPI config: %w", err)
 	}
-	if err := os.WriteFile(configPath, append(data, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(runtimeConfigPath, append(data, '\n'), 0o600); err != nil {
 		return nil, "", fmt.Errorf("write sanitized CLIProxyAPI config: %w", err)
 	}
 	cfg, err := sdkconfig.ParseConfigBytes(data)
@@ -76,5 +76,5 @@ func buildCLIProxyConfig(root string, gateway *GatewayConfig, wopalKey string) (
 		return nil, "", fmt.Errorf("unexpected CLIProxyAPI OpenAI compatibility config shape")
 	}
 	cfg.OpenAICompatibility[0].APIKeyEntries[0].APIKey = wopalKey
-	return cfg, configPath, nil
+	return cfg, runtimeConfigPath, nil
 }

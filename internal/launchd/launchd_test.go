@@ -1,4 +1,4 @@
-package main
+package launchd
 
 import (
 	"encoding/json"
@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"wopal-codex-gateway/internal/config"
 )
 
 const testLaunchAgentTemplate = `<?xml version="1.0" encoding="UTF-8"?>
@@ -45,10 +47,8 @@ func useTempGatewayRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	t.Setenv("HOME", filepath.Join(root, "home"))
-	previousRoot := resolvedRoot
-	resolvedRoot = root
-	t.Cleanup(func() { resolvedRoot = previousRoot })
-	if err := os.MkdirAll(filepath.Dir(launchAgentTemplatePath()), 0o755); err != nil {
+	t.Cleanup(config.SetProjectRootForTest(root))
+	if err := os.MkdirAll(filepath.Dir(config.LaunchAgentTemplatePath()), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return root
@@ -59,7 +59,7 @@ func useTempGatewayRoot(t *testing.T) string {
 // binary at the path the plist will reference.
 func prepareServiceInstall(t *testing.T) {
 	t.Helper()
-	root := mustProjectRoot()
+	root := config.MustProjectRoot()
 	if root == "" {
 		t.Fatal("test did not set up a project root")
 	}
@@ -67,7 +67,7 @@ func prepareServiceInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := defaultGatewayConfig()
+	cfg := config.DefaultGatewayConfig()
 	cfg.WopalAI.BaseURL = "https://example.test/v1"
 	payload, err := json.Marshal(cfg)
 	if err != nil {
@@ -76,14 +76,14 @@ func prepareServiceInstall(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "runtime", "config.json"), payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(gatewayBinaryPath(), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(config.GatewayBinaryPath(), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func writeLaunchAgentTemplate(t *testing.T, body string) {
 	t.Helper()
-	if err := os.WriteFile(launchAgentTemplatePath(), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(config.LaunchAgentTemplatePath(), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -93,15 +93,15 @@ func writeLaunchAgentTemplate(t *testing.T, body string) {
 func stubLaunchctl(t *testing.T, respond func(args []string) error) *[][]string {
 	t.Helper()
 	var calls [][]string
-	original := runLaunchctl
-	runLaunchctl = func(args ...string) error {
+	original := RunLaunchctl
+	RunLaunchctl = func(args ...string) error {
 		calls = append(calls, append([]string(nil), args...))
 		if respond == nil {
 			return nil
 		}
 		return respond(args)
 	}
-	t.Cleanup(func() { runLaunchctl = original })
+	t.Cleanup(func() { RunLaunchctl = original })
 	return &calls
 }
 
@@ -113,8 +113,8 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 
 func stubHealthClient(t *testing.T, status int) {
 	t.Helper()
-	original := healthClient
-	healthClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	original := HealthClient
+	HealthClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: status,
 			Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
@@ -123,45 +123,25 @@ func stubHealthClient(t *testing.T, status int) {
 			Request:    request,
 		}, nil
 	})}
-	t.Cleanup(func() { healthClient = original })
+	t.Cleanup(func() { HealthClient = original })
 }
 
 func stubHealthError(t *testing.T, probeErr error) {
 	t.Helper()
-	original := healthClient
-	healthClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	original := HealthClient
+	HealthClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, probeErr
 	})}
-	t.Cleanup(func() { healthClient = original })
+	t.Cleanup(func() { HealthClient = original })
 }
 
 func withHealthTiming(t *testing.T, timeout, retry time.Duration) {
 	t.Helper()
-	previousTimeout, previousRetry := healthWaitTimeout, healthRetryDelay
-	healthWaitTimeout, healthRetryDelay = timeout, retry
+	previousTimeout, previousRetry := HealthWaitTimeout, HealthRetryDelay
+	HealthWaitTimeout, HealthRetryDelay = timeout, retry
 	t.Cleanup(func() {
-		healthWaitTimeout, healthRetryDelay = previousTimeout, previousRetry
+		HealthWaitTimeout, HealthRetryDelay = previousTimeout, previousRetry
 	})
-}
-
-func captureStdout(t *testing.T, run func() error) (string, error) {
-	t.Helper()
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := os.Stdout
-	os.Stdout = writer
-	defer func() { os.Stdout = original }()
-	runErr := run()
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data), runErr
 }
 
 func hostPortFromURL(t *testing.T, raw string) (string, int) {
@@ -178,14 +158,14 @@ func hostPortFromURL(t *testing.T, raw string) (string, int) {
 }
 
 func TestLaunchAgentRenderPlistReplacesAndEscapes(t *testing.T) {
-	rendered := renderLaunchAgentPlist(
+	rendered := RenderLaunchAgentPlist(
 		"label={{LABEL}} program={{PROGRAM_PATH}} root={{PROJECT_ROOT}} out={{LOG_PATH}} err={{ERROR_LOG_PATH}}",
-		launchAgentTemplateValues{
-			label:        launchAgentLabel,
-			programPath:  "/tmp/gateway & <bin>",
-			projectRoot:  `/tmp/root "quoted" 'single'`,
-			logPath:      "/tmp/out.log",
-			errorLogPath: "/tmp/err.log",
+		LaunchAgentTemplateValues{
+			Label:        config.LaunchAgentLabel,
+			ProgramPath:  "/tmp/gateway & <bin>",
+			ProjectRoot:  `/tmp/root "quoted" 'single'`,
+			LogPath:      "/tmp/out.log",
+			ErrorLogPath: "/tmp/err.log",
 		},
 	)
 	want := `label=com.wopal.codex-gateway program=/tmp/gateway &amp; &lt;bin&gt; root=/tmp/root &quot;quoted&quot; &apos;single&apos; out=/tmp/out.log err=/tmp/err.log`
@@ -198,7 +178,7 @@ func TestLaunchAgentRenderPlistReplacesAndEscapes(t *testing.T) {
 }
 
 func TestLaunchAgentTemplateProgramArgumentsUseServe(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("..", "..", "launchd", launchAgentLabel+".plist.template"))
+	body, err := os.ReadFile(filepath.Join("..", "..", "launchd", config.LaunchAgentLabel+".plist.template"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,17 +213,17 @@ func TestLaunchAgentInstallWritesPlistAndLoadsJob(t *testing.T) {
 		return nil
 	})
 
-	if err := installLaunchAgent(); err != nil {
+	if err := InstallLaunchAgent(); err != nil {
 		t.Fatalf("installLaunchAgent: %v", err)
 	}
 
-	plist, err := os.ReadFile(launchAgentPath())
+	plist, err := os.ReadFile(config.LaunchAgentPath())
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(plist)
 	for _, want := range []string{
-		"<string>" + filepath.Join(root, "runtime", "bin", binaryName) + "</string>",
+		"<string>" + filepath.Join(root, "runtime", "bin", config.BinaryName) + "</string>",
 		"<string>serve</string>",
 		"<string>" + root + "</string>",
 		"<string>" + filepath.Join(root, "logs", "service.log") + "</string>",
@@ -257,14 +237,14 @@ func TestLaunchAgentInstallWritesPlistAndLoadsJob(t *testing.T) {
 		t.Fatalf("rendered plist still contains placeholders:\n%s", content)
 	}
 
-	info, err := os.Stat(launchAgentPath())
+	info, err := os.Stat(config.LaunchAgentPath())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := info.Mode().Perm(); got != 0o644 {
 		t.Fatalf("plist mode = %o, want 644", got)
 	}
-	for _, dir := range []string{stateDir(), logsDir()} {
+	for _, dir := range []string{config.StateDir(), config.LogsDir()} {
 		info, err := os.Stat(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -276,9 +256,9 @@ func TestLaunchAgentInstallWritesPlistAndLoadsJob(t *testing.T) {
 
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
 	wantCalls := [][]string{
-		{"bootout", domain, launchAgentPath()},
-		{"bootstrap", domain, launchAgentPath()},
-		{"kickstart", "-k", domain + "/" + launchAgentLabel},
+		{"bootout", domain, config.LaunchAgentPath()},
+		{"bootstrap", domain, config.LaunchAgentPath()},
+		{"kickstart", "-k", domain + "/" + config.LaunchAgentLabel},
 	}
 	if len(*calls) != len(wantCalls) {
 		t.Fatalf("launchctl calls = %v, want %v", *calls, wantCalls)
@@ -300,7 +280,7 @@ func TestLaunchAgentInstallReportsBootstrapFailure(t *testing.T) {
 		return nil
 	})
 
-	err := installLaunchAgent()
+	err := InstallLaunchAgent()
 	if err == nil {
 		t.Fatal("installLaunchAgent succeeded after bootstrap failed")
 	}
@@ -318,28 +298,28 @@ func TestLaunchAgentInstallReportsBootstrapFailure(t *testing.T) {
 
 func TestLaunchAgentUninstallBootoutsAndRemovesPlist(t *testing.T) {
 	useTempGatewayRoot(t)
-	if err := os.MkdirAll(filepath.Dir(launchAgentPath()), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(config.LaunchAgentPath()), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(launchAgentPath(), []byte("plist"), 0o644); err != nil {
+	if err := os.WriteFile(config.LaunchAgentPath(), []byte("plist"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	calls := stubLaunchctl(t, nil)
 
-	if err := uninstallLaunchAgent(); err != nil {
+	if err := UninstallLaunchAgent(); err != nil {
 		t.Fatalf("uninstallLaunchAgent: %v", err)
 	}
-	if _, err := os.Stat(launchAgentPath()); !os.IsNotExist(err) {
+	if _, err := os.Stat(config.LaunchAgentPath()); !os.IsNotExist(err) {
 		t.Fatalf("plist still present: %v", err)
 	}
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
-	want := strings.Join([]string{"bootout", domain, launchAgentPath()}, " ")
+	want := strings.Join([]string{"bootout", domain, config.LaunchAgentPath()}, " ")
 	if len(*calls) != 1 || strings.Join((*calls)[0], " ") != want {
 		t.Fatalf("launchctl calls = %v, want one %q", *calls, want)
 	}
 
 	// Removing an already-absent plist is not an error.
-	if err := uninstallLaunchAgent(); err != nil {
+	if err := UninstallLaunchAgent(); err != nil {
 		t.Fatalf("second uninstallLaunchAgent: %v", err)
 	}
 }
@@ -357,7 +337,7 @@ func TestWaitForHealthRetriesUntilHealthy(t *testing.T) {
 
 	withHealthTiming(t, 2*time.Second, 10*time.Millisecond)
 	host, port := hostPortFromURL(t, server.URL)
-	if err := waitForHealth(host, port); err != nil {
+	if err := WaitForHealth(host, port); err != nil {
 		t.Fatalf("waitForHealth: %v", err)
 	}
 	if got := hits.Load(); got < 2 {
@@ -374,7 +354,7 @@ func TestWaitForHealthTimesOutWithLastError(t *testing.T) {
 	withHealthTiming(t, 150*time.Millisecond, 10*time.Millisecond)
 	host, port := hostPortFromURL(t, server.URL)
 	started := time.Now()
-	err := waitForHealth(host, port)
+	err := WaitForHealth(host, port)
 	if err == nil {
 		t.Fatal("waitForHealth succeeded against a failing server")
 	}
@@ -385,100 +365,5 @@ func TestWaitForHealthTimesOutWithLastError(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err, want)
 		}
-	}
-}
-
-func TestServiceCommandInstallWaitsForHealth(t *testing.T) {
-	useTempGatewayRoot(t)
-	prepareServiceInstall(t)
-	writeLaunchAgentTemplate(t, testLaunchAgentTemplate)
-	stubLaunchctl(t, nil)
-	stubHealthClient(t, http.StatusOK)
-
-	stdout, err := captureStdout(t, func() error { return runServiceCommand("install", nil) })
-	if err != nil {
-		t.Fatalf("service install: %v", err)
-	}
-	for _, want := range []string{
-		"LaunchAgent installed and proxy started.",
-		"Proxy service is healthy: http://127.0.0.1:11435/_health",
-	} {
-		if !strings.Contains(stdout, want) {
-			t.Fatalf("install output %q missing %q", stdout, want)
-		}
-	}
-}
-
-func TestServiceCommandInstallReportsHealthFailure(t *testing.T) {
-	useTempGatewayRoot(t)
-	prepareServiceInstall(t)
-	writeLaunchAgentTemplate(t, testLaunchAgentTemplate)
-	stubLaunchctl(t, nil)
-	stubHealthError(t, errors.New("connection refused"))
-	withHealthTiming(t, 60*time.Millisecond, 5*time.Millisecond)
-
-	stdout, err := captureStdout(t, func() error { return runServiceCommand("install", nil) })
-	if err == nil {
-		t.Fatal("service install succeeded although health checks failed")
-	}
-	for _, want := range []string{"logs/service.log", "logs/service-error.log", "connection refused"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err, want)
-		}
-	}
-	if strings.Contains(stdout, "healthy") {
-		t.Fatalf("install claimed success after health failure: %q", stdout)
-	}
-}
-
-func TestServiceCommandStatusReportsReady(t *testing.T) {
-	useTempGatewayRoot(t)
-	if err := os.MkdirAll(filepath.Dir(launchAgentPath()), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(launchAgentPath(), []byte("plist"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	stubLaunchctl(t, nil)
-	stubHealthClient(t, http.StatusOK)
-
-	stdout, err := captureStdout(t, func() error { return runServiceCommand("status", nil) })
-	if err != nil {
-		t.Fatalf("service status: %v", err)
-	}
-	if stdout != "installed=yes loaded=yes healthy=yes\n" {
-		t.Fatalf("status output = %q", stdout)
-	}
-}
-
-func TestServiceCommandStatusFailsWhenUnloaded(t *testing.T) {
-	useTempGatewayRoot(t)
-	stubLaunchctl(t, func(args []string) error {
-		if args[0] == "print" {
-			return errors.New("not loaded")
-		}
-		return nil
-	})
-	stubHealthClient(t, http.StatusOK)
-
-	stdout, err := captureStdout(t, func() error { return runServiceCommand("status", nil) })
-	if err == nil {
-		t.Fatal("service status succeeded while the job was unloaded")
-	}
-	if stdout != "installed=no loaded=no healthy=yes\n" {
-		t.Fatalf("status output = %q", stdout)
-	}
-	if !strings.Contains(err.Error(), "installed=no") || !strings.Contains(err.Error(), "logs/service.log") {
-		t.Fatalf("status error not descriptive: %v", err)
-	}
-}
-
-func TestServiceCommandRejectsUnknownSubcommand(t *testing.T) {
-	err := runServiceCommand("frobnicate", nil)
-	if err == nil {
-		t.Fatal("unknown service subcommand succeeded")
-	}
-	if !strings.Contains(err.Error(), "usage") {
-		t.Fatalf("error %q should be a usage error", err)
 	}
 }

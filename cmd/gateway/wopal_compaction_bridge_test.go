@@ -11,12 +11,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/config"
 )
 
 func TestWopalWebsocketRemoteCompactionV2ClosedLoop(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	configureWopalCompactionKey("bridge-compaction-secret")
-	logger, err := newActivityLogger(t.TempDir())
+	logger, err := activity.New(t.TempDir(), config.Logs{})
 	if err != nil {
 		t.Fatal(err)
 	}

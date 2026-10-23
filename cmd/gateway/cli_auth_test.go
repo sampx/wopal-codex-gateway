@@ -6,15 +6,18 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/keychain"
 )
 
 func TestAuthCommandStatus(t *testing.T) {
 	setupConfigAuthTestRoot(t)
-	original := keychainExec
-	t.Cleanup(func() { keychainExec = original })
+	original := keychain.KeychainExec
+	t.Cleanup(func() { keychain.KeychainExec = original })
 
 	t.Run("configured", func(t *testing.T) {
-		keychainExec = func(_ []string, _ io.Reader, stdout, _ io.Writer) error {
+		keychain.KeychainExec = func(_ []string, _ io.Reader, stdout, _ io.Writer) error {
 			_, _ = io.WriteString(stdout, "stored-key\n")
 			return nil
 		}
@@ -28,7 +31,7 @@ func TestAuthCommandStatus(t *testing.T) {
 	})
 
 	t.Run("not configured", func(t *testing.T) {
-		keychainExec = func([]string, io.Reader, io.Writer, io.Writer) error {
+		keychain.KeychainExec = func([]string, io.Reader, io.Writer, io.Writer) error {
 			return io.EOF
 		}
 		output, err := captureConfigAuthTestStdout(t, func() error { return runAuthCommand("status", nil) })
@@ -51,19 +54,19 @@ func TestAuthCommandTestValidatesStoredKey(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg, err := loadGatewayConfig(configPath())
+	cfg, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
-		t.Fatalf("loadGatewayConfig() error = %v", err)
+		t.Fatalf("config.LoadGatewayConfig() error = %v", err)
 	}
 	cfg.WopalAI.BaseURL = server.URL
-	cfg.WopalAI.Models = []ExternalModelConfig{{Name: "a"}, {Name: "missing"}}
-	if err := saveGatewayConfig(cfg); err != nil {
-		t.Fatalf("saveGatewayConfig() error = %v", err)
+	cfg.WopalAI.Models = []config.ExternalModelConfig{{Name: "a"}, {Name: "missing"}}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatalf("config.SaveGatewayConfig() error = %v", err)
 	}
 
-	original := keychainExec
-	t.Cleanup(func() { keychainExec = original })
-	keychainExec = func(_ []string, _ io.Reader, stdout, _ io.Writer) error {
+	original := keychain.KeychainExec
+	t.Cleanup(func() { keychain.KeychainExec = original })
+	keychain.KeychainExec = func(_ []string, _ io.Reader, stdout, _ io.Writer) error {
 		_, _ = io.WriteString(stdout, "stored-key\n")
 		return nil
 	}
@@ -88,11 +91,11 @@ func TestAuthCommandTestRequiresBaseURL(t *testing.T) {
 
 func TestAuthCommandSetReportsValidationFailure(t *testing.T) {
 	setupConfigAuthTestRoot(t)
-	original := keychainExec
-	t.Cleanup(func() { keychainExec = original })
+	original := keychain.KeychainExec
+	t.Cleanup(func() { keychain.KeychainExec = original })
 
 	var calls [][]string
-	keychainExec = func(args []string, _ io.Reader, stdout, _ io.Writer) error {
+	keychain.KeychainExec = func(args []string, _ io.Reader, stdout, _ io.Writer) error {
 		calls = append(calls, append([]string(nil), args...))
 		if args[0] == "find-generic-password" {
 			_, _ = io.WriteString(stdout, "saved-key\n")

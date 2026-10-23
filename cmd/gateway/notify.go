@@ -8,6 +8,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/config"
 )
 
 const (
@@ -15,33 +18,10 @@ const (
 	quotaNotificationTimeout = 5 * time.Second
 )
 
-type notificationsConfig struct {
-	Enabled *bool  `json:"enabled"`
-	Sound   string `json:"sound"`
-	Tool    string `json:"tool"`
-}
-
-func (c notificationsConfig) notificationsEnabled() bool {
-	return c.Enabled == nil || *c.Enabled
-}
-
-// normalizedSound maps the sentinel values onto "no sound flag"; anything else
-// is passed to the notification tool as a macOS sound name.
-func (c notificationsConfig) normalizedSound() string {
-	sound := strings.TrimSpace(c.Sound)
-	if sound == "" {
-		return "default"
-	}
-	if strings.EqualFold(sound, "none") || strings.EqualFold(sound, "off") {
-		return ""
-	}
-	return sound
-}
-
 // quotaNotifier surfaces automatic quota failover to the user. It is
 // best-effort: a missing tool or a failed notification never affects routing.
 type quotaNotifier struct {
-	logger *activityLogger
+	logger *activity.Logger
 
 	enabled bool
 	tool    string
@@ -53,12 +33,12 @@ type quotaNotifier struct {
 	notified map[string]time.Time
 }
 
-func newQuotaNotifier(logger *activityLogger, cfg notificationsConfig) *quotaNotifier {
+func newQuotaNotifier(logger *activity.Logger, cfg config.NotificationsConfig) *quotaNotifier {
 	return &quotaNotifier{
 		logger:  logger,
-		enabled: cfg.notificationsEnabled(),
+		enabled: cfg.NotificationsEnabled(),
 		tool:    resolveNotificationTool(cfg.Tool),
-		sound:   cfg.normalizedSound(),
+		sound:   cfg.NormalizedSound(),
 		run: func(ctx context.Context, name string, args ...string) error {
 			return exec.CommandContext(ctx, name, args...).Run()
 		},
@@ -106,7 +86,7 @@ func (n *quotaNotifier) notifyQuotaFailover(requestedModel, effectiveModel, reas
 		return false
 	}
 	if n.tool == "" {
-		n.logger.write(map[string]any{
+		n.logger.Write(map[string]any{
 			"event": "quota_failover_notify_unavailable", "requested_model": requestedModel, "reason": reason,
 		})
 		return false
@@ -136,7 +116,7 @@ func (n *quotaNotifier) notifyQuotaRecovered(requestedModel, reason string, rese
 		return false
 	}
 	if n.tool == "" {
-		n.logger.write(map[string]any{
+		n.logger.Write(map[string]any{
 			"event": "quota_recovery_notify_unavailable", "requested_model": requestedModel, "reason": reason,
 		})
 		return false
@@ -171,7 +151,7 @@ func (n *quotaNotifier) dispatch(successEvent, failureEvent string, args []strin
 			entry["event"] = failureEvent
 			entry["error"] = err.Error()
 		}
-		n.logger.write(entry)
+		n.logger.Write(entry)
 	}()
 }
 

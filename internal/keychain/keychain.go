@@ -1,4 +1,4 @@
-package main
+package keychain
 
 import (
 	"bytes"
@@ -15,9 +15,9 @@ const (
 	wopalKeychainAccount = "wopal-ai"
 )
 
-// keychainExec is replaceable so tests can exercise argument handling without
+// KeychainExec is replaceable so tests can exercise argument handling without
 // reading from or writing to the user's real Keychain.
-var keychainExec = func(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+var KeychainExec = func(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cmd := exec.Command("/usr/bin/security", args...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
@@ -25,10 +25,10 @@ var keychainExec = func(args []string, stdin io.Reader, stdout, stderr io.Writer
 	return cmd.Run()
 }
 
-// getWopalAPIKey reads the Wopal AI API key from the macOS Keychain.
-func getWopalAPIKey() (string, error) {
+// GetWopalAPIKey reads the Wopal AI API key from the macOS Keychain.
+func GetWopalAPIKey() (string, error) {
 	var output bytes.Buffer
-	err := keychainExec([]string{
+	err := KeychainExec([]string{
 		"find-generic-password",
 		"-a", wopalKeychainAccount,
 		"-s", wopalKeychainService,
@@ -41,15 +41,15 @@ func getWopalAPIKey() (string, error) {
 	return key, nil
 }
 
-// hasWopalAPIKey reports whether a usable key is stored.
-func hasWopalAPIKey() bool {
-	_, err := getWopalAPIKey()
+// HasWopalAPIKey reports whether a usable key is stored.
+func HasWopalAPIKey() bool {
+	_, err := GetWopalAPIKey()
 	return err == nil
 }
 
-// setWopalAPIKeyInteractive stores a key using security's interactive prompt.
-func setWopalAPIKeyInteractive() error {
-	err := keychainExec([]string{
+// SetWopalAPIKeyInteractive stores a key using security's interactive prompt.
+func SetWopalAPIKeyInteractive() error {
+	err := KeychainExec([]string{
 		"add-generic-password",
 		"-a", wopalKeychainAccount,
 		"-s", wopalKeychainService,

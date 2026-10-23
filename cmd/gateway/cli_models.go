@@ -5,26 +5,30 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"wopal-codex-gateway/internal/catalog"
+	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/keychain"
 )
 
 type wopalModelsRunner struct {
-	loadConfig     func() (*GatewayConfig, error)
-	saveConfig     func(*GatewayConfig) error
+	loadConfig     func() (*config.GatewayConfig, error)
+	saveConfig     func(*config.GatewayConfig) error
 	fetchModels    func(string, string) ([]string, error)
 	getAPIKey      func() (string, error)
-	refreshCatalog func(*GatewayConfig) (*CatalogRefreshResult, error)
+	refreshCatalog func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error)
 	out            io.Writer
 }
 
 func newWopalModelsRunner() wopalModelsRunner {
 	return wopalModelsRunner{
-		loadConfig: func() (*GatewayConfig, error) {
-			return loadGatewayConfig(configPath())
+		loadConfig: func() (*config.GatewayConfig, error) {
+			return config.LoadGatewayConfig(config.ConfigPath())
 		},
-		saveConfig:     saveGatewayConfig,
-		fetchModels:    fetchWopalModels,
-		getAPIKey:      getWopalAPIKey,
-		refreshCatalog: refreshCatalog,
+		saveConfig:     config.SaveGatewayConfig,
+		fetchModels:    catalog.FetchWopalModels,
+		getAPIKey:      keychain.GetWopalAPIKey,
+		refreshCatalog: catalog.RefreshCatalog,
 		out:            os.Stdout,
 	}
 }
@@ -86,7 +90,7 @@ func (runner wopalModelsRunner) runSync() error {
 		return err
 	}
 
-	synced := syncWopalModelConfigs(cfg.WopalAI.Models, available, cfg.WopalAI.ExcludedModels)
+	synced := catalog.SyncWopalModelConfigs(cfg.WopalAI.Models, available, cfg.WopalAI.ExcludedModels)
 	cfg.WopalAI.Models = synced.Models
 	if err := runner.saveConfig(cfg); err != nil {
 		return err
@@ -121,12 +125,12 @@ func (runner wopalModelsRunner) runAdd(args []string) error {
 		return err
 	}
 	if !ok {
-		contextWindow = defaultContextWindow
+		contextWindow = config.DefaultContextWindow
 	}
 	vision := hasFlag(args, "--vision")
 	reasoning := !hasFlag(args, "--no-reasoning")
 
-	added := addWopalModelConfigs(cfg.WopalAI.Models, names, ModelPatch{
+	added := catalog.AddWopalModelConfigs(cfg.WopalAI.Models, names, catalog.ModelPatch{
 		ContextWindow: &contextWindow,
 		Vision:        &vision,
 		Reasoning:     &reasoning,
@@ -182,7 +186,7 @@ func (runner wopalModelsRunner) runSet(args []string) error {
 		return fmt.Errorf("Choose only one of --reasoning or --no-reasoning")
 	}
 
-	var patch ModelPatch
+	var patch catalog.ModelPatch
 	contextWindow, ok, err := numberOption(args, "--context-window")
 	if err != nil {
 		return err
@@ -208,7 +212,7 @@ func (runner wopalModelsRunner) runSet(args []string) error {
 		return fmt.Errorf("models set requires at least one metadata option")
 	}
 
-	updated := updateWopalModelConfigs(cfg.WopalAI.Models, names, patch)
+	updated := catalog.UpdateWopalModelConfigs(cfg.WopalAI.Models, names, patch)
 	if len(updated.Missing) > 0 {
 		return fmt.Errorf("Model(s) not configured: %s. Run models sync or models add first.", strings.Join(updated.Missing, ", "))
 	}
@@ -225,7 +229,7 @@ func (runner wopalModelsRunner) runSet(args []string) error {
 	for _, name := range updated.Updated {
 		model := findExternalModel(updated.Models, name)
 		runner.printf("  wopal-ai/%s: context=%d, vision=%t, reasoning=%t\n",
-			name, model.contextWindow(), model.supportsVision(), model.supportsReasoning())
+			name, model.EffectiveContextWindow(), model.SupportsVision(), model.SupportsReasoning())
 	}
 	runner.printModelCatalog(result)
 	return nil
@@ -246,7 +250,7 @@ func (runner wopalModelsRunner) runRemove(args []string) error {
 		return fmt.Errorf("Usage: wopal-codex-gateway models remove <model...>")
 	}
 
-	removed := removeWopalModelConfigs(cfg.WopalAI.Models, names)
+	removed := catalog.RemoveWopalModelConfigs(cfg.WopalAI.Models, names)
 	cfg.WopalAI.Models = removed.Models
 	cfg.WopalAI.ExcludedModels = appendUniqueModelExclusions(
 		cfg.WopalAI.ExcludedModels,
@@ -274,7 +278,7 @@ func (runner wopalModelsRunner) runRemove(args []string) error {
 	return nil
 }
 
-func (runner wopalModelsRunner) refreshModelCatalog(cfg *GatewayConfig) (*CatalogRefreshResult, error) {
+func (runner wopalModelsRunner) refreshModelCatalog(cfg *config.GatewayConfig) (*catalog.CatalogRefreshResult, error) {
 	result, err := runner.refreshCatalog(cfg)
 	if err != nil {
 		return nil, err
@@ -285,7 +289,7 @@ func (runner wopalModelsRunner) refreshModelCatalog(cfg *GatewayConfig) (*Catalo
 	return result, nil
 }
 
-func (runner wopalModelsRunner) printModelCatalog(result *CatalogRefreshResult) {
+func (runner wopalModelsRunner) printModelCatalog(result *catalog.CatalogRefreshResult) {
 	runner.printf("Model catalog: official-visible=%d, official-internal=%d, wopal-ai=%d\n",
 		result.NativeVisible, result.NativeHidden, result.WopalAI)
 }
@@ -294,13 +298,13 @@ func (runner wopalModelsRunner) printf(format string, args ...any) {
 	_, _ = fmt.Fprintf(runner.out, format, args...)
 }
 
-func findExternalModel(models []ExternalModelConfig, name string) ExternalModelConfig {
+func findExternalModel(models []config.ExternalModelConfig, name string) config.ExternalModelConfig {
 	for _, model := range models {
 		if model.Name == name {
 			return model
 		}
 	}
-	return ExternalModelConfig{Name: name}
+	return config.ExternalModelConfig{Name: name}
 }
 
 func appendUniqueModelExclusions(existing []string, groups ...[]string) []string {

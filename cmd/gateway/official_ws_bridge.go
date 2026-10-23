@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"wopal-codex-gateway/internal/activity"
 )
 
 // Official websocket passthrough stays transparent for native traffic while
@@ -28,12 +29,12 @@ const (
 
 var officialWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
-func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target *url.URL, quotaGuard *officialQuotaGuard, accountID, boundModel string, nativeReplay *nativeCompactionBridge) {
+func serveOfficialWebsocketBridge(c *gin.Context, logger *activity.Logger, target *url.URL, quotaGuard *officialQuotaGuard, accountID, boundModel string, nativeReplay *nativeCompactionBridge) {
 	// Dial upstream before upgrading the client so a failed dial still returns
 	// a clean HTTP error instead of a half-open websocket.
 	upstreamConn, upstreamResponse, err := dialOfficialWebsocketUpstream(c, target)
 	if err != nil {
-		logger.write(map[string]any{"event": "official_ws_dial_failed", "upstream": target.Host, "error": err.Error()})
+		logger.Write(map[string]any{"event": "official_ws_dial_failed", "upstream": target.Host, "error": err.Error()})
 		c.AbortWithStatus(http.StatusBadGateway)
 		return
 	}
@@ -55,13 +56,13 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target
 	}
 	clientConn, err := officialWebsocketUpgrader.Upgrade(c.Writer, c.Request, responseHeader)
 	if err != nil {
-		logger.write(map[string]any{"event": "official_ws_upgrade_failed", "error": err.Error()})
+		logger.Write(map[string]any{"event": "official_ws_upgrade_failed", "error": err.Error()})
 		_ = upstreamConn.Close()
 		return
 	}
 	clientConn.SetReadLimit(officialWebsocketFrameLimit)
 	upstreamConn.SetReadLimit(officialWebsocketFrameLimit)
-	logger.write(map[string]any{
+	logger.Write(map[string]any{
 		"event":       "official_ws_connected",
 		"upstream":    target.Host,
 		"subprotocol": upstreamConn.Subprotocol(),
@@ -85,7 +86,7 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activityLogger, target
 
 // pumpOfficialWebsocket copies frames one direction. Each connection has exactly
 // one reader and one writer goroutine, which websocket.Conn requires.
-func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activityLogger, quotaGuard *officialQuotaGuard, accountID, boundModel string, nativeReplay *nativeCompactionBridge, clientRequest *http.Request, sourceWriteMu, targetWriteMu *sync.Mutex) {
+func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activity.Logger, quotaGuard *officialQuotaGuard, accountID, boundModel string, nativeReplay *nativeCompactionBridge, clientRequest *http.Request, sourceWriteMu, targetWriteMu *sync.Mutex) {
 	defer func() { done <- struct{}{} }()
 	for {
 		messageType, payload, err := source.ReadMessage()
@@ -97,7 +98,7 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 			} else {
 				fields["error"] = err.Error()
 			}
-			logger.write(fields)
+			logger.Write(fields)
 			if closeErr, ok := err.(*websocket.CloseError); ok {
 				_ = writeOfficialWebsocketMessage(target, targetWriteMu, websocket.CloseMessage, websocket.FormatCloseMessage(closeErr.Code, closeErr.Text))
 			}
@@ -114,7 +115,7 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 				// makes Codex resend the full input, including the trigger, before
 				// we generate a summary. Never summarize only an incremental tail.
 				if previousResponseID(message) != "" {
-					logger.write(map[string]any{"event": "official_compaction_replay_required", "transport": "websocket"})
+					logger.Write(map[string]any{"event": "official_compaction_replay_required", "transport": "websocket"})
 					sourceWriteMu.Lock()
 					_ = source.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(
 						websocket.CloseServiceRestart, "compaction requires full conversation input; reconnect and resend",
@@ -122,13 +123,13 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 					sourceWriteMu.Unlock()
 					return
 				}
-				logger.write(map[string]any{"event": "official_compaction_intercepted", "compaction_model": dedicatedWopalCompactionModel, "transport": "websocket"})
+				logger.Write(map[string]any{"event": "official_compaction_intercepted", "compaction_model": dedicatedWopalCompactionModel, "transport": "websocket"})
 				runOfficialWebsocketCompaction(source, sourceWriteMu, logger, nativeReplay, clientRequest, message)
 				continue
 			}
 			if model, ok := officialInferenceModel(payload, boundModel); ok {
 				if blocked, reason := quotaGuard.blockedModel(accountID, model, time.Now()); blocked {
-					logger.write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "model": model, "reason": reason, "action": "failover", "effective_model": officialQuotaFailoverModel})
+					logger.Write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "model": model, "reason": reason, "action": "failover", "effective_model": officialQuotaFailoverModel})
 					sourceWriteMu.Lock()
 					_ = source.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(
 						websocket.CloseServiceRestart, "official quota reserve protected; reconnect for automatic Wopal failover",
@@ -177,7 +178,7 @@ func officialCompactionTriggerMessage(payload []byte) (map[string]any, bool) {
 	return message, true
 }
 
-func runOfficialWebsocketCompaction(client *websocket.Conn, clientWriteMu *sync.Mutex, logger *activityLogger, nativeReplay *nativeCompactionBridge, original *http.Request, message map[string]any) {
+func runOfficialWebsocketCompaction(client *websocket.Conn, clientWriteMu *sync.Mutex, logger *activity.Logger, nativeReplay *nativeCompactionBridge, original *http.Request, message map[string]any) {
 	if original == nil {
 		return
 	}
@@ -204,7 +205,7 @@ func sanitizeOfficialWebsocketFrame(payload []byte) ([]byte, bool) {
 	return sanitizeOfficialWebsocketFrameLogged(payload, nil)
 }
 
-func sanitizeOfficialWebsocketFrameLogged(payload []byte, logger *activityLogger) ([]byte, bool) {
+func sanitizeOfficialWebsocketFrameLogged(payload []byte, logger *activity.Logger) ([]byte, bool) {
 	var message map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()
@@ -238,7 +239,7 @@ func sanitizeOfficialWebsocketFrameLogged(payload []byte, logger *activityLogger
 		loggerFields["item_types"] = itemTypes
 	}
 	if logger != nil {
-		logger.write(loggerFields)
+		logger.Write(loggerFields)
 	}
 	rewritten, err := json.Marshal(message)
 	if err != nil {

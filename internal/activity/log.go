@@ -1,4 +1,4 @@
-package main
+package activity
 
 import (
 	"encoding/json"
@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
+	"wopal-codex-gateway/internal/config"
 )
 
 // Log rotation retention. Size and backup counts come from runtime config so a
@@ -18,9 +19,9 @@ const (
 	compressLogRot = true
 )
 
-// newRotatingWriter returns a size and age bounded writer for one log file.
+// NewRotatingWriter returns a size and age bounded writer for one log file.
 // lumberjack is safe for concurrent use, so no external mutex is needed.
-func newRotatingWriter(path string, cfg logsConfig) io.WriteCloser {
+func NewRotatingWriter(path string, cfg config.Logs) io.WriteCloser {
 	cfg = normalizeLogsConfig(cfg)
 	return &lumberjack.Logger{
 		Filename:   path,
@@ -32,38 +33,32 @@ func newRotatingWriter(path string, cfg logsConfig) io.WriteCloser {
 	}
 }
 
-func normalizeLogsConfig(cfg logsConfig) logsConfig {
+func normalizeLogsConfig(cfg config.Logs) config.Logs {
 	if cfg.MaxSizeMB <= 0 {
-		cfg.MaxSizeMB = defaultLogMaxSizeMB
+		cfg.MaxSizeMB = config.DefaultLogMaxSizeMB
 	}
 	if cfg.MaxBackups <= 0 {
-		cfg.MaxBackups = defaultLogMaxBackups
+		cfg.MaxBackups = config.DefaultLogMaxBackups
 	}
 	return cfg
 }
 
-type activityLogger struct {
+type Logger struct {
 	path string
 	mu   sync.Mutex
 	out  io.WriteCloser
 }
 
-// The optional config keeps existing in-package callers that already receive
-// parser-filled defaults source-compatible while the daemon passes its config.
-func newActivityLogger(root string, cfgs ...logsConfig) (*activityLogger, error) {
-	cfg := logsConfig{}
-	if len(cfgs) > 0 {
-		cfg = cfgs[0]
-	}
-	logsDir := filepath.Join(root, "logs")
+// New opens the activity log inside logsDir, creating the directory first.
+func New(logsDir string, cfg config.Logs) (*Logger, error) {
 	if err := os.MkdirAll(logsDir, 0o755); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(logsDir, "gateway.log")
-	return &activityLogger{path: path, out: newRotatingWriter(path, cfg)}, nil
+	return &Logger{path: path, out: NewRotatingWriter(path, cfg)}, nil
 }
 
-func (l *activityLogger) write(fields map[string]any) {
+func (l *Logger) Write(fields map[string]any) {
 	if l == nil {
 		return
 	}
@@ -84,7 +79,7 @@ func (l *activityLogger) write(fields map[string]any) {
 	_, _ = l.out.Write(append(payload, '\n'))
 }
 
-func (l *activityLogger) close() {
+func (l *Logger) Close() {
 	if l == nil {
 		return
 	}

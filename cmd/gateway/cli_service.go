@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/launchd"
 )
 
 // runServiceCommand implements the LaunchAgent lifecycle. The launchd calls and
@@ -29,26 +32,26 @@ func runServiceCommand(subcommand string, args []string) error {
 
 func serviceInstall() error {
 	// Fail before touching launchd when the install cannot possibly run.
-	if _, err := loadInstallConfig(); err != nil {
+	if _, err := config.LoadInstallConfig(); err != nil {
 		return err
 	}
-	if err := requireGatewayBinary(); err != nil {
+	if err := launchd.RequireGatewayBinary(); err != nil {
 		return err
 	}
-	if err := installLaunchAgent(); err != nil {
+	if err := launchd.InstallLaunchAgent(); err != nil {
 		return err
 	}
 	host, port := serviceListenAddress()
-	if err := waitForHealth(host, port); err != nil {
-		return fmt.Errorf("proxy health check failed: %w; check %s and %s", err, serviceLogPath(), serviceErrorLogPath())
+	if err := launchd.WaitForHealth(host, port); err != nil {
+		return fmt.Errorf("proxy health check failed: %w; check %s and %s", err, config.ServiceLogPath(), config.ServiceErrorLogPath())
 	}
 	fmt.Println("LaunchAgent installed and proxy started.")
-	fmt.Printf("Proxy service is healthy: %s\n", healthURL(host, port))
+	fmt.Printf("Proxy service is healthy: %s\n", launchd.HealthURL(host, port))
 	return nil
 }
 
 func serviceUninstall() error {
-	if err := uninstallLaunchAgent(); err != nil {
+	if err := launchd.UninstallLaunchAgent(); err != nil {
 		return err
 	}
 	fmt.Println("LaunchAgent unloaded and removed.")
@@ -60,11 +63,11 @@ func serviceStart() error {
 		return err
 	}
 	if serviceLoaded() {
-		if err := runLaunchctl("kickstart", "-k", launchAgentTarget()); err != nil {
-			return fmt.Errorf("launchctl kickstart %s failed: %w", launchAgentTarget(), err)
+		if err := launchd.RunLaunchctl("kickstart", "-k", launchd.LaunchAgentTarget()); err != nil {
+			return fmt.Errorf("launchctl kickstart %s failed: %w", launchd.LaunchAgentTarget(), err)
 		}
-	} else if err := runLaunchctl("bootstrap", launchdDomain(), launchAgentPath()); err != nil {
-		return fmt.Errorf("launchctl bootstrap %s failed: %w", launchAgentPath(), err)
+	} else if err := launchd.RunLaunchctl("bootstrap", launchd.LaunchdDomain(), config.LaunchAgentPath()); err != nil {
+		return fmt.Errorf("launchctl bootstrap %s failed: %w", config.LaunchAgentPath(), err)
 	}
 	return reportServiceRunning()
 }
@@ -73,16 +76,16 @@ func serviceRestart() error {
 	if err := requireInstalledLaunchAgent(); err != nil {
 		return err
 	}
-	if err := runLaunchctl("kickstart", "-k", launchAgentTarget()); err != nil {
-		return fmt.Errorf("launchctl kickstart %s failed: %w", launchAgentTarget(), err)
+	if err := launchd.RunLaunchctl("kickstart", "-k", launchd.LaunchAgentTarget()); err != nil {
+		return fmt.Errorf("launchctl kickstart %s failed: %w", launchd.LaunchAgentTarget(), err)
 	}
 	return reportServiceRunning()
 }
 
 func serviceStop() error {
 	if serviceLoaded() {
-		if err := runLaunchctl("bootout", launchAgentTarget()); err != nil {
-			return fmt.Errorf("launchctl bootout %s failed: %w", launchAgentTarget(), err)
+		if err := launchd.RunLaunchctl("bootout", launchd.LaunchAgentTarget()); err != nil {
+			return fmt.Errorf("launchctl bootout %s failed: %w", launchd.LaunchAgentTarget(), err)
 		}
 	}
 	fmt.Println("Proxy stopped.")
@@ -93,49 +96,49 @@ func serviceStatus() error {
 	installed := launchAgentPlistExists()
 	loaded := serviceLoaded()
 	host, port := serviceListenAddress()
-	healthy := probeHealth(healthURL(host, port), statusHealthTimeout) == nil
+	healthy := launchd.ProbeHealth(launchd.HealthURL(host, port), launchd.StatusHealthTimeout) == nil
 
 	state := fmt.Sprintf("installed=%s loaded=%s healthy=%s", yesNo(installed), yesNo(loaded), yesNo(healthy))
 	fmt.Println(state)
 	if installed && loaded && healthy {
 		return nil
 	}
-	return fmt.Errorf("proxy service is not ready (%s); check %s and %s", state, serviceLogPath(), serviceErrorLogPath())
+	return fmt.Errorf("proxy service is not ready (%s); check %s and %s", state, config.ServiceLogPath(), config.ServiceErrorLogPath())
 }
 
 func reportServiceRunning() error {
 	host, port := serviceListenAddress()
-	if err := waitForHealth(host, port); err != nil {
-		return fmt.Errorf("proxy health check failed: %w; check %s and %s", err, serviceLogPath(), serviceErrorLogPath())
+	if err := launchd.WaitForHealth(host, port); err != nil {
+		return fmt.Errorf("proxy health check failed: %w; check %s and %s", err, config.ServiceLogPath(), config.ServiceErrorLogPath())
 	}
-	fmt.Printf("Proxy running: %s\n", healthURL(host, port))
+	fmt.Printf("Proxy running: %s\n", launchd.HealthURL(host, port))
 	return nil
 }
 
 // serviceListenAddress reads the configured listen address, falling back to the
 // documented default when the config is unreadable.
 func serviceListenAddress() (string, int) {
-	config, err := loadGatewayConfig(configPath())
+	gatewayConfig, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
-		return defaultListenHost, defaultListenPort
+		return config.DefaultListenHost, config.DefaultListenPort
 	}
-	host := strings.TrimSpace(config.Listen.Host)
+	host := strings.TrimSpace(gatewayConfig.Listen.Host)
 	if host == "" {
-		host = defaultListenHost
+		host = config.DefaultListenHost
 	}
-	port := config.Listen.Port
+	port := gatewayConfig.Listen.Port
 	if port == 0 {
-		port = defaultListenPort
+		port = config.DefaultListenPort
 	}
 	return host, port
 }
 
 func serviceLoaded() bool {
-	return runLaunchctl("print", launchAgentTarget()) == nil
+	return launchd.RunLaunchctl("print", launchd.LaunchAgentTarget()) == nil
 }
 
 func launchAgentPlistExists() bool {
-	_, err := os.Stat(launchAgentPath())
+	_, err := os.Stat(config.LaunchAgentPath())
 	return err == nil
 }
 

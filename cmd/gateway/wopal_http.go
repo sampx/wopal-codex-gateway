@@ -11,11 +11,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"wopal-codex-gateway/internal/activity"
 )
 
 // HTTP fallback must restore the same compacted history as the websocket path.
 // Returns false when this function has handled the request (including errors).
-func prepareWopalHTTP(c *gin.Context, logger *activityLogger, model string, nativeReplay *nativeCompactionBridge) bool {
+func prepareWopalHTTP(c *gin.Context, logger *activity.Logger, model string, nativeReplay *nativeCompactionBridge) bool {
 	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, maxRoutingBodyBytes+1))
 	if err == nil && len(raw) > maxRoutingBodyBytes {
 		err = fmt.Errorf("request exceeds routing limit")

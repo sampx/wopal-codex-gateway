@@ -1,4 +1,4 @@
-package main
+package codex
 
 import (
 	"bytes"
@@ -8,35 +8,40 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"wopal-codex-gateway/internal/catalog"
+	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/keychain"
+	"wopal-codex-gateway/internal/launchd"
 )
 
-// installIntoCodex points Codex at the gateway and records the pre-install state.
-func installIntoCodex(cfg *GatewayConfig) (*CatalogRefreshResult, error) {
+// InstallIntoCodex points Codex at the gateway and records the pre-install state.
+func InstallIntoCodex(cfg *config.GatewayConfig) (*catalog.CatalogRefreshResult, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("gateway configuration is missing")
 	}
 	if strings.TrimSpace(cfg.WopalAI.BaseURL) == "" {
 		return nil, fmt.Errorf("Wopal AI base URL is not configured. Run: wopal-codex-gateway config wopal --base-url <url>")
 	}
-	if !hasWopalAPIKey() {
+	if !keychain.HasWopalAPIKey() {
 		return nil, fmt.Errorf("Wopal AI API key is not configured. Run: wopal-codex-gateway auth set")
 	}
 
-	refresh, err := refreshCatalog(cfg)
+	refresh, err := catalog.RefreshCatalog(cfg)
 	if err != nil {
 		return nil, err
 	}
-	if err := requireGatewayBinary(); err != nil {
+	if err := launchd.RequireGatewayBinary(); err != nil {
 		return nil, err
 	}
-	if err := installLaunchAgent(); err != nil {
+	if err := launchd.InstallLaunchAgent(); err != nil {
 		return nil, err
 	}
-	if err := waitForHealth(cfg.Listen.Host, cfg.Listen.Port); err != nil {
+	if err := launchd.WaitForHealth(cfg.Listen.Host, cfg.Listen.Port); err != nil {
 		return nil, err
 	}
 
-	configFile := codexConfigPath()
+	configFile := config.CodexConfigPath()
 	currentText, err := readCodexFile(configFile)
 	if err != nil {
 		return nil, err
@@ -44,7 +49,7 @@ func installIntoCodex(cfg *GatewayConfig) (*CatalogRefreshResult, error) {
 	gatewayBaseURL := fmt.Sprintf("http://%s:%d/v1", cfg.Listen.Host, cfg.Listen.Port)
 	currentState := captureRestoreState(currentText)
 	alreadyManaged := currentState.OpenAIBaseURL.Value == gatewayBaseURL &&
-		currentState.ModelCatalogJSON.Value == codexGatewayCatalogPath()
+		currentState.ModelCatalogJSON.Value == config.CodexGatewayCatalogPath()
 
 	if !alreadyManaged {
 		if err := writeCodexRestoreState(currentState); err != nil {
@@ -73,24 +78,24 @@ func installIntoCodex(cfg *GatewayConfig) (*CatalogRefreshResult, error) {
 		}
 	}
 
-	nextText := applyGatewayConfig(currentText, codexGatewayCatalogPath(), gatewayBaseURL)
+	nextText := applyGatewayConfig(currentText, config.CodexGatewayCatalogPath(), gatewayBaseURL)
 	if err := writeCodexFileAtomic(configFile, nextText); err != nil {
 		return nil, err
 	}
 	return refresh, nil
 }
 
-// restoreCodex undoes `codex install` and stops the gateway service.
-func restoreCodex() error {
+// RestoreCodex undoes `codex install` and stops the gateway service.
+func RestoreCodex() error {
 	state, found, err := readCodexRestoreState()
 	if err != nil {
 		return err
 	}
 	if !found {
-		return fmt.Errorf("codex gateway is not installed: restore state not found at %s; run: wopal-codex-gateway codex install", restoreStatePath())
+		return fmt.Errorf("codex gateway is not installed: restore state not found at %s; run: wopal-codex-gateway codex install", config.RestoreStatePath())
 	}
 
-	configFile := codexConfigPath()
+	configFile := config.CodexConfigPath()
 	currentText, err := readCodexFile(configFile)
 	if err != nil {
 		return err
@@ -98,20 +103,20 @@ func restoreCodex() error {
 	if err := writeCodexFileAtomic(configFile, restoreGatewayConfig(currentText, state)); err != nil {
 		return err
 	}
-	if err := uninstallLaunchAgent(); err != nil {
+	if err := launchd.UninstallLaunchAgent(); err != nil {
 		return err
 	}
-	if err := removeCodexFileIfExists(restoreStatePath()); err != nil {
+	if err := removeCodexFileIfExists(config.RestoreStatePath()); err != nil {
 		return err
 	}
-	if err := removeCodexFileIfExists(codexGatewayCatalogPath()); err != nil {
+	if err := removeCodexFileIfExists(config.CodexGatewayCatalogPath()); err != nil {
 		return err
 	}
 	return nil
 }
 
 func readCodexRestoreState() (CodexRestoreState, bool, error) {
-	data, err := os.ReadFile(restoreStatePath())
+	data, err := os.ReadFile(config.RestoreStatePath())
 	if errors.Is(err, os.ErrNotExist) {
 		return CodexRestoreState{}, false, nil
 	}
@@ -120,7 +125,7 @@ func readCodexRestoreState() (CodexRestoreState, bool, error) {
 	}
 	var state CodexRestoreState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return CodexRestoreState{}, false, fmt.Errorf("parse codex restore state %s: %w", restoreStatePath(), err)
+		return CodexRestoreState{}, false, fmt.Errorf("parse codex restore state %s: %w", config.RestoreStatePath(), err)
 	}
 	return state, true, nil
 }
@@ -130,7 +135,7 @@ func writeCodexRestoreState(state CodexRestoreState) error {
 	if err != nil {
 		return fmt.Errorf("encode codex restore state: %w", err)
 	}
-	return writeCodexFileAtomic(restoreStatePath(), string(append(data, '\n')))
+	return writeCodexFileAtomic(config.RestoreStatePath(), string(append(data, '\n')))
 }
 
 func readCodexFile(path string) (string, error) {

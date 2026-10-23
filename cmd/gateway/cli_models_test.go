@@ -5,24 +5,27 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"wopal-codex-gateway/internal/catalog"
+	"wopal-codex-gateway/internal/config"
 )
 
 type modelsCommandFixture struct {
-	config        *GatewayConfig
+	config        *config.GatewayConfig
 	available     []string
-	refreshResult CatalogRefreshResult
+	refreshResult catalog.CatalogRefreshResult
 	output        bytes.Buffer
-	saved         []*GatewayConfig
+	saved         []*config.GatewayConfig
 	fetchedURL    string
 	fetchedKey    string
 	fetchCalls    int
 	refreshCalls  int
 }
 
-func newModelsCommandFixture(config *GatewayConfig) *modelsCommandFixture {
+func newModelsCommandFixture(config *config.GatewayConfig) *modelsCommandFixture {
 	return &modelsCommandFixture{
 		config: config,
-		refreshResult: CatalogRefreshResult{
+		refreshResult: catalog.CatalogRefreshResult{
 			Native:        20,
 			NativeVisible: 12,
 			NativeHidden:  8,
@@ -33,10 +36,10 @@ func newModelsCommandFixture(config *GatewayConfig) *modelsCommandFixture {
 
 func (fixture *modelsCommandFixture) runner() wopalModelsRunner {
 	return wopalModelsRunner{
-		loadConfig: func() (*GatewayConfig, error) {
+		loadConfig: func() (*config.GatewayConfig, error) {
 			return fixture.config, nil
 		},
-		saveConfig: func(cfg *GatewayConfig) error {
+		saveConfig: func(cfg *config.GatewayConfig) error {
 			fixture.saved = append(fixture.saved, cfg)
 			return nil
 		},
@@ -49,7 +52,7 @@ func (fixture *modelsCommandFixture) runner() wopalModelsRunner {
 		getAPIKey: func() (string, error) {
 			return "test-key", nil
 		},
-		refreshCatalog: func(*GatewayConfig) (*CatalogRefreshResult, error) {
+		refreshCatalog: func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error) {
 			fixture.refreshCalls++
 			result := fixture.refreshResult
 			return &result, nil
@@ -59,9 +62,9 @@ func (fixture *modelsCommandFixture) runner() wopalModelsRunner {
 }
 
 func TestModelsCommandListPrintsOneModelPerLine(t *testing.T) {
-	config := defaultGatewayConfig()
-	config.WopalAI.BaseURL = "https://wopal.example/v1"
-	fixture := newModelsCommandFixture(config)
+	gatewayCfg := config.DefaultGatewayConfig()
+	gatewayCfg.WopalAI.BaseURL = "https://wopal.example/v1"
+	fixture := newModelsCommandFixture(gatewayCfg)
 	fixture.available = []string{"glm-5.3", "kimi-k3"}
 
 	if err := fixture.runner().run("list", nil); err != nil {
@@ -71,8 +74,8 @@ func TestModelsCommandListPrintsOneModelPerLine(t *testing.T) {
 	if got, want := fixture.output.String(), "glm-5.3\nkimi-k3\n"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
-	if fixture.fetchedURL != config.WopalAI.BaseURL {
-		t.Fatalf("fetched base URL = %q, want %q", fixture.fetchedURL, config.WopalAI.BaseURL)
+	if fixture.fetchedURL != gatewayCfg.WopalAI.BaseURL {
+		t.Fatalf("fetched base URL = %q, want %q", fixture.fetchedURL, gatewayCfg.WopalAI.BaseURL)
 	}
 	if fixture.fetchedKey != "test-key" {
 		t.Fatalf("fetched API key = %q, want test-key", fixture.fetchedKey)
@@ -80,16 +83,16 @@ func TestModelsCommandListPrintsOneModelPerLine(t *testing.T) {
 }
 
 func TestModelsCommandSyncImportsModelsAndPrintsCatalogLast(t *testing.T) {
-	config := defaultGatewayConfig()
-	config.WopalAI.BaseURL = "https://wopal.example/v1"
-	config.WopalAI.Models = []ExternalModelConfig{{
+	gatewayCfg := config.DefaultGatewayConfig()
+	gatewayCfg.WopalAI.BaseURL = "https://wopal.example/v1"
+	gatewayCfg.WopalAI.Models = []config.ExternalModelConfig{{
 		Name:          "existing",
 		ContextWindow: modelsIntPtr(524288),
 		Vision:        modelsBoolPtr(true),
 		Reasoning:     modelsBoolPtr(false),
 	}}
-	config.WopalAI.ExcludedModels = []string{"drop-me"}
-	fixture := newModelsCommandFixture(config)
+	gatewayCfg.WopalAI.ExcludedModels = []string{"drop-me"}
+	fixture := newModelsCommandFixture(gatewayCfg)
 	fixture.available = []string{"existing", "new-model", "embed-demo", "drop-me", "new-model"}
 	fixture.refreshResult.WopalAI = 2
 
@@ -111,16 +114,16 @@ func TestModelsCommandSyncImportsModelsAndPrintsCatalogLast(t *testing.T) {
 	if fixture.refreshCalls != 1 {
 		t.Fatalf("refresh calls = %d, want 1", fixture.refreshCalls)
 	}
-	if got, want := namesOfModels(config.WopalAI.Models), []string{"existing", "new-model"}; !reflect.DeepEqual(got, want) {
+	if got, want := namesOfModels(gatewayCfg.WopalAI.Models), []string{"existing", "new-model"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("saved model names = %#v, want %#v", got, want)
 	}
-	if got := config.WopalAI.Models[0]; got.contextWindow() != 524288 || !got.supportsVision() || got.supportsReasoning() {
+	if got := gatewayCfg.WopalAI.Models[0]; got.EffectiveContextWindow() != 524288 || !got.SupportsVision() || got.SupportsReasoning() {
 		t.Fatalf("existing metadata was not preserved: %#v", got)
 	}
 }
 
 func TestModelsCommandSyncRequiresBaseURL(t *testing.T) {
-	fixture := newModelsCommandFixture(defaultGatewayConfig())
+	fixture := newModelsCommandFixture(config.DefaultGatewayConfig())
 
 	err := fixture.runner().run("sync", nil)
 	if err == nil || err.Error() != "Wopal AI base URL is not configured" {
@@ -132,15 +135,15 @@ func TestModelsCommandSyncRequiresBaseURL(t *testing.T) {
 }
 
 func TestModelsCommandAddUsesDefaultsAndUnexcludesNames(t *testing.T) {
-	config := defaultGatewayConfig()
-	config.WopalAI.Models = []ExternalModelConfig{{
+	gatewayCfg := config.DefaultGatewayConfig()
+	gatewayCfg.WopalAI.Models = []config.ExternalModelConfig{{
 		Name:          "existing",
 		ContextWindow: modelsIntPtr(100000),
 		Vision:        modelsBoolPtr(false),
 		Reasoning:     modelsBoolPtr(false),
 	}}
-	config.WopalAI.ExcludedModels = []string{"existing", "new-model", "keep-excluded"}
-	fixture := newModelsCommandFixture(config)
+	gatewayCfg.WopalAI.ExcludedModels = []string{"existing", "new-model", "keep-excluded"}
+	fixture := newModelsCommandFixture(gatewayCfg)
 	fixture.refreshResult.WopalAI = 2
 
 	args := []string{"wopal-ai/new-model", "existing", "--context-window", "8192", "--vision", "--no-reasoning"}
@@ -155,18 +158,18 @@ func TestModelsCommandAddUsesDefaultsAndUnexcludesNames(t *testing.T) {
 	if got := fixture.output.String(); got != wantOutput {
 		t.Fatalf("output = %q, want %q", got, wantOutput)
 	}
-	if got, want := namesOfModels(config.WopalAI.Models), []string{"existing", "new-model"}; !reflect.DeepEqual(got, want) {
+	if got, want := namesOfModels(gatewayCfg.WopalAI.Models), []string{"existing", "new-model"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("model names = %#v, want %#v", got, want)
 	}
-	added := config.WopalAI.Models[1]
-	if added.contextWindow() != 8192 || !added.supportsVision() || added.supportsReasoning() {
+	added := gatewayCfg.WopalAI.Models[1]
+	if added.EffectiveContextWindow() != 8192 || !added.SupportsVision() || added.SupportsReasoning() {
 		t.Fatalf("added model metadata = %#v", added)
 	}
-	if got, want := config.WopalAI.ExcludedModels, []string{"keep-excluded"}; !reflect.DeepEqual(got, want) {
+	if got, want := gatewayCfg.WopalAI.ExcludedModels, []string{"keep-excluded"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("excluded models = %#v, want %#v", got, want)
 	}
-	if config.WopalAI.Models[0].contextWindow() != 100000 || config.WopalAI.Models[0].supportsReasoning() {
-		t.Fatalf("existing model was changed: %#v", config.WopalAI.Models[0])
+	if gatewayCfg.WopalAI.Models[0].EffectiveContextWindow() != 100000 || gatewayCfg.WopalAI.Models[0].SupportsReasoning() {
+		t.Fatalf("existing model was changed: %#v", gatewayCfg.WopalAI.Models[0])
 	}
 }
 
@@ -209,8 +212,8 @@ func TestModelsCommandSetErrors(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			config := defaultGatewayConfig()
-			fixture := newModelsCommandFixture(config)
+			gatewayCfg := config.DefaultGatewayConfig()
+			fixture := newModelsCommandFixture(gatewayCfg)
 
 			err := fixture.runner().run("set", test.args)
 			if err == nil || err.Error() != test.wantErr {
@@ -227,12 +230,12 @@ func TestModelsCommandSetErrors(t *testing.T) {
 }
 
 func TestModelsCommandSetUpdatesRequestedMetadata(t *testing.T) {
-	config := defaultGatewayConfig()
-	config.WopalAI.Models = []ExternalModelConfig{
+	gatewayCfg := config.DefaultGatewayConfig()
+	gatewayCfg.WopalAI.Models = []config.ExternalModelConfig{
 		{Name: "alpha", ContextWindow: modelsIntPtr(262144), Vision: modelsBoolPtr(false), Reasoning: modelsBoolPtr(false)},
 		{Name: "beta", ContextWindow: modelsIntPtr(131072), Vision: modelsBoolPtr(true), Reasoning: modelsBoolPtr(true)},
 	}
-	fixture := newModelsCommandFixture(config)
+	fixture := newModelsCommandFixture(gatewayCfg)
 
 	args := []string{"wopal-ai/alpha", "--context-window", "524288", "--no-vision", "--reasoning"}
 	if err := fixture.runner().run("set", args); err != nil {
@@ -246,21 +249,21 @@ func TestModelsCommandSetUpdatesRequestedMetadata(t *testing.T) {
 	if got := fixture.output.String(); got != wantOutput {
 		t.Fatalf("output = %q, want %q", got, wantOutput)
 	}
-	alpha := config.WopalAI.Models[0]
-	if alpha.contextWindow() != 524288 || alpha.supportsVision() || !alpha.supportsReasoning() {
+	alpha := gatewayCfg.WopalAI.Models[0]
+	if alpha.EffectiveContextWindow() != 524288 || alpha.SupportsVision() || !alpha.SupportsReasoning() {
 		t.Fatalf("alpha metadata = %#v", alpha)
 	}
-	beta := config.WopalAI.Models[1]
-	if beta.contextWindow() != 131072 || !beta.supportsVision() || !beta.supportsReasoning() {
+	beta := gatewayCfg.WopalAI.Models[1]
+	if beta.EffectiveContextWindow() != 131072 || !beta.SupportsVision() || !beta.SupportsReasoning() {
 		t.Fatalf("beta metadata was changed: %#v", beta)
 	}
 }
 
 func TestModelsCommandRemoveExcludesRemovedAndMissingNames(t *testing.T) {
-	config := defaultGatewayConfig()
-	config.WopalAI.Models = []ExternalModelConfig{{Name: "alpha"}, {Name: "beta"}}
-	config.WopalAI.ExcludedModels = []string{"existing-exclusion"}
-	fixture := newModelsCommandFixture(config)
+	gatewayCfg := config.DefaultGatewayConfig()
+	gatewayCfg.WopalAI.Models = []config.ExternalModelConfig{{Name: "alpha"}, {Name: "beta"}}
+	gatewayCfg.WopalAI.ExcludedModels = []string{"existing-exclusion"}
+	fixture := newModelsCommandFixture(gatewayCfg)
 
 	args := []string{"wopal-ai/alpha", "missing", "--ignored"}
 	if err := fixture.runner().run("remove", args); err != nil {
@@ -275,17 +278,17 @@ func TestModelsCommandRemoveExcludesRemovedAndMissingNames(t *testing.T) {
 	if got := fixture.output.String(); got != wantOutput {
 		t.Fatalf("output = %q, want %q", got, wantOutput)
 	}
-	if got, want := namesOfModels(config.WopalAI.Models), []string{"beta"}; !reflect.DeepEqual(got, want) {
+	if got, want := namesOfModels(gatewayCfg.WopalAI.Models), []string{"beta"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("model names = %#v, want %#v", got, want)
 	}
-	if got, want := config.WopalAI.ExcludedModels, []string{"existing-exclusion", "alpha", "missing"}; !reflect.DeepEqual(got, want) {
+	if got, want := gatewayCfg.WopalAI.ExcludedModels, []string{"existing-exclusion", "alpha", "missing"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("excluded models = %#v, want %#v", got, want)
 	}
 }
 
 func TestModelsCommandRemoveMissingOnlyPrintsNoRemovalNotice(t *testing.T) {
-	config := defaultGatewayConfig()
-	fixture := newModelsCommandFixture(config)
+	gatewayCfg := config.DefaultGatewayConfig()
+	fixture := newModelsCommandFixture(gatewayCfg)
 
 	if err := fixture.runner().run("remove", []string{"missing"}); err != nil {
 		t.Fatal(err)
@@ -303,7 +306,7 @@ func TestModelsCommandRemoveMissingOnlyPrintsNoRemovalNotice(t *testing.T) {
 }
 
 func TestModelsCommandRemoveRequiresNames(t *testing.T) {
-	fixture := newModelsCommandFixture(defaultGatewayConfig())
+	fixture := newModelsCommandFixture(config.DefaultGatewayConfig())
 	err := fixture.runner().run("remove", []string{"--unknown"})
 	if err == nil || err.Error() != "Usage: wopal-codex-gateway models remove <model...>" {
 		t.Fatalf("error = %v, want remove usage", err)

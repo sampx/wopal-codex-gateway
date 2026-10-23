@@ -15,6 +15,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
+	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/config"
 )
 
 const (
@@ -45,11 +47,11 @@ func classifyModel(model string) routeKind {
 	return routeOfficial
 }
 
-func routingMiddleware(logger *activityLogger) gin.HandlerFunc {
+func routingMiddleware(logger *activity.Logger) gin.HandlerFunc {
 	return routingMiddlewareWithQuotaGuard(logger, newOfficialQuotaGuard(logger))
 }
 
-func routingMiddlewareWithQuotaGuard(logger *activityLogger, quotaGuard *officialQuotaGuard) gin.HandlerFunc {
+func routingMiddlewareWithQuotaGuard(logger *activity.Logger, quotaGuard *officialQuotaGuard) gin.HandlerFunc {
 	return routingMiddlewareWithTargetsAndQuotaGuard(
 		logger,
 		mustURL("https://chatgpt.com/backend-api/codex"),
@@ -58,11 +60,11 @@ func routingMiddlewareWithQuotaGuard(logger *activityLogger, quotaGuard *officia
 	)
 }
 
-func routingMiddlewareWithTargets(logger *activityLogger, chatgptTarget, openaiTarget *url.URL) gin.HandlerFunc {
+func routingMiddlewareWithTargets(logger *activity.Logger, chatgptTarget, openaiTarget *url.URL) gin.HandlerFunc {
 	return routingMiddlewareWithTargetsAndQuotaGuard(logger, chatgptTarget, openaiTarget, newOfficialQuotaGuard(logger))
 }
 
-func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTarget, openaiTarget *url.URL, quotaGuard *officialQuotaGuard) gin.HandlerFunc {
+func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptTarget, openaiTarget *url.URL, quotaGuard *officialQuotaGuard) gin.HandlerFunc {
 	chatgptProxy := newOfficialReverseProxy(chatgptTarget, true, logger, quotaGuard)
 	openaiProxy := newOfficialReverseProxy(openaiTarget, false, logger, quotaGuard)
 	nativeReplay := &nativeCompactionBridge{chatgptTarget: chatgptTarget, openaiTarget: openaiTarget, logger: logger, quotaGuard: quotaGuard}
@@ -74,7 +76,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 			return
 		}
 		if path == "/v1/models" || strings.HasPrefix(path, "/v1/models/") {
-			c.Request.Header.Set("Authorization", "Bearer "+localAccessKey)
+			c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
 			c.Next()
 			return
 		}
@@ -85,19 +87,19 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 
 		model, err := detectRequestModel(c.Request)
 		if err != nil {
-			logger.write(map[string]any{"event": "route_detection_failed", "path": path, "error": err.Error()})
+			logger.Write(map[string]any{"event": "route_detection_failed", "path": path, "error": err.Error()})
 			c.Next()
 			return
 		}
 		if c.Request.Method == http.MethodPost && isGatewayCompactionRequest(c.Request, path) {
-			logger.write(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": dedicatedWopalCompactionModel, "path": path, "purpose": "compaction"})
+			logger.Write(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": dedicatedWopalCompactionModel, "path": path, "purpose": "compaction"})
 			_ = prepareWopalHTTP(c, logger, dedicatedWopalCompactionModel, nativeReplay)
 			return
 		}
 
 		switch classifyModel(model) {
 		case routeWopal:
-			logger.write(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": model, "path": path})
+			logger.Write(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": model, "path": path})
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Set("native_compaction_bridge", nativeReplay)
 				c.Abort()
@@ -107,7 +109,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 			if c.Request.Method == http.MethodPost && !prepareWopalHTTP(c, logger, model, nativeReplay) {
 				return
 			}
-			c.Request.Header.Set("Authorization", "Bearer "+localAccessKey)
+			c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
 			c.Request.Header.Del("ChatGPT-Account-ID")
 			c.Next()
 			return
@@ -121,7 +123,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 				proxy = chatgptProxy
 				target = chatgptTarget
 				if blocked, reason := quotaGuard.blockedModel(accountID, model, time.Now()); blocked {
-					logger.write(map[string]any{"event": "official_quota_failover", "requested_model": model, "effective_model": officialQuotaFailoverModel, "path": path, "reason": reason})
+					logger.Write(map[string]any{"event": "official_quota_failover", "requested_model": model, "effective_model": officialQuotaFailoverModel, "path": path, "reason": reason})
 					if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 						c.Set("native_compaction_bridge", nativeReplay)
 						c.Set("quota_failover_requested_model", model)
@@ -139,7 +141,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 						if !prepareWopalHTTP(c, logger, officialQuotaFailoverModel, nativeReplay) {
 							return
 						}
-						c.Request.Header.Set("Authorization", "Bearer "+localAccessKey)
+						c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
 						c.Request.Header.Del("ChatGPT-Account-ID")
 						c.Next()
 						return
@@ -148,7 +150,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 					return
 				}
 			}
-			logger.write(map[string]any{"event": "route_selected", "provider": provider, "model": model, "path": path})
+			logger.Write(map[string]any{"event": "route_selected", "provider": provider, "model": model, "path": path})
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Abort()
 				serveOfficialWebsocketBridge(c, logger, target, quotaGuard, accountID, model, nativeReplay)
@@ -159,7 +161,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activityLogger, chatgptTa
 			proxy.ServeHTTP(c.Writer, c.Request)
 			return
 		case routeDisabled:
-			logger.write(map[string]any{"event": "route_rejected", "model": model, "path": path, "reason": "unsupported_namespace"})
+			logger.Write(map[string]any{"event": "route_rejected", "model": model, "path": path, "reason": "unsupported_namespace"})
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "model namespace is disabled", "type": "invalid_request_error"}})
 			return
 		default:
@@ -292,7 +294,7 @@ func parseRoutingHintModel(value string) string {
 	return ""
 }
 
-func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activityLogger, quotaGuard *officialQuotaGuard) *httputil.ReverseProxy {
+func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activity.Logger, quotaGuard *officialQuotaGuard) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		FlushInterval: -1,
 		Director: func(req *http.Request) {
@@ -307,7 +309,7 @@ func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activityLogg
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
-			logger.write(map[string]any{"event": "official_upstream_error", "upstream": target.Host, "error": err.Error()})
+			logger.Write(map[string]any{"event": "official_upstream_error", "upstream": target.Host, "error": err.Error()})
 			http.Error(w, "official upstream unavailable", http.StatusBadGateway)
 		},
 	}
@@ -315,7 +317,7 @@ func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activityLogg
 		if chatgpt {
 			quotaGuard.observeHeaders(chatGPTAccountID(resp.Request), resp.Header, time.Now())
 		}
-		logger.write(map[string]any{
+		logger.Write(map[string]any{
 			"event": "official_upstream_connected", "upstream": target.Host,
 			"status": resp.StatusCode, "protocol": resp.Proto, "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
 		})

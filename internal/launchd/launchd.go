@@ -1,4 +1,4 @@
-package main
+package launchd
 
 import (
 	"context"
@@ -11,30 +11,32 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"wopal-codex-gateway/internal/config"
 )
 
 const (
 	// healthRequestTimeout bounds every single probe while waiting for launchd
 	// to start the daemon.
 	healthRequestTimeout = 500 * time.Millisecond
-	// statusHealthTimeout bounds the single probe used by `service status`.
-	statusHealthTimeout = time.Second
+	// StatusHealthTimeout bounds the single probe used by `service status`.
+	StatusHealthTimeout = time.Second
 )
 
-// healthWaitTimeout and healthRetryDelay are variables so tests can exercise
+// HealthWaitTimeout and HealthRetryDelay are variables so tests can exercise
 // the 90s production schedule without actually waiting 90 seconds.
 var (
-	healthWaitTimeout = 90 * time.Second
-	healthRetryDelay  = 250 * time.Millisecond
+	HealthWaitTimeout = 90 * time.Second
+	HealthRetryDelay  = 250 * time.Millisecond
 )
 
-// healthClient performs every health probe. Tests replace it so no test needs a
+// HealthClient performs every health probe. Tests replace it so no test needs a
 // live gateway.
-var healthClient = &http.Client{Timeout: statusHealthTimeout}
+var HealthClient = &http.Client{Timeout: StatusHealthTimeout}
 
-// runLaunchctl is the only place this binary talks to launchd. Tests replace it
+// RunLaunchctl is the only place this binary talks to launchd. Tests replace it
 // so no test can bootstrap, kickstart or bootout a real user job.
-var runLaunchctl = func(args ...string) error {
+var RunLaunchctl = func(args ...string) error {
 	output, err := exec.Command("/bin/launchctl", args...).CombinedOutput()
 	if err == nil {
 		return nil
@@ -65,21 +67,21 @@ func (e *launchctlError) Error() string {
 	return fmt.Sprintf("launchctl failed with exit code %d", e.exitCode)
 }
 
-// launchdDomain is the per-user launchd domain, matching the TypeScript CLI.
-func launchdDomain() string {
+// LaunchdDomain is the per-user launchd domain, matching the TypeScript CLI.
+func LaunchdDomain() string {
 	return fmt.Sprintf("gui/%d", os.Getuid())
 }
 
-// launchAgentTarget is the service target used by print/kickstart calls.
-func launchAgentTarget() string {
-	return launchdDomain() + "/" + launchAgentLabel
+// LaunchAgentTarget is the service target used by print/kickstart calls.
+func LaunchAgentTarget() string {
+	return LaunchdDomain() + "/" + config.LaunchAgentLabel
 }
 
-// requireGatewayBinary makes an install refuse to register a job that launchd
+// RequireGatewayBinary makes an install refuse to register a job that launchd
 // could never start. Without it `service install` would report a launchd
 // success while the daemon is missing.
-func requireGatewayBinary() error {
-	path := gatewayBinaryPath()
+func RequireGatewayBinary() error {
+	path := config.GatewayBinaryPath()
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("gateway binary is missing at %s; build it with: go build -o %s ./cmd/gateway", path, path)
@@ -93,36 +95,36 @@ func requireGatewayBinary() error {
 	return nil
 }
 
-// installLaunchAgent renders the plist, bootstraps it and kickstarts the job.
-func installLaunchAgent() error {
-	root, err := projectRootDir()
+// InstallLaunchAgent renders the plist, bootstraps it and kickstarts the job.
+func InstallLaunchAgent() error {
+	root, err := config.ProjectRootDir()
 	if err != nil {
 		return err
 	}
 
-	agentsDir := filepath.Dir(launchAgentPath())
+	agentsDir := filepath.Dir(config.LaunchAgentPath())
 	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
 		return fmt.Errorf("create LaunchAgents directory: %w", err)
 	}
-	for _, dir := range []string{stateDir(), logsDir()} {
+	for _, dir := range []string{config.StateDir(), config.LogsDir()} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
 
-	template, err := os.ReadFile(launchAgentTemplatePath())
+	template, err := os.ReadFile(config.LaunchAgentTemplatePath())
 	if err != nil {
 		return fmt.Errorf("read LaunchAgent template: %w", err)
 	}
-	plist := renderLaunchAgentPlist(string(template), launchAgentTemplateValues{
-		label:        launchAgentLabel,
-		programPath:  gatewayBinaryPath(),
-		projectRoot:  root,
-		logPath:      serviceLogPath(),
-		errorLogPath: serviceErrorLogPath(),
+	plist := RenderLaunchAgentPlist(string(template), LaunchAgentTemplateValues{
+		Label:        config.LaunchAgentLabel,
+		ProgramPath:  config.GatewayBinaryPath(),
+		ProjectRoot:  root,
+		LogPath:      config.ServiceLogPath(),
+		ErrorLogPath: config.ServiceErrorLogPath(),
 	})
 
-	path := launchAgentPath()
+	path := config.LaunchAgentPath()
 	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
 		return fmt.Errorf("write LaunchAgent plist: %w", err)
 	}
@@ -131,48 +133,48 @@ func installLaunchAgent() error {
 		return fmt.Errorf("set LaunchAgent plist permissions: %w", err)
 	}
 
-	domain := launchdDomain()
+	domain := LaunchdDomain()
 	// A previous job may still be registered; that is expected before install.
-	_ = runLaunchctl("bootout", domain, path)
-	if err := runLaunchctl("bootstrap", domain, path); err != nil {
+	_ = RunLaunchctl("bootout", domain, path)
+	if err := RunLaunchctl("bootstrap", domain, path); err != nil {
 		return fmt.Errorf("launchctl bootstrap %s failed: %w", path, err)
 	}
-	if err := runLaunchctl("kickstart", "-k", launchAgentTarget()); err != nil {
-		return fmt.Errorf("launchctl kickstart %s failed: %w", launchAgentTarget(), err)
+	if err := RunLaunchctl("kickstart", "-k", LaunchAgentTarget()); err != nil {
+		return fmt.Errorf("launchctl kickstart %s failed: %w", LaunchAgentTarget(), err)
 	}
 	return nil
 }
 
-// uninstallLaunchAgent boots the job out and removes the plist.
-func uninstallLaunchAgent() error {
-	path := launchAgentPath()
+// UninstallLaunchAgent boots the job out and removes the plist.
+func UninstallLaunchAgent() error {
+	path := config.LaunchAgentPath()
 	// Not being loaded is fine; the plist still has to be removed.
-	_ = runLaunchctl("bootout", launchdDomain(), path)
+	_ = RunLaunchctl("bootout", LaunchdDomain(), path)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove LaunchAgent plist: %w", err)
 	}
 	return nil
 }
 
-// launchAgentTemplateValues are the placeholder values substituted into the
+// LaunchAgentTemplateValues are the placeholder values substituted into the
 // plist template.
-type launchAgentTemplateValues struct {
-	label        string
-	programPath  string
-	projectRoot  string
-	logPath      string
-	errorLogPath string
+type LaunchAgentTemplateValues struct {
+	Label        string
+	ProgramPath  string
+	ProjectRoot  string
+	LogPath      string
+	ErrorLogPath string
 }
 
-// renderLaunchAgentPlist substitutes every placeholder exactly once and XML
+// RenderLaunchAgentPlist substitutes every placeholder exactly once and XML
 // escapes each value so a path containing & or < cannot break the plist.
-func renderLaunchAgentPlist(template string, values launchAgentTemplateValues) string {
+func RenderLaunchAgentPlist(template string, values LaunchAgentTemplateValues) string {
 	replacer := strings.NewReplacer(
-		"{{LABEL}}", xmlEscape(values.label),
-		"{{PROGRAM_PATH}}", xmlEscape(values.programPath),
-		"{{PROJECT_ROOT}}", xmlEscape(values.projectRoot),
-		"{{LOG_PATH}}", xmlEscape(values.logPath),
-		"{{ERROR_LOG_PATH}}", xmlEscape(values.errorLogPath),
+		"{{LABEL}}", xmlEscape(values.Label),
+		"{{PROGRAM_PATH}}", xmlEscape(values.ProgramPath),
+		"{{PROJECT_ROOT}}", xmlEscape(values.ProjectRoot),
+		"{{LOG_PATH}}", xmlEscape(values.LogPath),
+		"{{ERROR_LOG_PATH}}", xmlEscape(values.ErrorLogPath),
 	)
 	return replacer.Replace(template)
 }
@@ -189,14 +191,14 @@ func xmlEscape(value string) string {
 	return xmlEscaper.Replace(value)
 }
 
-func healthURL(host string, port int) string {
+func HealthURL(host string, port int) string {
 	return fmt.Sprintf("http://%s:%d/_health", host, port)
 }
 
-// waitForHealth blocks until /_health reports a 2xx status or 90s pass.
-func waitForHealth(host string, port int) error {
-	url := healthURL(host, port)
-	deadline := time.Now().Add(healthWaitTimeout)
+// WaitForHealth blocks until /_health reports a 2xx status or 90s pass.
+func WaitForHealth(host string, port int) error {
+	url := HealthURL(host, port)
+	deadline := time.Now().Add(HealthWaitTimeout)
 	var lastErr error
 
 	for {
@@ -208,13 +210,13 @@ func waitForHealth(host string, port int) error {
 		if remaining < requestTimeout {
 			requestTimeout = remaining
 		}
-		if err := probeHealth(url, requestTimeout); err == nil {
+		if err := ProbeHealth(url, requestTimeout); err == nil {
 			return nil
 		} else {
 			lastErr = err
 		}
 
-		pause := healthRetryDelay
+		pause := HealthRetryDelay
 		if left := time.Until(deadline); left < pause {
 			pause = left
 		}
@@ -226,11 +228,11 @@ func waitForHealth(host string, port int) error {
 	if lastErr == nil {
 		lastErr = errors.New("no health request completed")
 	}
-	return fmt.Errorf("gateway service did not become healthy at %s within %dms: %v", url, healthWaitTimeout.Milliseconds(), lastErr)
+	return fmt.Errorf("gateway service did not become healthy at %s within %dms: %v", url, HealthWaitTimeout.Milliseconds(), lastErr)
 }
 
-// probeHealth performs one GET and treats only a 2xx response as healthy.
-func probeHealth(url string, timeout time.Duration) error {
+// ProbeHealth performs one GET and treats only a 2xx response as healthy.
+func ProbeHealth(url string, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = time.Millisecond
 	}
@@ -241,7 +243,7 @@ func probeHealth(url string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("build health request: %w", err)
 	}
-	response, err := healthClient.Do(request)
+	response, err := HealthClient.Do(request)
 	if err != nil {
 		return err
 	}

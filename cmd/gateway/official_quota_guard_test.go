@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"wopal-codex-gateway/internal/config"
 )
 
 func TestOfficialQuotaGuardThresholdsAndReset(t *testing.T) {
@@ -370,7 +371,7 @@ func TestQuotaProtectedOfficialHTTPFallsBackToWopal(t *testing.T) {
 	if gotModel != "wopal-ai/deepseek-v4.1-flash" {
 		t.Fatalf("fallback model = %q", gotModel)
 	}
-	if gotAuth != "Bearer "+localAccessKey || gotAccount != "" {
+	if gotAuth != "Bearer "+config.LocalAccessKey || gotAccount != "" {
 		t.Fatalf("official credentials leaked into fallback: auth=%q account=%q", gotAuth, gotAccount)
 	}
 }

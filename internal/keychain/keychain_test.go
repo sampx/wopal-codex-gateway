@@ -1,4 +1,4 @@
-package main
+package keychain
 
 import (
 	"errors"
@@ -10,22 +10,22 @@ import (
 )
 
 func TestKeychainGetWopalAPIKey(t *testing.T) {
-	original := keychainExec
-	t.Cleanup(func() { keychainExec = original })
+	original := KeychainExec
+	t.Cleanup(func() { KeychainExec = original })
 
 	var gotArgs []string
-	keychainExec = func(args []string, _ io.Reader, stdout, _ io.Writer) error {
+	KeychainExec = func(args []string, _ io.Reader, stdout, _ io.Writer) error {
 		gotArgs = append([]string(nil), args...)
 		_, _ = io.WriteString(stdout, "  test-wopal-key\n")
 		return nil
 	}
 
-	key, err := getWopalAPIKey()
+	key, err := GetWopalAPIKey()
 	if err != nil {
-		t.Fatalf("getWopalAPIKey() error = %v", err)
+		t.Fatalf("GetWopalAPIKey() error = %v", err)
 	}
 	if key != "test-wopal-key" {
-		t.Fatalf("getWopalAPIKey() = %q, want %q", key, "test-wopal-key")
+		t.Fatalf("GetWopalAPIKey() = %q, want %q", key, "test-wopal-key")
 	}
 	wantArgs := []string{"find-generic-password", "-a", "wopal-ai", "-s", "com.wopal.codex-gateway.wopal-ai", "-w"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
@@ -34,8 +34,8 @@ func TestKeychainGetWopalAPIKey(t *testing.T) {
 }
 
 func TestKeychainGetWopalAPIKeyRequiresConfiguredKey(t *testing.T) {
-	original := keychainExec
-	t.Cleanup(func() { keychainExec = original })
+	original := KeychainExec
+	t.Cleanup(func() { KeychainExec = original })
 
 	for _, tc := range []struct {
 		name string
@@ -48,21 +48,21 @@ func TestKeychainGetWopalAPIKeyRequiresConfiguredKey(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			keychainExec = tc.run
-			_, err := getWopalAPIKey()
+			KeychainExec = tc.run
+			_, err := GetWopalAPIKey()
 			if err == nil || err.Error() != "Wopal AI API key is not configured. Run: wopal-codex-gateway auth set" {
-				t.Fatalf("getWopalAPIKey() error = %v", err)
+				t.Fatalf("GetWopalAPIKey() error = %v", err)
 			}
 		})
 	}
 }
 
 func TestKeychainSetWopalAPIKeyInteractive(t *testing.T) {
-	original := keychainExec
-	t.Cleanup(func() { keychainExec = original })
+	original := KeychainExec
+	t.Cleanup(func() { KeychainExec = original })
 
 	var gotArgs []string
-	keychainExec = func(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	KeychainExec = func(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		gotArgs = append([]string(nil), args...)
 		if stdin != os.Stdin {
 			t.Errorf("stdin was not passed through")
@@ -76,8 +76,8 @@ func TestKeychainSetWopalAPIKeyInteractive(t *testing.T) {
 		return nil
 	}
 
-	if err := setWopalAPIKeyInteractive(); err != nil {
-		t.Fatalf("setWopalAPIKeyInteractive() error = %v", err)
+	if err := SetWopalAPIKeyInteractive(); err != nil {
+		t.Fatalf("SetWopalAPIKeyInteractive() error = %v", err)
 	}
 	wantArgs := []string{"add-generic-password", "-a", "wopal-ai", "-s", "com.wopal.codex-gateway.wopal-ai", "-U", "-w"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
@@ -86,14 +86,14 @@ func TestKeychainSetWopalAPIKeyInteractive(t *testing.T) {
 }
 
 func TestKeychainSetWopalAPIKeyInteractiveReportsFailure(t *testing.T) {
-	original := keychainExec
-	t.Cleanup(func() { keychainExec = original })
+	original := KeychainExec
+	t.Cleanup(func() { KeychainExec = original })
 
-	keychainExec = func([]string, io.Reader, io.Writer, io.Writer) error {
+	KeychainExec = func([]string, io.Reader, io.Writer, io.Writer) error {
 		return errors.New("security failed")
 	}
-	err := setWopalAPIKeyInteractive()
+	err := SetWopalAPIKeyInteractive()
 	if err == nil || !strings.Contains(err.Error(), "security failed") {
-		t.Fatalf("setWopalAPIKeyInteractive() error = %v", err)
+		t.Fatalf("SetWopalAPIKeyInteractive() error = %v", err)
 	}
 }

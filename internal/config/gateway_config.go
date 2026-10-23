@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	defaultListenHost     = "127.0.0.1"
-	defaultListenPort     = 11435
-	defaultContextWindow  = 262144
+	DefaultListenHost     = "127.0.0.1"
+	DefaultListenPort     = 11435
+	DefaultContextWindow  = 262144
 	defaultWopalModelName = "qwen3-coder"
 
 	// gatewayConfigVersion is the only schema version this binary understands.
@@ -19,8 +19,8 @@ const (
 	// effect, so an old or future schema never half-starts a service.
 	gatewayConfigVersion = 1
 
-	defaultLogMaxSizeMB  = 10
-	defaultLogMaxBackups = 5
+	DefaultLogMaxSizeMB  = 10
+	DefaultLogMaxBackups = 5
 )
 
 // ExternalModelConfig is one Wopal AI model entry in runtime/config.json. The
@@ -33,40 +33,40 @@ type ExternalModelConfig struct {
 	Reasoning     *bool  `json:"reasoning,omitempty"`
 }
 
-func (m ExternalModelConfig) contextWindow() int {
+func (m ExternalModelConfig) EffectiveContextWindow() int {
 	if m.ContextWindow == nil || *m.ContextWindow <= 0 {
-		return defaultContextWindow
+		return DefaultContextWindow
 	}
 	return *m.ContextWindow
 }
 
-func (m ExternalModelConfig) supportsVision() bool {
+func (m ExternalModelConfig) SupportsVision() bool {
 	return m.Vision != nil && *m.Vision
 }
 
-// supportsReasoning defaults to true: a model without an explicit flag keeps
+// SupportsReasoning defaults to true: a model without an explicit flag keeps
 // offering the reasoning levels Codex expects.
-func (m ExternalModelConfig) supportsReasoning() bool {
+func (m ExternalModelConfig) SupportsReasoning() bool {
 	return m.Reasoning == nil || *m.Reasoning
 }
 
-type listenConfig struct {
+type ListenConfig struct {
 	Host string `json:"host,omitempty"`
 	Port int    `json:"port,omitempty"`
 }
 
-type wopalAIConfig struct {
+type WopalAIConfig struct {
 	BaseURL        string                `json:"baseUrl,omitempty"`
 	Models         []ExternalModelConfig `json:"models,omitempty"`
 	ExcludedModels []string              `json:"excludedModels,omitempty"`
 }
 
-type logsConfig struct {
+type Logs struct {
 	MaxSizeMB  int `json:"maxSizeMb,omitempty"`
 	MaxBackups int `json:"maxBackups,omitempty"`
 }
 
-type ollamaConfig struct {
+type OllamaConfig struct {
 	Enabled bool   `json:"enabled,omitempty"`
 	BaseURL string `json:"baseUrl,omitempty"`
 }
@@ -76,39 +76,65 @@ type ollamaConfig struct {
 // mean one thing in `config show` and another in `serve`.
 type GatewayConfig struct {
 	Version       int                 `json:"version,omitempty"`
-	Listen        listenConfig        `json:"listen"`
-	WopalAI       wopalAIConfig       `json:"wopalAi"`
-	Notifications notificationsConfig `json:"notifications,omitempty"`
-	Logs          logsConfig          `json:"logs,omitempty"`
-	Ollama        ollamaConfig        `json:"ollama,omitempty"`
+	Listen        ListenConfig        `json:"listen"`
+	WopalAI       WopalAIConfig       `json:"wopalAi"`
+	Notifications NotificationsConfig `json:"notifications,omitempty"`
+	Logs          Logs                `json:"logs,omitempty"`
+	Ollama        OllamaConfig        `json:"ollama,omitempty"`
 }
 
-func defaultGatewayConfig() *GatewayConfig {
-	contextWindow := defaultContextWindow
+// NotificationsConfig is one notifications block in runtime/config.json. It
+// lives beside the rest of the schema so this package imports no internal
+// package of its own.
+type NotificationsConfig struct {
+	Enabled *bool  `json:"enabled"`
+	Sound   string `json:"sound"`
+	Tool    string `json:"tool"`
+}
+
+func (c NotificationsConfig) NotificationsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// NormalizedSound maps the sentinel values onto "no sound flag"; anything else
+// is passed to the notification tool as a macOS sound name.
+func (c NotificationsConfig) NormalizedSound() string {
+	sound := strings.TrimSpace(c.Sound)
+	if sound == "" {
+		return "default"
+	}
+	if strings.EqualFold(sound, "none") || strings.EqualFold(sound, "off") {
+		return ""
+	}
+	return sound
+}
+
+func DefaultGatewayConfig() *GatewayConfig {
+	ContextWindow := DefaultContextWindow
 	reasoning := true
 	return &GatewayConfig{
 		Version: gatewayConfigVersion,
-		Listen:  listenConfig{Host: defaultListenHost, Port: defaultListenPort},
-		WopalAI: wopalAIConfig{
+		Listen:  ListenConfig{Host: DefaultListenHost, Port: DefaultListenPort},
+		WopalAI: WopalAIConfig{
 			Models: []ExternalModelConfig{{
 				Name:          defaultWopalModelName,
-				ContextWindow: &contextWindow,
+				ContextWindow: &ContextWindow,
 				Reasoning:     &reasoning,
 			}},
 			ExcludedModels: []string{},
 		},
-		Logs: logsConfig{MaxSizeMB: defaultLogMaxSizeMB, MaxBackups: defaultLogMaxBackups},
+		Logs: Logs{MaxSizeMB: DefaultLogMaxSizeMB, MaxBackups: DefaultLogMaxBackups},
 	}
 }
 
-// loadGatewayConfig reads runtime/config.json. A missing file yields the default
+// LoadGatewayConfig reads runtime/config.json. A missing file yields the default
 // configuration so first-run commands work, and every other read or parse error
 // is reported instead of being treated as an empty configuration.
-func loadGatewayConfig(path string) (*GatewayConfig, error) {
+func LoadGatewayConfig(path string) (*GatewayConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return defaultGatewayConfig(), nil
+			return DefaultGatewayConfig(), nil
 		}
 		return nil, fmt.Errorf("read gateway config: %w", err)
 	}
@@ -120,13 +146,13 @@ func loadGatewayConfig(path string) (*GatewayConfig, error) {
 	if saved.Version != gatewayConfigVersion {
 		return nil, fmt.Errorf("%s: unsupported gateway config version %d (expected %d)", path, saved.Version, gatewayConfigVersion)
 	}
-	return mergeGatewayConfig(&saved), nil
+	return MergeGatewayConfig(&saved), nil
 }
 
-// mergeGatewayConfig applies defaults to a parsed configuration while keeping
+// MergeGatewayConfig applies defaults to a parsed configuration while keeping
 // every section the CLI does not manage intact across a load/save round trip.
-func mergeGatewayConfig(saved *GatewayConfig) *GatewayConfig {
-	defaults := defaultGatewayConfig()
+func MergeGatewayConfig(saved *GatewayConfig) *GatewayConfig {
+	defaults := DefaultGatewayConfig()
 	merged := *saved
 
 	if strings.TrimSpace(merged.Listen.Host) == "" {
@@ -144,17 +170,17 @@ func mergeGatewayConfig(saved *GatewayConfig) *GatewayConfig {
 		merged.WopalAI.ExcludedModels = []string{}
 	}
 	if merged.Logs.MaxSizeMB <= 0 {
-		merged.Logs.MaxSizeMB = defaultLogMaxSizeMB
+		merged.Logs.MaxSizeMB = DefaultLogMaxSizeMB
 	}
 	if merged.Logs.MaxBackups <= 0 {
-		merged.Logs.MaxBackups = defaultLogMaxBackups
+		merged.Logs.MaxBackups = DefaultLogMaxBackups
 	}
 	return &merged
 }
 
-// validateServeConfig rejects configurations the daemon cannot serve. It runs
+// ValidateServeConfig rejects configurations the daemon cannot serve. It runs
 // before any side effect so a bad file never leaves a half-started service.
-func validateServeConfig(cfg *GatewayConfig) error {
+func ValidateServeConfig(cfg *GatewayConfig) error {
 	if strings.TrimSpace(cfg.WopalAI.BaseURL) == "" {
 		return fmt.Errorf("wopalAi.baseUrl is required")
 	}
@@ -164,25 +190,25 @@ func validateServeConfig(cfg *GatewayConfig) error {
 	return nil
 }
 
-// loadInstallConfig validates the configuration an install depends on before
+// LoadInstallConfig validates the configuration an install depends on before
 // any filesystem or launchd side effect.
-func loadInstallConfig() (*GatewayConfig, error) {
-	cfg, err := loadGatewayConfig(configPath())
+func LoadInstallConfig() (*GatewayConfig, error) {
+	cfg, err := LoadGatewayConfig(ConfigPath())
 	if err != nil {
 		return nil, err
 	}
-	if err := validateServeConfig(cfg); err != nil {
-		return nil, fmt.Errorf("%s: %w", configPath(), err)
+	if err := ValidateServeConfig(cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", ConfigPath(), err)
 	}
 	return cfg, nil
 }
 
-// saveGatewayConfig writes the configuration atomically with 0600 permissions.
-func saveGatewayConfig(cfg *GatewayConfig) error {
+// SaveGatewayConfig writes the configuration atomically with 0600 permissions.
+func SaveGatewayConfig(cfg *GatewayConfig) error {
 	// Every write stamps the current schema version, so a file this binary
 	// produced can never be rejected by the next run.
 	cfg.Version = gatewayConfigVersion
-	path := configPath()
+	path := ConfigPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create runtime directory: %w", err)
 	}

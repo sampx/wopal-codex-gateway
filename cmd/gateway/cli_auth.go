@@ -3,6 +3,10 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"wopal-codex-gateway/internal/catalog"
+	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/keychain"
 )
 
 func runAuthCommand(subcommand string, args []string) error {
@@ -12,7 +16,7 @@ func runAuthCommand(subcommand string, args []string) error {
 	case "test":
 		return runAuthTest()
 	case "status":
-		fmt.Println(authStatusText(hasWopalAPIKey()))
+		fmt.Println(authStatusText(keychain.HasWopalAPIKey()))
 		return nil
 	default:
 		return fmt.Errorf("unknown auth subcommand: %s", subcommand)
@@ -20,7 +24,7 @@ func runAuthCommand(subcommand string, args []string) error {
 }
 
 func runAuthSet() error {
-	if err := setWopalAPIKeyInteractive(); err != nil {
+	if err := keychain.SetWopalAPIKeyInteractive(); err != nil {
 		return err
 	}
 	models, configured, err := validateStoredWopalKey()
@@ -50,18 +54,18 @@ func authStatusText(configured bool) string {
 }
 
 func validateStoredWopalKey() ([]string, []string, error) {
-	cfg, err := loadGatewayConfig(configPath())
+	cfg, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
 		return nil, nil, err
 	}
 	if strings.TrimSpace(cfg.WopalAI.BaseURL) == "" {
 		return nil, nil, fmt.Errorf("Wopal AI base URL is not configured")
 	}
-	key, err := getWopalAPIKey()
+	key, err := keychain.GetWopalAPIKey()
 	if err != nil {
 		return nil, nil, err
 	}
-	models, err := fetchWopalModels(cfg.WopalAI.BaseURL, key)
+	models, err := catalog.FetchWopalModels(cfg.WopalAI.BaseURL, key)
 	if err != nil {
 		return nil, nil, err
 	}

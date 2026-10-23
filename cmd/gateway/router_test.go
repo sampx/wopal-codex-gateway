@@ -13,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
+	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/config"
 )
 
 func TestClassifyModel(t *testing.T) {
@@ -41,11 +43,11 @@ func TestRouteModelNamespaces(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, err := newActivityLogger(t.TempDir(), logsConfig{MaxSizeMB: 1, MaxBackups: 1})
+	logger, err := activity.New(t.TempDir(), config.Logs{MaxSizeMB: 1, MaxBackups: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logger.close()
+	defer logger.Close()
 
 	engine := gin.New()
 	target := mustURL(upstream.URL)
@@ -97,15 +99,15 @@ func TestRouteModelNamespaces(t *testing.T) {
 
 func TestLogRotationKeepsHealthAndStatusRoutes(t *testing.T) {
 	root := t.TempDir()
-	logger, err := newActivityLogger(root, logsConfig{MaxSizeMB: 1, MaxBackups: 1})
+	logger, err := activity.New(filepath.Join(root, "logs"), config.Logs{MaxSizeMB: 1, MaxBackups: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logger.close()
+	defer logger.Close()
 
 	blob := strings.Repeat("x", 600*1024)
-	logger.write(map[string]any{"event": "probe", "payload": blob})
-	logger.write(map[string]any{"event": "probe", "payload": blob})
+	logger.Write(map[string]any{"event": "probe", "payload": blob})
+	logger.Write(map[string]any{"event": "probe", "payload": blob})
 	waitForRotatedLogs(t, filepath.Join(root, "logs"), 1)
 
 	gin.SetMode(gin.TestMode)

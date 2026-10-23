@@ -18,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"wopal-codex-gateway/internal/config"
 )
 
 func TestCmbReasoningSanitizedAcrossTransports(t *testing.T) {
@@ -213,7 +214,7 @@ func TestNativeCompactionModelSwitch(t *testing.T) {
 		if bytes.Contains(raw, []byte("official-ciphertext")) || !bytes.Contains(raw, []byte("ORCHID-7319")) || !bytes.Contains(raw, []byte("continue-user")) {
 			t.Errorf("third-party history not restored: %s", raw)
 		}
-		if c.GetHeader("Authorization") != "Bearer "+localAccessKey || c.GetHeader("ChatGPT-Account-ID") != "" {
+		if c.GetHeader("Authorization") != "Bearer "+config.LocalAccessKey || c.GetHeader("ChatGPT-Account-ID") != "" {
 			t.Error("official credentials leaked to third-party handler")
 		}
 		posts.Add(1)

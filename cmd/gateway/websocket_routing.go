@@ -6,12 +6,13 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"wopal-codex-gateway/internal/activity"
 )
 
 // Codex can reuse a socket after changing models. The handshake binds this
 // gateway socket to one provider and its credentials, so a cross-provider
 // request must be retried on a fresh connection before any upstream sees it.
-func reconnectForWebsocketRouteChange(conn *websocket.Conn, boundRoute routeKind, payload []byte, logger *activityLogger) bool {
+func reconnectForWebsocketRouteChange(conn *websocket.Conn, boundRoute routeKind, payload []byte, logger *activity.Logger) bool {
 	var request struct {
 		Type  string `json:"type"`
 		Model string `json:"model"`
@@ -25,7 +26,7 @@ func reconnectForWebsocketRouteChange(conn *websocket.Conn, boundRoute routeKind
 	if nextRoute == routeUnknown || nextRoute == boundRoute {
 		return false
 	}
-	logger.write(map[string]any{
+	logger.Write(map[string]any{
 		"event": "websocket_route_reconnect", "from": boundRoute, "to": nextRoute, "model": model,
 	})
 	// A transport close makes Codex retire the socket and replay the full input.

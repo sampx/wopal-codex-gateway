@@ -15,6 +15,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/config"
 )
 
 var wopalWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -28,7 +30,7 @@ type wopalWebsocketSession struct {
 	stateMu      sync.Mutex
 	cancel       context.CancelFunc
 	state        wopalConversationState
-	logger       *activityLogger
+	logger       *activity.Logger
 	model        string
 	request      *http.Request
 	nativeReplay *nativeCompactionBridge
@@ -39,10 +41,10 @@ func isWebsocketUpgrade(req *http.Request) bool {
 	return req != nil && strings.EqualFold(strings.TrimSpace(req.Header.Get("Upgrade")), "websocket")
 }
 
-func serveWopalWebsocketBridge(c *gin.Context, logger *activityLogger, model string) {
+func serveWopalWebsocketBridge(c *gin.Context, logger *activity.Logger, model string) {
 	conn, err := wopalWebsocketUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		logger.write(map[string]any{"event": "wopal_ws_upgrade_failed", "model": model, "error": err.Error()})
+		logger.Write(map[string]any{"event": "wopal_ws_upgrade_failed", "model": model, "error": err.Error()})
 		return
 	}
 	s := &wopalWebsocketSession{conn: conn, logger: logger, model: model, request: c.Request.Clone(c.Request.Context())}
@@ -52,10 +54,10 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activityLogger, model str
 	defer func() {
 		s.cancelActive()
 		released := s.releaseState()
-		logger.write(map[string]any{"event": "wopal_ws_state_released", "model": model, "state_bytes": released})
+		logger.Write(map[string]any{"event": "wopal_ws_state_released", "model": model, "state_bytes": released})
 		_ = conn.Close()
 	}()
-	logger.write(map[string]any{"event": "wopal_ws_connected", "model": model})
+	logger.Write(map[string]any{"event": "wopal_ws_connected", "model": model})
 	failoverRequestedModel, _ := c.Get("quota_failover_requested_model")
 	failoverGuardValue, _ := c.Get("quota_failover_guard")
 	failoverGuard, _ := failoverGuardValue.(*officialQuotaGuard)
@@ -74,7 +76,7 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activityLogger, model str
 			} else {
 				fields["error"] = errRead.Error()
 			}
-			logger.write(fields)
+			logger.Write(fields)
 			return
 		}
 		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
@@ -83,7 +85,7 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activityLogger, model str
 		if requestedOfficialModel != "" && failoverGuard != nil {
 			rewritten, failback, changed := rewriteQuotaFailoverWebsocketFrame(payload, failoverGuard, failoverAccountID, requestedOfficialModel, time.Now())
 			if failback {
-				logger.write(map[string]any{"event": "official_quota_failback", "requested_model": requestedOfficialModel, "transport": "websocket"})
+				logger.Write(map[string]any{"event": "official_quota_failback", "requested_model": requestedOfficialModel, "transport": "websocket"})
 				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "official quota recovered; reconnect and resend full input"), time.Now().Add(time.Second))
 				return
 			}
@@ -263,7 +265,7 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 	if input, ok := normalized["input"].([]any); ok {
 		inputItems = len(input)
 	}
-	s.logger.write(map[string]any{
+	s.logger.Write(map[string]any{
 		"event": "turn_started", "turn_id": turnID, "provider": "wopal-ai", "client_model": model,
 		"client_transport": "websocket", "upstream_transport": "http-sse", "input_items": inputItems,
 		"previous_response_id_present": previousResponseID(message) != "",
@@ -275,7 +277,7 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		s.sendError(http.StatusInternalServerError, "gateway_request_failed", err.Error())
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+localAccessKey)
+	req.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	client := &http.Client{}
@@ -284,14 +286,14 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		if ctx.Err() != nil {
 			return
 		}
-		s.logger.write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "error": err.Error(), "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "error": err.Error(), "duration_ms": time.Since(started).Milliseconds()})
 		s.sendError(http.StatusBadGateway, "gateway_upstream_request_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		s.logger.write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "upstream_status": resp.StatusCode, "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "upstream_status": resp.StatusCode, "duration_ms": time.Since(started).Milliseconds()})
 		s.clearActive()
 		s.sendUpstreamError(resp.StatusCode, raw)
 		return
@@ -321,7 +323,7 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 			output, responseID := responseOutputFromRawEvent(data, collectedOutput)
 			if errCommit := s.commitState(prepared.nextRequest, output, responseID, prepared.nextCompactionID); errCommit != nil {
 				released := s.releaseState()
-				s.logger.write(map[string]any{
+				s.logger.Write(map[string]any{
 					"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": "wopal-ai",
 					"error": errCommit.Error(), "released_bytes": released,
 				})
@@ -350,9 +352,9 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		return
 	}
 	if terminalType == "response.completed" {
-		s.logger.write(map[string]any{"event": "turn_completed", "turn_id": turnID, "provider": "wopal-ai", "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_completed", "turn_id": turnID, "provider": "wopal-ai", "duration_ms": time.Since(started).Milliseconds()})
 	} else {
-		s.logger.write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "terminal_event": terminalType, "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "terminal_event": terminalType, "duration_ms": time.Since(started).Milliseconds()})
 	}
 }
 
@@ -378,7 +380,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	if err := s.sendJSON(created); err != nil {
 		return
 	}
-	s.logger.write(map[string]any{
+	s.logger.Write(map[string]any{
 		"event": "compaction_started", "turn_id": turnID, "provider": "wopal-ai", "client_model": compactionModel,
 	})
 
@@ -389,7 +391,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 		s.sendError(http.StatusInternalServerError, "gateway_compaction_request_failed", err.Error())
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+localAccessKey)
+	req.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := (&http.Client{}).Do(req)
@@ -397,7 +399,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 		if ctx.Err() != nil {
 			return
 		}
-		s.logger.write(map[string]any{
+		s.logger.Write(map[string]any{
 			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
 			"error": err.Error(), "duration_ms": time.Since(started).Milliseconds(),
 		})
@@ -408,7 +410,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		s.logger.write(map[string]any{
+		s.logger.Write(map[string]any{
 			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
 			"upstream_status": resp.StatusCode, "duration_ms": time.Since(started).Milliseconds(),
 		})
@@ -459,7 +461,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 		if ctx.Err() != nil {
 			return
 		}
-		s.logger.write(map[string]any{
+		s.logger.Write(map[string]any{
 			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
 			"error": err.Error(), "duration_ms": time.Since(started).Milliseconds(),
 		})
@@ -468,7 +470,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 		return
 	}
 	if !terminal || terminalFailed {
-		s.logger.write(map[string]any{
+		s.logger.Write(map[string]any{
 			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
 			"reason": "summary_generation_incomplete", "duration_ms": time.Since(started).Milliseconds(),
 		})
@@ -479,7 +481,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 
 	summary := extractWopalCompactionSummary(finalOutput, streamedText.String())
 	if err := validateWopalCompactionSummary(summary); err != nil {
-		s.logger.write(map[string]any{
+		s.logger.Write(map[string]any{
 			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
 			"reason": "invalid_summary", "duration_ms": time.Since(started).Milliseconds(),
 		})
@@ -510,7 +512,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	}
 	if err := s.commitState(compactedRequest, []byte("[]"), responseID, compactionID); err != nil {
 		released := s.releaseState()
-		s.logger.write(map[string]any{
+		s.logger.Write(map[string]any{
 			"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": "wopal-ai",
 			"error": err.Error(), "released_bytes": released,
 		})
@@ -543,7 +545,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	if err := s.sendJSON(completed); err != nil {
 		return
 	}
-	s.logger.write(map[string]any{
+	s.logger.Write(map[string]any{
 		"event": "compaction_completed", "turn_id": turnID, "provider": "wopal-ai",
 		"summary_bytes": len(summary), "duration_ms": time.Since(started).Milliseconds(),
 	})

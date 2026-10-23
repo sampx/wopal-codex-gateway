@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/config"
 )
 
 // Only the owning provider can read a native capsule. Convert it once into a
@@ -32,7 +34,7 @@ type nativeCompactionBridge struct {
 	chatgptTarget, openaiTarget *url.URL
 	mu                          sync.Mutex
 	summaries                   map[[32]byte]string
-	logger                      *activityLogger
+	logger                      *activity.Logger
 	quotaGuard                  *officialQuotaGuard
 }
 
@@ -91,14 +93,14 @@ func (b *nativeCompactionBridge) expand(ctx context.Context, req *http.Request, 
 		summary := b.summaries[key]
 		b.mu.Unlock()
 		if summary == "" {
-			b.logger.write(map[string]any{"event": "native_compaction_restore_started"})
+			b.logger.Write(map[string]any{"event": "native_compaction_restore_started"})
 			var err error
 			summary, err = b.summarize(ctx, req, input[:index+1])
 			if err != nil {
-				b.logger.write(map[string]any{"event": "native_compaction_restore_failed", "error": err.Error()})
+				b.logger.Write(map[string]any{"event": "native_compaction_restore_failed", "error": err.Error()})
 				return err
 			}
-			b.logger.write(map[string]any{"event": "native_compaction_restore_completed", "summary_bytes": len(summary)})
+			b.logger.Write(map[string]any{"event": "native_compaction_restore_completed", "summary_bytes": len(summary)})
 			b.mu.Lock()
 			if len(b.summaries) >= 32 {
 				b.summaries = nil
@@ -123,7 +125,7 @@ func (b *nativeCompactionBridge) summarize(ctx context.Context, original *http.R
 	if blocked, _ := b.quotaGuard.blocked(chatGPTAccountID(original), time.Now()); blocked {
 		return "", fmt.Errorf("official quota reserve is protected; native compaction restore is paused until the quota window resets")
 	}
-	if strings.TrimSpace(original.Header.Get("Authorization")) == "" || original.Header.Get("Authorization") == "Bearer "+localAccessKey {
+	if strings.TrimSpace(original.Header.Get("Authorization")) == "" || original.Header.Get("Authorization") == "Bearer "+config.LocalAccessKey {
 		return "", fmt.Errorf("official credentials are required to restore native compacted history; switch to an official model first")
 	}
 	model, err := nativeCompactionModel()
@@ -254,7 +256,7 @@ func (b *nativeCompactionBridge) summarizeChatGPTWebsocket(ctx context.Context, 
 	}
 	defer conn.Close()
 	if b.logger != nil {
-		b.logger.write(map[string]any{"event": "native_compaction_restore_connected", "transport": "websocket", "model": model})
+		b.logger.Write(map[string]any{"event": "native_compaction_restore_connected", "transport": "websocket", "model": model})
 	}
 	deadline, ok := ctx.Deadline()
 	if ok {

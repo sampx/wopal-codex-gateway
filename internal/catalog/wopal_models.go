@@ -1,34 +1,36 @@
-package main
+package catalog
 
 import (
 	"regexp"
 	"strings"
+
+	"wopal-codex-gateway/internal/config"
 )
 
 // WopalModelSyncResult reports what models sync changed.
 type WopalModelSyncResult struct {
-	Models   []ExternalModelConfig
+	Models   []config.ExternalModelConfig
 	Skipped  []string
 	Excluded []string
 }
 
 // AddWopalModelsResult reports what models add changed.
 type AddWopalModelsResult struct {
-	Models   []ExternalModelConfig
+	Models   []config.ExternalModelConfig
 	Added    []string
 	Existing []string
 }
 
 // UpdateWopalModelsResult reports what models set changed.
 type UpdateWopalModelsResult struct {
-	Models  []ExternalModelConfig
+	Models  []config.ExternalModelConfig
 	Updated []string
 	Missing []string
 }
 
 // RemoveWopalModelsResult reports what models remove changed.
 type RemoveWopalModelsResult struct {
-	Models  []ExternalModelConfig
+	Models  []config.ExternalModelConfig
 	Removed []string
 	Missing []string
 }
@@ -43,8 +45,8 @@ type ModelPatch struct {
 
 var nonChatModelPattern = regexp.MustCompile(`(?i)(embed(ding)?|rerank)`)
 
-func syncWopalModelConfigs(current []ExternalModelConfig, availableIDs, excludedNames []string) WopalModelSyncResult {
-	existing := make(map[string]ExternalModelConfig, len(current))
+func SyncWopalModelConfigs(current []config.ExternalModelConfig, availableIDs, excludedNames []string) WopalModelSyncResult {
+	existing := make(map[string]config.ExternalModelConfig, len(current))
 	for _, model := range current {
 		existing[model.Name] = model
 	}
@@ -58,7 +60,7 @@ func syncWopalModelConfigs(current []ExternalModelConfig, availableIDs, excluded
 	}
 
 	result := WopalModelSyncResult{
-		Models:   make([]ExternalModelConfig, 0, len(availableIDs)),
+		Models:   make([]config.ExternalModelConfig, 0, len(availableIDs)),
 		Skipped:  []string{},
 		Excluded: []string{},
 	}
@@ -91,8 +93,8 @@ func syncWopalModelConfigs(current []ExternalModelConfig, availableIDs, excluded
 	return result
 }
 
-func addWopalModelConfigs(current []ExternalModelConfig, names []string, defaults ModelPatch) AddWopalModelsResult {
-	models := make([]ExternalModelConfig, 0, len(current)+len(names))
+func AddWopalModelConfigs(current []config.ExternalModelConfig, names []string, defaults ModelPatch) AddWopalModelsResult {
+	models := make([]config.ExternalModelConfig, 0, len(current)+len(names))
 	known := make(map[string]struct{}, len(current)+len(names))
 	for _, model := range current {
 		models = append(models, cloneExternalModel(model))
@@ -115,13 +117,13 @@ func addWopalModelConfigs(current []ExternalModelConfig, names []string, default
 		}
 
 		known[name] = struct{}{}
-		result.Models = append(result.Models, applyModelPatch(ExternalModelConfig{Name: name}, defaults))
+		result.Models = append(result.Models, applyModelPatch(config.ExternalModelConfig{Name: name}, defaults))
 		result.Added = append(result.Added, name)
 	}
 	return result
 }
 
-func updateWopalModelConfigs(current []ExternalModelConfig, names []string, patch ModelPatch) UpdateWopalModelsResult {
+func UpdateWopalModelConfigs(current []config.ExternalModelConfig, names []string, patch ModelPatch) UpdateWopalModelsResult {
 	requested := uniqueNormalizedModelNames(names)
 	requestedSet := make(map[string]struct{}, len(requested))
 	for _, name := range requested {
@@ -133,7 +135,7 @@ func updateWopalModelConfigs(current []ExternalModelConfig, names []string, patc
 	}
 
 	result := UpdateWopalModelsResult{
-		Models:  make([]ExternalModelConfig, 0, len(current)),
+		Models:  make([]config.ExternalModelConfig, 0, len(current)),
 		Updated: []string{},
 		Missing: []string{},
 	}
@@ -154,7 +156,7 @@ func updateWopalModelConfigs(current []ExternalModelConfig, names []string, patc
 	return result
 }
 
-func removeWopalModelConfigs(current []ExternalModelConfig, names []string) RemoveWopalModelsResult {
+func RemoveWopalModelConfigs(current []config.ExternalModelConfig, names []string) RemoveWopalModelsResult {
 	requested := uniqueNormalizedModelNames(names)
 	existing := make(map[string]struct{}, len(current))
 	for _, model := range current {
@@ -162,7 +164,7 @@ func removeWopalModelConfigs(current []ExternalModelConfig, names []string) Remo
 	}
 
 	remove := make(map[string]struct{}, len(requested))
-	result := RemoveWopalModelsResult{Models: []ExternalModelConfig{}, Removed: []string{}, Missing: []string{}}
+	result := RemoveWopalModelsResult{Models: []config.ExternalModelConfig{}, Removed: []string{}, Missing: []string{}}
 	for _, name := range requested {
 		if _, ok := existing[name]; ok {
 			remove[name] = struct{}{}
@@ -205,11 +207,11 @@ func uniqueNormalizedModelNames(names []string) []string {
 	return unique
 }
 
-func defaultExternalModelConfig(name string) ExternalModelConfig {
-	contextWindow := defaultContextWindow
+func defaultExternalModelConfig(name string) config.ExternalModelConfig {
+	contextWindow := config.DefaultContextWindow
 	vision := false
 	reasoning := true
-	return ExternalModelConfig{
+	return config.ExternalModelConfig{
 		Name:          name,
 		ContextWindow: &contextWindow,
 		Vision:        &vision,
@@ -217,8 +219,8 @@ func defaultExternalModelConfig(name string) ExternalModelConfig {
 	}
 }
 
-func cloneExternalModel(model ExternalModelConfig) ExternalModelConfig {
-	clone := ExternalModelConfig{Name: model.Name}
+func cloneExternalModel(model config.ExternalModelConfig) config.ExternalModelConfig {
+	clone := config.ExternalModelConfig{Name: model.Name}
 	if model.ContextWindow != nil {
 		contextWindow := *model.ContextWindow
 		clone.ContextWindow = &contextWindow
@@ -234,7 +236,7 @@ func cloneExternalModel(model ExternalModelConfig) ExternalModelConfig {
 	return clone
 }
 
-func applyModelPatch(model ExternalModelConfig, patch ModelPatch) ExternalModelConfig {
+func applyModelPatch(model config.ExternalModelConfig, patch ModelPatch) config.ExternalModelConfig {
 	if patch.ContextWindow != nil {
 		contextWindow := *patch.ContextWindow
 		model.ContextWindow = &contextWindow

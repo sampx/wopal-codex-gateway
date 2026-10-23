@@ -1,15 +1,20 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+
+	"wopal-codex-gateway/internal/catalog"
+	"wopal-codex-gateway/internal/config"
+)
 
 func runCatalogCommand(subcommand string, args []string) error {
 	switch subcommand {
 	case "refresh":
-		cfg, err := loadGatewayConfig(configPath())
+		cfg, err := config.LoadGatewayConfig(config.ConfigPath())
 		if err != nil {
 			return err
 		}
-		result, err := refreshCatalog(cfg)
+		result, err := catalog.RefreshCatalog(cfg)
 		if err != nil {
 			return err
 		}
