@@ -5,9 +5,13 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -15,6 +19,8 @@ func TestClassifyModel(t *testing.T) {
 	cases := map[string]routeKind{
 		"gpt-6.1-sol":                  routeOfficial,
 		"wopal-ai/deepseek-v4.1-flash": routeWopal,
+		"wopal-ai/x":                   routeWopal,
+		"ollama/llama3":                routeDisabled,
 		"ollama/qwen3":                 routeDisabled,
 		"other/model":                  routeDisabled,
 		"":                             routeUnknown,
@@ -22,6 +28,98 @@ func TestClassifyModel(t *testing.T) {
 	for model, want := range cases {
 		if got := classifyModel(model); got != want {
 			t.Fatalf("classifyModel(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+func TestRouteModelNamespaces(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var officialHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		officialHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	logger, err := newActivityLogger(t.TempDir(), logsConfig{MaxSizeMB: 1, MaxBackups: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.close()
+
+	engine := gin.New()
+	target := mustURL(upstream.URL)
+	engine.Use(routingMiddlewareWithTargets(logger, target, target))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+	downstream := httptest.NewServer(engine)
+	defer downstream.Close()
+
+	cases := []struct {
+		name       string
+		model      string
+		wantStatus int
+		wantHits   int32
+	}{
+		{name: "ollama namespace", model: "ollama/llama3", wantStatus: http.StatusNotFound, wantHits: 0},
+		{name: "wopal namespace", model: "wopal-ai/x", wantStatus: http.StatusNoContent, wantHits: 0},
+		{name: "official model", model: "gpt-6.1-sol", wantStatus: http.StatusOK, wantHits: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := officialHits.Load()
+			resp, err := http.Post(
+				downstream.URL+"/v1/responses",
+				"application/json",
+				strings.NewReader(`{"model":"`+tc.model+`","input":"hello"}`),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, tc.wantStatus, body)
+			}
+			if hits := officialHits.Load() - before; hits != tc.wantHits {
+				t.Fatalf("official upstream hits = %d, want %d", hits, tc.wantHits)
+			}
+			if tc.wantStatus == http.StatusNotFound && !strings.Contains(string(body), "model namespace is disabled") {
+				t.Fatalf("rejection body = %s", body)
+			}
+		})
+	}
+}
+
+func TestLogRotationKeepsHealthAndStatusRoutes(t *testing.T) {
+	root := t.TempDir()
+	logger, err := newActivityLogger(root, logsConfig{MaxSizeMB: 1, MaxBackups: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.close()
+
+	blob := strings.Repeat("x", 600*1024)
+	logger.write(map[string]any{"event": "probe", "payload": blob})
+	logger.write(map[string]any{"event": "probe", "payload": blob})
+	waitForRotatedLogs(t, filepath.Join(root, "logs"), 1)
+
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithTargets(logger, mustURL("http://127.0.0.1:1"), mustURL("http://127.0.0.1:1")))
+	engine.GET("/_health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+	engine.GET("/_status", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
+
+	for _, path := range []string{"/_health", "/_status"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want %d; body = %s", path, recorder.Code, http.StatusOK, recorder.Body.String())
 		}
 	}
 }

@@ -51,7 +51,7 @@ func runServe(args []string) error {
 		return err
 	}
 
-	closeServiceLogs, err := redirectServiceLogs(root)
+	closeServiceLogs, err := redirectServiceLogs(root, gateway.Logs)
 	if err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	logger, err := newActivityLogger(root)
+	logger, err := newActivityLogger(root, gateway.Logs)
 	if err != nil {
 		return fmt.Errorf("initialize activity logger: %w", err)
 	}
@@ -126,7 +126,7 @@ func runServe(args []string) error {
 // each stream is captured through a pipe and copied into a rotating writer;
 // handing the file descriptor straight to Dup2 would bypass rotation and keep
 // appending to the renamed file forever.
-func redirectServiceLogs(root string) (func(), error) {
+func redirectServiceLogs(root string, cfg logsConfig) (func(), error) {
 	logsDir := filepath.Join(root, "logs")
 	if err := os.MkdirAll(logsDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create logs directory: %w", err)
@@ -139,14 +139,14 @@ func redirectServiceLogs(root string) (func(), error) {
 		}
 	}
 
-	stdout, err := captureStream(filepath.Join(logsDir, "service.log"), os.Stdout, nil)
+	stdout, err := captureStream(filepath.Join(logsDir, "service.log"), os.Stdout, nil, cfg)
 	if err != nil {
 		closeAll()
 		return nil, fmt.Errorf("redirect stdout: %w", err)
 	}
 	cleanups = append(cleanups, stdout)
 
-	stderr, err := captureStream(filepath.Join(logsDir, "service-error.log"), os.Stderr, newAbortHandlerFilterWriter)
+	stderr, err := captureStream(filepath.Join(logsDir, "service-error.log"), os.Stderr, newAbortHandlerFilterWriter, cfg)
 	if err != nil {
 		closeAll()
 		return nil, fmt.Errorf("redirect stderr: %w", err)
@@ -159,7 +159,7 @@ func redirectServiceLogs(root string) (func(), error) {
 // captureStream points target at a pipe and copies the pipe into a rotating
 // writer in the background. The returned func stops the copy and closes both
 // ends so the final bytes are flushed.
-func captureStream(path string, target *os.File, wrap func(io.Writer) io.Writer) (func(), error) {
+func captureStream(path string, target *os.File, wrap func(io.Writer) io.Writer, cfg logsConfig) (func(), error) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -171,7 +171,7 @@ func captureStream(path string, target *os.File, wrap func(io.Writer) io.Writer)
 	}
 	_ = writer.Close()
 
-	out := newRotatingWriter(path)
+	out := newRotatingWriter(path, cfg)
 	var sink io.Writer = out
 	var filtered *abortHandlerFilterWriter
 	if wrap != nil {

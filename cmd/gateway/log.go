@@ -11,27 +11,35 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-// Log rotation limits. Every file the gateway writes is capped so a long
-// running daemon can never fill the disk: at most maxLogBackups previous
-// files of maxLogSizeMB each, kept for maxLogAgeDays.
+// Log rotation retention. Size and backup counts come from runtime config so a
+// long-running daemon stays bounded without hiding operator-tunable limits.
 const (
-	maxLogSizeMB   = 10
-	maxLogBackups  = 3
 	maxLogAgeDays  = 14
 	compressLogRot = true
 )
 
 // newRotatingWriter returns a size and age bounded writer for one log file.
 // lumberjack is safe for concurrent use, so no external mutex is needed.
-func newRotatingWriter(path string) io.WriteCloser {
+func newRotatingWriter(path string, cfg logsConfig) io.WriteCloser {
+	cfg = normalizeLogsConfig(cfg)
 	return &lumberjack.Logger{
 		Filename:   path,
-		MaxSize:    maxLogSizeMB,
-		MaxBackups: maxLogBackups,
+		MaxSize:    cfg.MaxSizeMB,
+		MaxBackups: cfg.MaxBackups,
 		MaxAge:     maxLogAgeDays,
 		Compress:   compressLogRot,
 		LocalTime:  true,
 	}
+}
+
+func normalizeLogsConfig(cfg logsConfig) logsConfig {
+	if cfg.MaxSizeMB <= 0 {
+		cfg.MaxSizeMB = defaultLogMaxSizeMB
+	}
+	if cfg.MaxBackups <= 0 {
+		cfg.MaxBackups = defaultLogMaxBackups
+	}
+	return cfg
 }
 
 type activityLogger struct {
@@ -40,13 +48,19 @@ type activityLogger struct {
 	out  io.WriteCloser
 }
 
-func newActivityLogger(root string) (*activityLogger, error) {
+// The optional config keeps existing in-package callers that already receive
+// parser-filled defaults source-compatible while the daemon passes its config.
+func newActivityLogger(root string, cfgs ...logsConfig) (*activityLogger, error) {
+	cfg := logsConfig{}
+	if len(cfgs) > 0 {
+		cfg = cfgs[0]
+	}
 	logsDir := filepath.Join(root, "logs")
 	if err := os.MkdirAll(logsDir, 0o755); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(logsDir, "gateway.log")
-	return &activityLogger{path: path, out: newRotatingWriter(path)}, nil
+	return &activityLogger{path: path, out: newRotatingWriter(path, cfg)}, nil
 }
 
 func (l *activityLogger) write(fields map[string]any) {
