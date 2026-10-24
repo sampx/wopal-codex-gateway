@@ -53,11 +53,6 @@ func runServe(args []string) error {
 	if err := config.ValidateServeConfig(gateway); err != nil {
 		return fmt.Errorf("%s: %w", gatewayConfigPath, err)
 	}
-	// The SDK request logger is disabled at construction time (see
-	// disableSDKRequestLogging): no request-logging middleware is installed, so
-	// no request or response body can be written to disk.
-	requestBodyLogging := requestBodyLoggingState
-
 	wopalKey, err := keychain.GetWopalAPIKey()
 	if err != nil {
 		return err
@@ -72,14 +67,39 @@ func runServe(args []string) error {
 	log.SetOutput(os.Stdout)
 	log.AddHook(errorOnlyHook{})
 
-	compaction.ConfigureKey(wopalKey)
-	cliConfig, cliConfigPath, err := config.BuildCLIProxyConfig(root, gateway, wopalKey)
+	service, logger, err := buildGatewayService(root, gateway, wopalKey, *instanceFlag)
 	if err != nil {
 		return err
 	}
+	logger.Write(map[string]any{"event": "gateway_started", "architecture": "embedded-cliproxy", "port": gateway.Listen.Port})
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := service.Run(ctx); err != nil && ctx.Err() == nil {
+		logger.Write(map[string]any{"event": "gateway_failed", "error": err.Error()})
+		return fmt.Errorf("run embedded CLIProxyAPI service: %w", err)
+	}
+	logger.Write(map[string]any{"event": "gateway_stopped"})
+	return nil
+}
+
+// buildGatewayService assembles the embedded CLIProxyAPI service exactly as the
+// daemon runs it. It is separate from runServe so integration tests can drive
+// the real assembly — the same server options, routing middleware and status
+// handlers — without capturing the process's stdout and stderr.
+func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, instance string) (*cliproxy.Service, *activity.Logger, error) {
+	// The SDK request logger is disabled at construction time (see
+	// disableSDKRequestLogging): no request-logging middleware is installed, so
+	// no request or response body can be written to disk.
+	requestBodyLogging := requestBodyLoggingState
+
+	compaction.ConfigureKey(wopalKey)
+	cliConfig, cliConfigPath, err := config.BuildCLIProxyConfig(root, gateway, wopalKey)
+	if err != nil {
+		return nil, nil, err
+	}
 	logger, err := activity.New(filepath.Join(root, "logs"), gateway.Logs)
 	if err != nil {
-		return fmt.Errorf("initialize activity logger: %w", err)
+		return nil, nil, fmt.Errorf("initialize activity logger: %w", err)
 	}
 	logger.Write(map[string]any{
 		"event": "gateway_starting", "host": gateway.Listen.Host, "port": gateway.Listen.Port,
@@ -101,7 +121,7 @@ func runServe(args []string) error {
 						"ok":           true,
 						"mode":         "single-process",
 						"wopal_models": len(gateway.WopalAI.Models),
-						"instance":     *instanceFlag,
+						"instance":     instance,
 					})
 				})
 				engine.GET("/_status", func(c *gin.Context) {
@@ -120,18 +140,9 @@ func runServe(args []string) error {
 		)
 	service, err := builder.Build()
 	if err != nil {
-		return fmt.Errorf("build embedded CLIProxyAPI service: %w", err)
+		return nil, nil, fmt.Errorf("build embedded CLIProxyAPI service: %w", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	logger.Write(map[string]any{"event": "gateway_started", "architecture": "embedded-cliproxy", "port": gateway.Listen.Port})
-	if err := service.Run(ctx); err != nil && ctx.Err() == nil {
-		logger.Write(map[string]any{"event": "gateway_failed", "error": err.Error()})
-		return fmt.Errorf("run embedded CLIProxyAPI service: %w", err)
-	}
-	logger.Write(map[string]any{"event": "gateway_stopped"})
-	return nil
+	return service, logger, nil
 }
 
 // redirectServiceLogs sends the embedded service's stdout and stderr to

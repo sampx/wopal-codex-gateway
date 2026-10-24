@@ -225,7 +225,11 @@ wopal-codex-gateway quota reset-learning
 - `/_status` 的 `request_body_logging` 固定报告 `"disabled"`，与实际安装的机制一致。
 - 请求正文只在内存中处理，不写入 `logs/`、`runtime/` 或其他目录。
 - 错误诊断只记录状态码、模型、错误码、request id 和耗时。
-- 升级前提：升级 CLIProxyAPI 后必须重新确认「factory 返回 nil 时仍不安装 request-logging middleware，且 reload 不会重新创建 logger」。这是该机制唯一的升级审计点。
+- 升级前提：升级 CLIProxyAPI 后必须重新确认三件事，缺一不可：
+  1. factory 返回 nil 时仍不安装 request-logging middleware；
+  2. 配置 reload 不会在 logger 为 nil 时重新创建 logger；
+  3. 新版本没有在 request-logging middleware 之外新增 request/response body 的文件写入路径。
+- 回归保障：`TestServedGatewayNeverWritesPromptBodies` 通过真实嵌入式服务跑「成功请求 + 上游 5xx + 畸形请求」，随后扫描整个 runtime 树，断言没有任何 `request-log*`／`request-body*`／`response-body*`／`error-*` 文件且正文标记零命中。去掉 nil factory 后该测试必须失败，这是它有效的判据。
 
 ## Reference Documents
 
