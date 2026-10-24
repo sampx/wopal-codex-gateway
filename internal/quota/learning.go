@@ -32,6 +32,13 @@ func (g *Guard) resetLearningFromDiskIfNewer(now time.Time) {
 	}
 	g.persistenceMu.Lock()
 	defer g.persistenceMu.Unlock()
+	// Hold the cross-process lock while comparing and recording the file mtime, so
+	// a concurrent reset cannot land between the stat, the read and the record.
+	fileLock, lockErr := lockStateFile(g.persistencePath)
+	if lockErr != nil {
+		return
+	}
+	defer fileLock.Unlock()
 	g.adoptExternalLearningResetLocked(now)
 }
 
@@ -105,6 +112,9 @@ func (g *Guard) clearFailoverOnReset() {
 	g.failoverSince = time.Time{}
 	g.failoverModel = ""
 	g.recoveryKey = ""
+	g.recoveryReason = ""
+	g.recoveryModel = ""
+	g.recoveryResetAt = time.Time{}
 	// Advance the generation so a timer armed for the cleared failover can never be
 	// mistaken for the owner of the next one.
 	g.failoverSeq++

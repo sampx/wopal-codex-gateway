@@ -409,15 +409,14 @@ func TestQuotaPersistNeverWritesAnOlderSnapshot(t *testing.T) {
 	}
 }
 
-// TestQuotaResetSurvivesConcurrentDaemonPersist covers B-R9-01 deterministically.
-// The CLI reset and the daemon persist are separate processes, so an in-process
-// mutex cannot serialize them.
+// TestQuotaResetSurvivesConcurrentDaemonPersist is the deterministic guard for
+// B-R9-01. The daemon persist is parked inside its own critical section (after it
+// has adopted and snapshotted the old learned step, before it renames), then the
+// CLI reset runs concurrently. Only the cross-process state-file lock can keep the
+// reset from being overwritten by that in-flight snapshot.
 //
-// The ordering reproduced here is the one that resurrected a cleared value: the
-// daemon starts a persist, then the reset lands, then the daemon completes its
-// write. The test parks the daemon just before it takes the shared file lock, so
-// the reset can take it first and finish; the daemon's persist must then re-read
-// the cleared state instead of renaming its stale snapshot over it.
+// With the lock, the reset waits for persist to finish and then wins. Without it,
+// persist renames its stale step 3 over the reset result.
 func TestQuotaResetSurvivesConcurrentDaemonPersist(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	path := filepath.Join(t.TempDir(), "official-quota-state.json")
@@ -437,14 +436,53 @@ func TestQuotaResetSurvivesConcurrentDaemonPersist(t *testing.T) {
 		t.Fatalf("guard did not learn the step: %v", step)
 	}
 
-	// The reset lands while the daemon is about to persist.
-	if _, err := ResetLearning(path); err != nil {
-		t.Fatalf("ResetLearning: %v", err)
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	persistDone := make(chan struct{})
+	guard.beforeRename = func() {
+		close(parked)
+		<-release
 	}
 
-	// The daemon's next persist must not resurrect what it still holds in memory.
-	guard.persist(now.Add(time.Minute))
+	go func() {
+		defer close(persistDone)
+		guard.persist(now.Add(time.Minute))
+	}()
 
+	// The daemon owns the state lock and has a stale snapshot in hand.
+	<-parked
+
+	resetDone := make(chan error, 1)
+	go func() {
+		_, err := ResetLearning(path)
+		resetDone <- err
+	}()
+
+	// The reset must NOT be able to complete while persist still holds the lock.
+	select {
+	case err := <-resetDone:
+		close(release)
+		<-persistDone
+		t.Fatalf("ResetLearning completed while a daemon persist was mid-flight (err=%v)", err)
+	case <-time.After(200 * time.Millisecond):
+		// Expected.
+	}
+
+	close(release)
+	<-persistDone
+
+	select {
+	case err := <-resetDone:
+		if err != nil {
+			t.Fatalf("ResetLearning: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ResetLearning never completed after the daemon released the lock")
+	}
+
+	guard.beforeRename = nil
+
+	// The reset ran after the stale snapshot was written, so it must be what remains.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -454,7 +492,7 @@ func TestQuotaResetSurvivesConcurrentDaemonPersist(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := persisted.Accounts[AccountKey("acct")].FiveHourMaxStep; got != 0 {
-		t.Fatalf("persisted learned step = %v, want 0 (a daemon write resurrected the reset)", got)
+		t.Fatalf("persisted learned step = %v, want 0 (an in-flight persist resurrected the reset)", got)
 	}
 }
 
@@ -642,5 +680,100 @@ func TestSupersededRecoveryTimerDoesNotClearNewerFailover(t *testing.T) {
 	callbackB()
 	if active, _ := guard.FailoverStatus()["active"].(bool); active {
 		t.Fatal("failover B was not cleared by its own recovery timer")
+	}
+}
+
+// TestQuotaObservationRejectsAnOlderWindow covers the other half of B-R9-02: a
+// delayed response from the previous quota window must not replace the current
+// one. Its ResetAt differs, so the same-window ordering check does not apply.
+func TestQuotaObservationRejectsAnOlderWindow(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	path := filepath.Join(t.TempDir(), "official-quota-state.json")
+	guard := NewGuardWithState(nil, path, now)
+	oldWindow := now.Add(2 * time.Hour)
+	newWindow := now.Add(7 * time.Hour)
+
+	// The current window is already stored and nearly exhausted.
+	guard.ObserveWindow("acct", Window{
+		UsedPercent: 98, WindowMinutes: officialFiveHourWindowMinutes,
+		ResetAt: newWindow, ObservedAt: now.Add(30 * time.Second),
+	})
+
+	// A response from the previous window arrives late.
+	guard.ObserveWindow("acct", Window{
+		UsedPercent: 90, WindowMinutes: officialFiveHourWindowMinutes,
+		ResetAt: oldWindow, ObservedAt: now.Add(60 * time.Second),
+	})
+
+	guard.persist(now.Add(time.Minute))
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted PersistedState
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := persisted.Accounts[AccountKey("acct")]
+	if !ok || state.FiveHour == nil {
+		t.Fatal("persisted state lost the account window")
+	}
+	if state.FiveHour.UsedPercent != 98 {
+		t.Fatalf("persisted used_percent = %v, want the current window's 98", state.FiveHour.UsedPercent)
+	}
+	if !state.FiveHour.ResetAt.Equal(newWindow) {
+		t.Fatalf("persisted reset_at = %v, want the newer window", state.FiveHour.ResetAt)
+	}
+
+	// The live decision must also reflect the current window, not the stale one.
+	if blocked, _ := guard.Blocked("acct", now.Add(time.Minute)); !blocked {
+		t.Fatal("guard no longer protects the current window after a stale sample")
+	}
+}
+
+// TestFailoverGenerationFollowsReasonChange covers the remaining half of W-R9-03:
+// when the active failover changes from five-hour to weekly, it is a new
+// generation. The still-armed five-hour timer must not clear it.
+func TestFailoverGenerationFollowsReasonChange(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	path := filepath.Join(t.TempDir(), "official-quota-state.json")
+	guard := NewGuardWithState(nil, path, now)
+	fiveHourReset := now.Add(2 * time.Hour)
+	weeklyReset := now.Add(72 * time.Hour)
+
+	var fiveHourCallback, weeklyCallback func()
+	guard.scheduleAfter = func(_ time.Duration, fn func()) { fiveHourCallback = fn }
+
+	// Five-hour is over the threshold; weekly is still comfortable.
+	guard.ObserveWindow("acct", Window{
+		UsedPercent: 99, WindowMinutes: officialFiveHourWindowMinutes,
+		ResetAt: fiveHourReset, ObservedAt: now,
+	})
+	guard.ObserveWindow("acct", Window{
+		UsedPercent: 99, WindowMinutes: officialWeeklyWindowMinutes,
+		ResetAt: weeklyReset, ObservedAt: now,
+	})
+	if blocked, reason := guard.BlockedModel("acct", "gpt-6.1-sol", now); !blocked || reason != "five_hour" {
+		t.Fatalf("expected a five-hour failover, got blocked=%v reason=%q", blocked, reason)
+	}
+	if fiveHourCallback == nil {
+		t.Fatal("five-hour failover did not arm a timer")
+	}
+
+	// The five-hour window expires; weekly is now the binding constraint.
+	guard.scheduleAfter = func(_ time.Duration, fn func()) { weeklyCallback = fn }
+	later := fiveHourReset.Add(time.Minute)
+	if blocked, reason := guard.BlockedModel("acct", "gpt-6.1-sol", later); !blocked || reason != "weekly" {
+		t.Fatalf("expected a weekly failover, got blocked=%v reason=%q", blocked, reason)
+	}
+	if weeklyCallback == nil {
+		t.Fatal("weekly failover reused the five-hour timer instead of arming its own")
+	}
+
+	// The five-hour timer fires. Weekly protection is still warranted.
+	fiveHourCallback()
+	if active, _ := guard.FailoverStatus()["active"].(bool); !active {
+		t.Fatal("the five-hour timer cleared a still-warranted weekly failover")
 	}
 }

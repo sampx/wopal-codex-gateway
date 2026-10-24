@@ -675,9 +675,11 @@ runtime/bin/wopal-codex-gateway codex restore
 
 ## 10. 更新 Gateway
 
-### 10.1 检查配置版本
+### 10.1 升级既有配置
 
-如果 `runtime/config.json` 已存在且来自旧版本，先加入 `"version": 1`。否则 `serve` 和所有配置命令都会拒绝该文件。
+如果 `runtime/config.json` 来自旧版本，在启动新二进制前先按
+[从旧版本升级](#从旧版本升级) 的两步处理：加入 `"version": 1`，并删除旧的 `"ollama"` 块。
+否则 `serve` 和所有配置命令都会拒绝该文件。
 
 ### 10.2 临时停止服务
 
@@ -770,7 +772,12 @@ runtime/bin/wopal-codex-gateway codex restore
 
 ### 启动时报配置版本不受支持
 
-在 `runtime/config.json` 中加入 `"version": 1`。错误信息会指出文件路径和期望的版本号。
+按 [从旧版本升级](#从旧版本升级) 的两步处理：加入 `"version": 1`，并删除旧的 `"ollama"` 块。
+错误信息会指出文件路径和期望的版本号。
+
+### 启动时报 unsupported configuration section
+
+Ollama 支持已经移除。请从 `runtime/config.json` 删除 `"ollama"` 块，它不会被自动迁移。
 
 ### 官方模型突然不见了
 
@@ -1020,6 +1027,6 @@ go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
 ./scripts/gateway status
 ```
 
-如果 `runtime/config.json` 已经存在，先确认其中包含 `"version": 1`。
+如果 `runtime/config.json` 已经存在，先确认其中包含 `"version": 1`，并且没有旧的 `"ollama"` 块。
 
 然后重启 ChatGPT/Codex Desktop，即可开始使用。

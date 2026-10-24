@@ -87,6 +87,11 @@ type Guard struct {
 	failoverSince  time.Time
 	failoverModel  string
 	recoveryKey    string
+	// The generation tuple the current recoveryKey was minted for. A timer may only
+	// be reused when all three still match the incoming failover.
+	recoveryReason  string
+	recoveryModel   string
+	recoveryResetAt time.Time
 	// failoverSeq increments on every new failover generation so recovery timers
 	// can prove which generation they belong to.
 	failoverSeq uint64
@@ -284,6 +289,15 @@ func (g *Guard) persist(now time.Time) {
 	// with another persist, or the older snapshot can rename last.
 	g.persistenceMu.Lock()
 	defer g.persistenceMu.Unlock()
+	// The same cycle must also exclude `quota reset-learning`, a separate process.
+	// Its reset is only durable if a daemon snapshot taken before it cannot be
+	// renamed afterwards.
+	fileLock, lockErr := lockStateFile(g.persistencePath)
+	if lockErr != nil {
+		g.logger.Write(map[string]any{"event": "official_quota_state_persist_failed", "error": lockErr.Error()})
+		return
+	}
+	defer fileLock.Unlock()
 	g.adoptExternalLearningResetLocked(now)
 
 	g.mu.RLock()
@@ -394,18 +408,25 @@ func (g *Guard) enterFailover(requestedModel, reason, accountID string, now time
 	g.failoverActive = true
 	g.failoverSince = now
 	g.failoverModel = requestedModel
-	// A new generation begins whenever this is a new failover, not a repeat of the
-	// one already in force.
-	var key string
+	// Reuse the armed timer only when this really is the same failover generation:
+	// a different reason (five-hour -> weekly), a different window or a different
+	// model needs its own key, or the old timer would later clear protection that
+	// is still warranted.
 	alreadyArmed := false
-	if !firstEntry && g.recoveryKey != "" && !resetAt.IsZero() {
-		// Re-entering the failover that is already armed: keep its timer.
+	var key string
+	if g.recoveryKey != "" && !resetAt.IsZero() &&
+		g.recoveryReason == reason &&
+		g.recoveryModel == requestedModel &&
+		g.recoveryResetAt.Equal(resetAt) {
 		alreadyArmed = true
 		key = g.recoveryKey
 	} else if !resetAt.IsZero() {
 		g.failoverSeq++
 		key = quotaRecoveryKey(reason, resetAt, requestedModel, g.failoverSeq)
 		g.recoveryKey = key
+		g.recoveryReason = reason
+		g.recoveryModel = requestedModel
+		g.recoveryResetAt = resetAt
 	}
 	g.failoverMu.Unlock()
 
@@ -673,10 +694,21 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 		g.mu.Unlock()
 		return false
 	}
-	// Reject a sample older than the one already stored for this window. Callers
-	// observe on different goroutines (HTTP responses, WebSocket frames, compaction
-	// replays), so a goroutine descheduled between capturing and locking would
-	// otherwise overwrite a newer sample and make the account look unprotected.
+	// Reject a sample that belongs to an older quota window than the one already
+	// stored: a delayed response from the previous window must not replace the
+	// current one, or the guard would protect against a window that has already
+	// reset. ResetAt is the window generation for a given window length.
+	if current != nil && !current.ResetAt.IsZero() && !window.ResetAt.IsZero() &&
+		window.ResetAt.Before(current.ResetAt) {
+		g.latestAccount = key
+		g.mu.Unlock()
+		return false
+	}
+	// Within the same window, reject a sample captured before the stored one.
+	// Callers observe on different goroutines (HTTP responses, WebSocket frames,
+	// compaction replays), so a goroutine descheduled between capturing and locking
+	// would otherwise overwrite a newer sample and make the account look
+	// unprotected.
 	if current != nil && current.ResetAt.Equal(window.ResetAt) &&
 		!window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() &&
 		window.ObservedAt.Before(current.ObservedAt) {

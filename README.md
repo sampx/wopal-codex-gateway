@@ -671,9 +671,12 @@ or `./scripts/gateway disable`.
 
 ## 10. Update the gateway
 
-### 10.1 Check the configuration version
+### 10.1 Upgrade an existing configuration
 
-If `runtime/config.json` already exists and came from an older release, add `"version": 1` before starting the new binary. `serve` and all configuration commands reject the file otherwise.
+If `runtime/config.json` came from an older release, apply the two-step migration from
+[Upgrading from an older release](#upgrading-from-an-older-release) before starting the new
+binary: add `"version": 1` and delete the legacy `"ollama"` block. `serve` and all
+configuration commands reject the file otherwise.
 
 ### 10.2 Stop the running service
 
@@ -766,7 +769,14 @@ Do not remove the checkout while Codex still points at the gateway.
 
 ### Startup fails with an unsupported config version
 
-Add `"version": 1` to `runtime/config.json`. The error names the file and the expected version.
+Apply the two-step migration from [Upgrading from an older release](#upgrading-from-an-older-release):
+add `"version": 1` and delete the legacy `"ollama"` block. The error names the file and the
+expected version; a separate error names a removed section.
+
+### Startup fails with "unsupported configuration section"
+
+Ollama support was removed. Delete the `"ollama"` block from `runtime/config.json`; it is not
+migrated automatically.
 
 ### Official models disappeared
 
@@ -1012,6 +1022,7 @@ go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
 ./scripts/gateway status
 ```
 
-If `runtime/config.json` already exists, make sure it contains `"version": 1` first.
+If `runtime/config.json` already exists, make sure it contains `"version": 1` and no legacy
+`"ollama"` block.
 
 Then restart ChatGPT/Codex Desktop and start using the merged model catalog.
