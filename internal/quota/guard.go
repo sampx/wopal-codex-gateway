@@ -91,10 +91,17 @@ type Guard struct {
 	// scheduleAfter is overridden in tests; production uses time.AfterFunc.
 	scheduleAfter func(time.Duration, func())
 
-	// lastPersistModTime is the state file's modification time after the guard's
-	// own last write. A newer file means `quota reset-learning` changed it from
-	// another process, so the next persist adopts the cleared values instead of
-	// writing the in-memory ones back.
+	// persistenceMu serializes the whole adopt -> snapshot -> write -> record
+	// cycle. Concurrent official traffic (HTTP responses, WebSocket frames and
+	// compaction replays) all reach persist, so without it two snapshots can be
+	// written in the opposite order and an older one can land last.
+	persistenceMu sync.Mutex
+
+	// lastPersistModTime is the state file's modification time this guard last
+	// observed, either from its own write or from loading the file. A newer file
+	// means `quota reset-learning` changed it from another process, so the guard
+	// adopts the cleared values instead of writing the in-memory ones back.
+	// Guarded by persistenceMu.
 	lastPersistModTime time.Time
 }
 
@@ -212,6 +219,15 @@ func (g *Guard) loadPersisted(now time.Time) {
 		g.logger.Write(map[string]any{"event": "official_quota_state_load_failed", "error": "invalid persisted quota state"})
 		return
 	}
+	// Record the file this state came from, so a reset written after startup is
+	// recognised as newer. Without this the first post-startup persist sees a
+	// zero lastPersistModTime, treats the already-reset file as its own baseline
+	// and writes the stale in-memory learned step straight back.
+	info, statErr := os.Stat(g.persistencePath)
+	if statErr != nil {
+		g.logger.Write(map[string]any{"event": "official_quota_state_load_failed", "error": statErr.Error()})
+		return
+	}
 	for key, state := range persisted.Accounts {
 		// A value above the cap can only come from the older accumulator logic
 		// that mistook an accumulated gap for one step; it is not evidence and
@@ -235,6 +251,10 @@ func (g *Guard) loadPersisted(now time.Time) {
 			break
 		}
 	}
+	g.persistenceMu.Lock()
+	g.lastPersistModTime = info.ModTime()
+	g.persistenceMu.Unlock()
+
 	if len(g.accounts) > 0 {
 		g.logger.Write(map[string]any{"event": "official_quota_state_restored"})
 	}
@@ -244,7 +264,11 @@ func (g *Guard) persist(now time.Time) {
 	if g == nil || g.persistencePath == "" {
 		return
 	}
-	g.adoptExternalLearningReset()
+	// One writer at a time: adopt, snapshot, write and record must not interleave
+	// with another persist, or the older snapshot can rename last.
+	g.persistenceMu.Lock()
+	defer g.persistenceMu.Unlock()
+	g.adoptExternalLearningResetLocked(now)
 
 	g.mu.RLock()
 	accounts := make(map[string]AccountState, len(g.accounts))
@@ -465,6 +489,9 @@ func (g *Guard) Blocked(accountID string, now time.Time) (bool, string) {
 	if g == nil || strings.TrimSpace(accountID) == "" {
 		return false, ""
 	}
+	// A reset written by `quota reset-learning` must take effect on the very next
+	// routing decision, not on the next persist.
+	g.resetLearningFromDiskIfNewer(now)
 	key := AccountKey(accountID)
 	g.mu.RLock()
 	state, ok := g.accounts[key]
@@ -683,6 +710,9 @@ func (g *Guard) Status(now time.Time) map[string]any {
 	if g == nil {
 		return result
 	}
+	// Report the state the daemon would actually use now, so a pending external
+	// reset is visible on /_status immediately.
+	g.resetLearningFromDiskIfNewer(now)
 	result["failover"] = g.FailoverStatus()
 	g.mu.RLock()
 	accountID := g.latestAccount

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // learnResetMarker keeps the on-disk contract explicit: only the fields below
@@ -16,20 +17,31 @@ type quotaLearningView struct {
 	WeeklyMaxStep   float64 `json:"weekly_max_step"`
 }
 
-// adoptExternalLearningReset re-reads the persisted state when another process
-// wrote it more recently than this guard. `quota reset-learning` uses that path
-// to clear a learned step while the daemon is running; without this check the
-// next persist would write the in-memory value straight back.
-func (g *Guard) adoptExternalLearningReset() {
+// resetLearningFromDiskIfNewer re-reads the persisted state when another process
+// wrote it more recently than this guard, and applies any cleared learned step to
+// the live account state. `quota reset-learning` writes that file from a separate
+// short-lived process, so adoption has to happen before live decisions and status
+// reports, not only before the next persist.
+//
+// It is called from every path that reads the learned step (Blocked, Status and
+// persist), so a reset becomes effective immediately and cannot be resurrected by
+// a later persist. The persistence mutex serializes it against persist.
+func (g *Guard) resetLearningFromDiskIfNewer(now time.Time) {
+	if g == nil || g.persistencePath == "" {
+		return
+	}
+	g.persistenceMu.Lock()
+	defer g.persistenceMu.Unlock()
+	g.adoptExternalLearningResetLocked(now)
+}
+
+// adoptExternalLearningResetLocked requires persistenceMu to be held.
+func (g *Guard) adoptExternalLearningResetLocked(now time.Time) {
 	if g == nil || g.persistencePath == "" {
 		return
 	}
 	info, err := os.Stat(g.persistencePath)
 	if err != nil {
-		return
-	}
-	if g.lastPersistModTime.IsZero() {
-		g.lastPersistModTime = info.ModTime()
 		return
 	}
 	if !info.ModTime().After(g.lastPersistModTime) {
@@ -45,6 +57,7 @@ func (g *Guard) adoptExternalLearningReset() {
 		return
 	}
 
+	cleared := false
 	g.mu.Lock()
 	for key, state := range g.accounts {
 		saved, ok := persisted.Accounts[key]
@@ -53,12 +66,49 @@ func (g *Guard) adoptExternalLearningReset() {
 		}
 		// Keep the smaller value: the daemon only adopts a reset, never growth
 		// written by somebody else.
-		state.FiveHourMaxStep = minFloat(state.FiveHourMaxStep, g.clampMaxStep(saved.FiveHourMaxStep))
-		state.WeeklyMaxStep = minFloat(state.WeeklyMaxStep, g.clampMaxStep(saved.WeeklyMaxStep))
+		nextFiveHour := minFloat(state.FiveHourMaxStep, g.clampMaxStep(saved.FiveHourMaxStep))
+		nextWeekly := minFloat(state.WeeklyMaxStep, g.clampMaxStep(saved.WeeklyMaxStep))
+		if nextFiveHour != state.FiveHourMaxStep || nextWeekly != state.WeeklyMaxStep {
+			cleared = true
+		}
+		state.FiveHourMaxStep = nextFiveHour
+		state.WeeklyMaxStep = nextWeekly
 		g.accounts[key] = state
 	}
+	accountID := g.latestAccount
+	state, hasState := g.accounts[accountID]
 	g.mu.Unlock()
 	g.lastPersistModTime = info.ModTime()
+
+	if !cleared {
+		return
+	}
+
+	// The learned step feeds the effective stop point, which decides whether the
+	// reserve is active. A reset can therefore end an active failover, so the
+	// operator-visible failover state has to follow instead of waiting for the
+	// quota window to roll over.
+	if hasState {
+		if blocked, _ := g.quotaStateBlocked(state, now); !blocked {
+			g.clearFailoverOnReset()
+		}
+	}
+	g.logger.Write(map[string]any{"event": "official_quota_learning_adopted"})
+}
+
+// clearFailoverOnReset releases the automatic provider switch after a reset makes
+// the reserve inactive again.
+func (g *Guard) clearFailoverOnReset() {
+	g.failoverMu.Lock()
+	wasActive := g.failoverActive
+	g.failoverActive = false
+	g.failoverSince = time.Time{}
+	g.failoverModel = ""
+	g.recoveryKey = ""
+	g.failoverMu.Unlock()
+	if wasActive {
+		g.logger.Write(map[string]any{"event": "official_quota_failover_cleared_by_reset"})
+	}
 }
 
 func minFloat(a, b float64) float64 {

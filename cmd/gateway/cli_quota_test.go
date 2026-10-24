@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,23 +35,65 @@ func TestQuotaResetLearningUsesConfiguredLogRotation(t *testing.T) {
 	cfg := config.DefaultGatewayConfig()
 	cfg.WopalAI.BaseURL = "https://example.test/v1"
 	cfg.Logs = config.Logs{MaxSizeMB: 1, MaxBackups: 1}
-	payload, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(config.ConfigPath()), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.ConfigPath(), payload, 0o600); err != nil {
+	if err := config.SaveGatewayConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := quotaLogsConfig()
+	if _, err := captureStdout(t, func() error { return runQuotaCommand("reset-learning", nil) }); err != nil {
+		t.Fatalf("quota reset-learning: %v", err)
+	}
+
+	// The reset command must still write its metadata event, using the rotation
+	// policy from the config it read.
+	logPayload, err := os.ReadFile(filepath.Join(config.LogsDir(), "gateway.log"))
 	if err != nil {
+		t.Fatalf("read reset metadata log: %v", err)
+	}
+	if !strings.Contains(string(logPayload), `"event":"official_quota_learning_reset"`) {
+		t.Fatalf("reset metadata event missing from gateway.log: %s", logPayload)
+	}
+}
+
+// TestQuotaResetLearningRejectsInvalidConfigBeforeMutatingState covers B-01: an
+// unsupported config version must fail the command before the state file is
+// rewritten, instead of downgrading the error to a warning and reporting success.
+func TestQuotaResetLearningRejectsInvalidConfigBeforeMutatingState(t *testing.T) {
+	useTempGatewayRoot(t)
+
+	path := filepath.Join(config.StateDir(), "official-quota-state.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if got.MaxSizeMB != 1 || got.MaxBackups != 1 {
-		t.Fatalf("quota log config = %+v, want 1MB/1 backup", got)
+	account := "def0b17f603285ef4336f6e3e3dcd43cd18fd789277ab9d6e086b7e567539e25"
+	seeded := `{"version":1,"accounts":{"` + account + `":{"five_hour_max_step":3}},"latest_account":"` + account + `"}`
+	if err := os.WriteFile(path, []byte(seeded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A config file whose version no release of this binary serves.
+	badConfig := `{"version":99,"listen":{"host":"127.0.0.1","port":11435}}`
+	if err := os.MkdirAll(filepath.Dir(config.ConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.ConfigPath(), []byte(badConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := captureStdout(t, func() error { return runQuotaCommand("reset-learning", nil) })
+	if err == nil {
+		t.Fatal("quota reset-learning accepted an unsupported config version")
+	}
+	if !strings.Contains(err.Error(), "unsupported gateway config version") {
+		t.Fatalf("error = %v, want an unsupported-version error", err)
+	}
+
+	// The state file must be untouched: no side effect before validation.
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != seeded {
+		t.Fatalf("state file changed despite an invalid config:\n got %s\nwant %s", after, seeded)
 	}
 }
 

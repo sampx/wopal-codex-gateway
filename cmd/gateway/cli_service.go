@@ -63,6 +63,10 @@ func serviceStart() error {
 	if err := requireInstalledLaunchAgent(); err != nil {
 		return err
 	}
+	host, port, err := serviceListenAddress()
+	if err != nil {
+		return err
+	}
 	if serviceLoaded() {
 		if err := launchd.RunLaunchctl("kickstart", "-k", launchd.LaunchAgentTarget()); err != nil {
 			return fmt.Errorf("launchctl kickstart %s failed: %w", launchd.LaunchAgentTarget(), err)
@@ -70,17 +74,21 @@ func serviceStart() error {
 	} else if err := launchd.RunLaunchctl("bootstrap", launchd.LaunchdDomain(), config.LaunchAgentPath()); err != nil {
 		return fmt.Errorf("launchctl bootstrap %s failed: %w", config.LaunchAgentPath(), err)
 	}
-	return reportServiceRunning()
+	return reportServiceRunning(host, port)
 }
 
 func serviceRestart() error {
 	if err := requireInstalledLaunchAgent(); err != nil {
 		return err
 	}
+	host, port, err := serviceListenAddress()
+	if err != nil {
+		return err
+	}
 	if err := launchd.RunLaunchctl("kickstart", "-k", launchd.LaunchAgentTarget()); err != nil {
 		return fmt.Errorf("launchctl kickstart %s failed: %w", launchd.LaunchAgentTarget(), err)
 	}
-	return reportServiceRunning()
+	return reportServiceRunning(host, port)
 }
 
 func serviceStop() error {
@@ -94,9 +102,15 @@ func serviceStop() error {
 }
 
 func serviceStatus() error {
+	// Read the config first: an unsupported or unparsable config is the more
+	// useful error, and it keeps every config-reading subcommand failing the
+	// same way before it touches launchd or the network.
+	host, port, err := serviceListenAddress()
+	if err != nil {
+		return err
+	}
 	installed := launchAgentPlistExists()
 	loaded := serviceLoaded()
-	host, port := serviceListenAddress()
 	healthy := launchd.ProbeHealth(launchd.HealthURL(host, port), launchd.StatusHealthTimeout) == nil
 
 	state := fmt.Sprintf("installed=%s loaded=%s healthy=%s", yesNo(installed), yesNo(loaded), yesNo(healthy))
@@ -107,8 +121,7 @@ func serviceStatus() error {
 	return fmt.Errorf("proxy service is not ready (%s); check %s and %s", state, config.ServiceLogPath(), config.ServiceErrorLogPath())
 }
 
-func reportServiceRunning() error {
-	host, port := serviceListenAddress()
+func reportServiceRunning(host string, port int) error {
 	if err := launchd.WaitForHealth(host, port); err != nil {
 		return fmt.Errorf("proxy health check failed: %w; check %s and %s", err, config.ServiceLogPath(), config.ServiceErrorLogPath())
 	}
@@ -116,12 +129,14 @@ func reportServiceRunning() error {
 	return nil
 }
 
-// serviceListenAddress reads the configured listen address, falling back to the
-// documented default when the config is unreadable.
-func serviceListenAddress() (string, int) {
+// serviceListenAddress reads the configured listen address. An unreadable or
+// unsupported config is reported instead of being replaced by the default: a
+// silent fallback would probe a port this instance does not own and would report
+// success for a configuration the daemon itself refuses to serve.
+func serviceListenAddress() (string, int, error) {
 	gatewayConfig, err := config.LoadGatewayConfig(config.ConfigPath())
 	if err != nil {
-		return config.DefaultListenHost, config.DefaultListenPort
+		return "", 0, err
 	}
 	host := strings.TrimSpace(gatewayConfig.Listen.Host)
 	if host == "" {
@@ -131,7 +146,7 @@ func serviceListenAddress() (string, int) {
 	if port == 0 {
 		port = config.DefaultListenPort
 	}
-	return host, port
+	return host, port, nil
 }
 
 func serviceLoaded() bool {

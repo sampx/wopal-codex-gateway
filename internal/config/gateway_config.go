@@ -79,11 +79,6 @@ type QuotaConfig struct {
 	MaxStepCap float64 `json:"maxStepCap,omitempty"`
 }
 
-type OllamaConfig struct {
-	Enabled bool   `json:"enabled,omitempty"`
-	BaseURL string `json:"baseUrl,omitempty"`
-}
-
 // GatewayConfig is the single in-memory form of runtime/config.json. The CLI
 // and the daemon read and write it through the same parser so a value can never
 // mean one thing in `config show` and another in `serve`.
@@ -94,7 +89,6 @@ type GatewayConfig struct {
 	Notifications NotificationsConfig `json:"notifications,omitempty"`
 	Logs          Logs                `json:"logs,omitempty"`
 	Quota         QuotaConfig         `json:"quota,omitempty"`
-	Ollama        OllamaConfig        `json:"ollama,omitempty"`
 }
 
 // NotificationsConfig is one notifications block in runtime/config.json. It
@@ -161,7 +155,38 @@ func LoadGatewayConfig(path string) (*GatewayConfig, error) {
 	if saved.Version != gatewayConfigVersion {
 		return nil, fmt.Errorf("%s: unsupported gateway config version %d (expected %d)", path, saved.Version, gatewayConfigVersion)
 	}
+	if err := rejectRemovedSections(data, path); err != nil {
+		return nil, err
+	}
 	return MergeGatewayConfig(&saved), nil
+}
+
+// removedConfigSection names a section that earlier configuration versions
+// carried and that version 1 no longer supports.
+type removedConfigSection struct {
+	key  string
+	hint string
+}
+
+// removedConfigSections is the single place that knows which legacy sections
+// were dropped. Keeping it explicit means a stale config fails loudly with a
+// fix instead of being silently ignored, and no removed provider survives as a
+// live field that `config show` or a save would re-emit.
+var removedConfigSections = []removedConfigSection{
+	{key: "ollama", hint: "Ollama support was removed; delete the \"ollama\" block"},
+}
+
+func rejectRemovedSections(data []byte, path string) error {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return nil // the typed unmarshal above already reported the parse error
+	}
+	for _, section := range removedConfigSections {
+		if _, present := probe[section.key]; present {
+			return fmt.Errorf("%s: unsupported configuration section %q. %s", path, section.key, section.hint)
+		}
+	}
+	return nil
 }
 
 // MergeGatewayConfig applies defaults to a parsed configuration while keeping
@@ -206,9 +231,6 @@ func normalizeQuotaMaxStepCap(value float64) float64 {
 func ValidateServeConfig(cfg *GatewayConfig) error {
 	if strings.TrimSpace(cfg.WopalAI.BaseURL) == "" {
 		return fmt.Errorf("wopalAi.baseUrl is required")
-	}
-	if cfg.Ollama.Enabled {
-		return fmt.Errorf("Ollama integration must remain disabled for this gateway build")
 	}
 	return nil
 }

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -168,5 +170,40 @@ func TestLoadInstallConfigRequiresVersion(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Fatalf("error does not name the config path: %v", err)
+	}
+}
+
+// TestGatewayConfigRejectsLegacyOllamaSection covers W-01: Ollama is not part of
+// the version-1 schema. A stale block must fail loudly with a fix, instead of
+// being accepted into the canonical struct and re-emitted by `config show`.
+func TestGatewayConfigRejectsLegacyOllamaSection(t *testing.T) {
+	body := `{"version":1,"wopalAi":{"baseUrl":"https://example.test/v1"},"ollama":{"enabled":true,"baseUrl":"http://127.0.0.1:11434"}}`
+	_, err := LoadGatewayConfig(writeGatewayConfigFile(t, body))
+	if err == nil {
+		t.Fatal("a version-1 config with an ollama block was accepted")
+	}
+	if !strings.Contains(err.Error(), "ollama") {
+		t.Fatalf("error = %v, want it to name the removed section", err)
+	}
+	if !strings.Contains(err.Error(), "delete") {
+		t.Fatalf("error = %v, want it to say how to fix the file", err)
+	}
+}
+
+// TestGatewayConfigShapeHasNoOllamaField covers the other half of W-01: the
+// canonical type must not carry the removed provider, so neither `config show`
+// nor a save can emit it.
+func TestGatewayConfigShapeHasNoOllamaField(t *testing.T) {
+	cfg := DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://example.test/v1"
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "ollama") {
+		t.Fatalf("canonical config still serializes an ollama field: %s", payload)
+	}
+	if _, ok := reflect.TypeOf(*cfg).FieldByName("Ollama"); ok {
+		t.Fatal("GatewayConfig still declares an Olama field")
 	}
 }

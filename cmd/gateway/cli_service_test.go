@@ -276,3 +276,89 @@ func TestServiceCommandRejectsUnknownSubcommand(t *testing.T) {
 		t.Fatalf("error %q should be a usage error", err)
 	}
 }
+
+// writeUnsupportedGatewayConfig puts a config with an unknown version in place,
+// so the config-reading commands must fail and report it.
+func writeUnsupportedGatewayConfig(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(config.ConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"version":99,"listen":{"host":"127.0.0.1","port":11435}}`
+	if err := os.WriteFile(config.ConfigPath(), []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestServiceCommandsRejectInvalidConfigBeforeLaunchctl covers B-01: service
+// start/restart/status must fail on an unsupported config version instead of
+// silently probing the default port and acting on launchd first.
+func TestServiceCommandsRejectInvalidConfigBeforeLaunchctl(t *testing.T) {
+	for _, subcommand := range []string{"start", "restart", "status"} {
+		t.Run(subcommand, func(t *testing.T) {
+			useTempGatewayRoot(t)
+			if err := os.MkdirAll(filepath.Dir(config.LaunchAgentPath()), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(config.LaunchAgentPath(), []byte("plist"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			calls := stubLaunchctl(t, nil)
+			stubHealthClient(t, http.StatusOK)
+			writeUnsupportedGatewayConfig(t)
+
+			_, err := captureStdout(t, func() error { return runServiceCommand(subcommand, nil) })
+			if err == nil {
+				t.Fatalf("service %s accepted an unsupported config version", subcommand)
+			}
+			if !strings.Contains(err.Error(), "unsupported gateway config version") {
+				t.Fatalf("service %s error = %v, want an unsupported-version error", subcommand, err)
+			}
+			// Validation happens before any side effect: no launchd call at all.
+			if len(*calls) != 0 {
+				t.Fatalf("service %s ran launchctl before validating config: %v", subcommand, *calls)
+			}
+		})
+	}
+}
+
+// TestServiceStatusReportsConfiguredListenAddress proves status probes the port
+// the config names, not the default, so a silent fallback cannot mask a
+// misconfigured instance.
+func TestServiceStatusReportsConfiguredListenAddress(t *testing.T) {
+	useTempGatewayRoot(t)
+	if err := os.MkdirAll(filepath.Dir(config.LaunchAgentPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.LaunchAgentPath(), []byte("plist"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubLaunchctl(t, nil)
+
+	cfg := config.DefaultGatewayConfig()
+	cfg.Listen.Port = 11999
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var probed string
+	original := launchd.HealthClient
+	launchd.HealthClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		probed = request.URL.Scheme + "://" + request.URL.Host
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request:    request,
+		}, nil
+	})}
+	t.Cleanup(func() { launchd.HealthClient = original })
+
+	if _, err := captureStdout(t, func() error { return runServiceCommand("status", nil) }); err != nil {
+		t.Fatalf("service status: %v", err)
+	}
+	if probed != "http://127.0.0.1:11999" {
+		t.Fatalf("status probed %q, want the configured http://127.0.0.1:11999", probed)
+	}
+}
