@@ -117,7 +117,7 @@ func TestConfigCommandWopalSavesModelsAndClearsExclusions(t *testing.T) {
 		if model.Vision == nil || !*model.Vision {
 			t.Errorf("model[%d].Vision = %v", index, model.Vision)
 		}
-		if model.Reasoning == nil || !*model.Reasoning {
+		if model.Reasoning != nil || !model.SupportsReasoning() {
 			t.Errorf("model[%d].Reasoning = %v", index, model.Reasoning)
 		}
 	}
@@ -174,10 +174,10 @@ func TestConfigCommandWopalUsesDefaultMetadataAndReasoningFlag(t *testing.T) {
 		t.Fatalf("config.LoadGatewayConfig() error = %v", err)
 	}
 	model := saved.WopalAI.Models[0]
-	if model.ContextWindow == nil || *model.ContextWindow != config.DefaultContextWindow {
+	if model.ContextWindow != nil || model.EffectiveContextWindow() != config.DefaultContextWindow {
 		t.Fatalf("ContextWindow = %v", model.ContextWindow)
 	}
-	if model.Vision == nil || *model.Vision {
+	if model.Vision != nil || !model.SupportsVision() {
 		t.Fatalf("Vision = %v", model.Vision)
 	}
 	if model.Reasoning == nil || *model.Reasoning {

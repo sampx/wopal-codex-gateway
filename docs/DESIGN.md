@@ -5,7 +5,7 @@
 > **Parent Architecture**: N/A
 > **Parent Product**: N/A
 > **Sub-DESIGNs**:
-> - `./DESIGN-model-catalog.md` — 模型目录与能力来源（Proposed）
+> - `./DESIGN-model-catalog.md` — 模型目录与能力来源
 
 ## Project Role
 
@@ -90,11 +90,13 @@ Wopal Codex Gateway 是 macOS 上的本地模型路由网关。它让 Codex Desk
 ```text
 wopal-codex-gateway serve
 wopal-codex-gateway config show
+wopal-codex-gateway config migrate --from <existing.json> --to <new.json>
 wopal-codex-gateway config wopal --base-url <url> --model <name>...
 wopal-codex-gateway auth set
 wopal-codex-gateway auth test
 wopal-codex-gateway auth status
 wopal-codex-gateway models list
+wopal-codex-gateway models inspect [model...]
 wopal-codex-gateway models sync
 wopal-codex-gateway models add <name>...
 wopal-codex-gateway models set <name>...
@@ -136,7 +138,7 @@ wopal-codex-gateway quota reset-learning
     "baseUrl": "https://example.com/v1",
     "toolMode": "code_mode_only",
     "models": [
-      { "name": "deepseek-v4.1-flash", "contextWindow": 262144, "vision": false, "reasoning": true }
+      { "name": "deepseek-v4.1-flash" }
     ],
     "excludedModels": []
   },
@@ -148,9 +150,10 @@ wopal-codex-gateway quota reset-learning
 
 规则：
 
-- `version` 必须是 `1`；不支持的版本在启动前失败。
+- `version` 必须是 `1`；不支持的版本在启动前失败。`config migrate` 从无版本号或版本 1 的配置生成单独候选文件，保留现有模型覆盖并移除 `ollama` 段；源文件保持原样，目标文件已存在时拒绝覆盖。
 - `listen.host` 默认 `127.0.0.1`，`listen.port` 默认 `11435`。
 - `wopalAi.models` 是外部模型配置来源；`excludedModels` 只影响 `models sync`。
+- 模型能力按用户覆盖、provider 明确返回值、网关默认值的顺序解析；默认上下文为 1,000,000 tokens，支持图片和推理。来源、同步与覆盖规则见模型目录子设计。
 - `wopalAi.toolMode` 统一设置外部模型的工具调用方式，默认 `code_mode_only`；允许 `code_mode` 和 `direct`，其他值在读写配置或刷新目录前报错。
 - `logs.maxSizeMb` 与 `logs.maxBackups` 控制日志轮转。
 - `quota.maxStepCap` 是已观测最大单步的上限，默认 `5`，允许范围 `1–10`；缺省、`<= 0` 或超出范围时按默认 `5`。

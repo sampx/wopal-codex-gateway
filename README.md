@@ -216,11 +216,12 @@ unsupported configuration section "ollama". Ollama support was removed; delete t
 ```text
 serve
 config show
-config wopal --base-url <url> [--model <name>...] [--context-window 262144] [--vision] [--no-reasoning]
+config wopal --base-url <url> [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
 auth set
 auth test
 auth status
 models list
+models inspect [model...]
 models sync
 models add <name...>
 models set <name...>
@@ -255,7 +256,7 @@ runtime/bin/wopal-codex-gateway config wopal \
   --context-window 262144
 ```
 
-`--model` replaces the configured model list. `--context-window` (default `262144`), `--vision`, and `--no-reasoning` apply to those entries. After changing the model list this way, run `catalog refresh` to rebuild the Codex catalog.
+`--model` replaces the configured model list. Only explicit `--context-window N`, `--vision` / `--no-vision`, and `--reasoning` / `--no-reasoning` options are saved as user overrides. Omitted fields resolve from provider metadata, then defaults (1,000,000 tokens, vision and reasoning enabled). After changing the model list this way, run `catalog refresh` to rebuild the Codex catalog.
 
 For a read-only view of the current configuration:
 
@@ -311,12 +312,25 @@ runtime/bin/wopal-codex-gateway models sync
 Newly discovered models default to:
 
 ```text
-context window: 262144
-vision: false
+context window: 1000000
+vision: true
 reasoning: true
 ```
 
 These values are local Codex metadata only; they do not change the upstream model.
+
+New models store only their names. `models sync` saves explicit provider capabilities separately in `runtime/model-metadata.json`, tied to the provider URL. Existing manual overrides remain intact. No external capability directory or model-name guessing is used.
+
+Use `models inspect [model...]` to see effective values and their `user`, `provider`, or `default` source. It also warns about Codex global context overrides without changing them. `models set <model...> --auto` clears all capability overrides; `--reset-context-window`, `--reset-vision`, or `--reset-reasoning` clears one field. Reapplying a value equal to the default still counts as an intentional user override.
+
+Prepare an upgrade config without touching the current file:
+
+```sh
+runtime/bin/wopal-codex-gateway config migrate --from runtime/config.json --to runtime/config-v1.json
+```
+
+This creates a private candidate with version 1 and no `ollama` section, preserves the provider/model settings, and refuses to overwrite an existing output. Validate the candidate before service replacement. This command does not change Codex configuration or start/restart a service.
+
 
 ### 4.6 Model catalog
 

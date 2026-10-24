@@ -53,6 +53,13 @@ func runServe(args []string) error {
 	if err := config.ValidateServeConfig(gateway); err != nil {
 		return fmt.Errorf("%s: %w", gatewayConfigPath, err)
 	}
+	if err := config.SetProjectRoot(root); err != nil {
+		return err
+	}
+	gateway, err = resolveRuntimeModels(gateway)
+	if err != nil {
+		return err
+	}
 	wopalKey, err := keychain.GetWopalAPIKey()
 	if err != nil {
 		return err

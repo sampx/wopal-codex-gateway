@@ -11,7 +11,7 @@ import (
 const (
 	DefaultListenHost     = "127.0.0.1"
 	DefaultListenPort     = 11435
-	DefaultContextWindow  = 262144
+	DefaultContextWindow  = 1000000
 	DefaultToolMode       = "code_mode_only"
 	defaultWopalModelName = "qwen3-coder"
 
@@ -31,8 +31,8 @@ const (
 )
 
 // ExternalModelConfig is one Wopal AI model entry in runtime/config.json. The
-// optional fields stay pointers so an entry that omits them keeps Codex's
-// defaults instead of silently claiming vision or no reasoning.
+// optional fields stay pointers to distinguish user overrides (including false)
+// from capabilities that should resolve through provider metadata and defaults.
 type ExternalModelConfig struct {
 	Name          string `json:"name"`
 	ContextWindow *int   `json:"contextWindow,omitempty"`
@@ -48,7 +48,7 @@ func (m ExternalModelConfig) EffectiveContextWindow() int {
 }
 
 func (m ExternalModelConfig) SupportsVision() bool {
-	return m.Vision != nil && *m.Vision
+	return m.Vision == nil || *m.Vision
 }
 
 // SupportsReasoning defaults to true: a model without an explicit flag keeps
@@ -138,18 +138,12 @@ func (c NotificationsConfig) NormalizedSound() string {
 }
 
 func DefaultGatewayConfig() *GatewayConfig {
-	ContextWindow := DefaultContextWindow
-	reasoning := true
 	return &GatewayConfig{
 		Version: gatewayConfigVersion,
 		Listen:  ListenConfig{Host: DefaultListenHost, Port: DefaultListenPort},
 		WopalAI: WopalAIConfig{
-			ToolMode: DefaultToolMode,
-			Models: []ExternalModelConfig{{
-				Name:          defaultWopalModelName,
-				ContextWindow: &ContextWindow,
-				Reasoning:     &reasoning,
-			}},
+			ToolMode:       DefaultToolMode,
+			Models:         []ExternalModelConfig{{Name: defaultWopalModelName}},
 			ExcludedModels: []string{},
 		},
 		Logs:  Logs{MaxSizeMB: DefaultLogMaxSizeMB, MaxBackups: DefaultLogMaxBackups},

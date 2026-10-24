@@ -145,8 +145,8 @@ func TestBuildCatalogWopalContractAndNativeCopy(t *testing.T) {
 	if value, ok := catalogTestValue(t, second, "context_window").(int); !ok || value != config.DefaultContextWindow {
 		t.Fatalf("default context_window = %#v, want %d", second["context_window"], config.DefaultContextWindow)
 	}
-	if value := catalogTestValue(t, second, "input_modalities"); !reflect.DeepEqual(value, []any{"text"}) {
-		t.Fatalf("default input_modalities = %#v, want [text]", value)
+	if value := catalogTestValue(t, second, "input_modalities"); !reflect.DeepEqual(value, []any{"text", "image"}) {
+		t.Fatalf("default input_modalities = %#v, want [text image]", value)
 	}
 	if value := catalogTestString(t, second, "default_reasoning_level"); value != "high" {
 		t.Fatalf("default_reasoning_level = %q, want high", value)
@@ -332,6 +332,7 @@ func TestCatalogLoadBundledExecutesResolvedCodexCommand(t *testing.T) {
 }
 
 func TestRefreshCatalogWritesNativeAndWopalModels(t *testing.T) {
+	t.Cleanup(config.SetProjectRootForTest(t.TempDir()))
 	nestedCodexHome := filepath.Join(t.TempDir(), "nested", "codex")
 	t.Setenv("CODEX_HOME", nestedCodexHome)
 	catalogTestStubCommand(t, catalogCommandOutput{

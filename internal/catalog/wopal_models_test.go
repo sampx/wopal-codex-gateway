@@ -53,7 +53,7 @@ func TestWopalModelSync(t *testing.T) {
 			available: []string{"glm-5.3-flash-free", "deepseek-v4-flash-free", "deepseek-v4-flash-free", "nomic-embed-text-v2", "bge-RERANKER-v2-m3"},
 			wantModels: []config.ExternalModelConfig{
 				existing,
-				{Name: "deepseek-v4-flash-free", ContextWindow: modelsIntPtr(config.DefaultContextWindow), Vision: modelsBoolPtr(false), Reasoning: modelsBoolPtr(true)},
+				{Name: "deepseek-v4-flash-free"},
 			},
 			wantSkipped:  []string{"nomic-embed-text-v2", "bge-RERANKER-v2-m3"},
 			wantExcluded: []string{},
@@ -62,7 +62,7 @@ func TestWopalModelSync(t *testing.T) {
 			name:         "normalizes and records excluded models before skip checks",
 			available:    []string{"keep", "broken-model", "embed-demo", "other-embedding-model", "another-reranker"},
 			excluded:     []string{" wopal-ai/broken-model ", "embed-demo", ""},
-			wantModels:   []config.ExternalModelConfig{{Name: "keep", ContextWindow: modelsIntPtr(config.DefaultContextWindow), Vision: modelsBoolPtr(false), Reasoning: modelsBoolPtr(true)}},
+			wantModels:   []config.ExternalModelConfig{{Name: "keep"}},
 			wantSkipped:  []string{"other-embedding-model", "another-reranker"},
 			wantExcluded: []string{"broken-model", "embed-demo"},
 		},
@@ -70,8 +70,8 @@ func TestWopalModelSync(t *testing.T) {
 			name:      "deduplicates trimmed available ids in API order",
 			available: []string{" glm-5.3 ", "glm-5.3", "kimi-k3"},
 			wantModels: []config.ExternalModelConfig{
-				{Name: "glm-5.3", ContextWindow: modelsIntPtr(config.DefaultContextWindow), Vision: modelsBoolPtr(false), Reasoning: modelsBoolPtr(true)},
-				{Name: "kimi-k3", ContextWindow: modelsIntPtr(config.DefaultContextWindow), Vision: modelsBoolPtr(false), Reasoning: modelsBoolPtr(true)},
+				{Name: "glm-5.3"},
+				{Name: "kimi-k3"},
 			},
 			wantSkipped:  []string{},
 			wantExcluded: []string{},
@@ -259,4 +259,43 @@ func namesOfModels(models []config.ExternalModelConfig) []string {
 		names = append(names, model.Name)
 	}
 	return names
+}
+
+func TestModelPatchReset(t *testing.T) {
+	original := config.ExternalModelConfig{Name: "a", ContextWindow: modelsIntPtr(131072), Vision: modelsBoolPtr(false), Reasoning: modelsBoolPtr(false)}
+	for _, tc := range []struct {
+		name  string
+		patch ModelPatch
+		want  config.ExternalModelConfig
+	}{
+		{"context", ModelPatch{ResetContextWindow: true}, config.ExternalModelConfig{Name: "a", Vision: modelsBoolPtr(false), Reasoning: modelsBoolPtr(false)}},
+		{"vision", ModelPatch{ResetVision: true}, config.ExternalModelConfig{Name: "a", ContextWindow: modelsIntPtr(131072), Reasoning: modelsBoolPtr(false)}},
+		{"reasoning", ModelPatch{ResetReasoning: true}, config.ExternalModelConfig{Name: "a", ContextWindow: modelsIntPtr(131072), Vision: modelsBoolPtr(false)}},
+		{"all", ModelPatch{ResetContextWindow: true, ResetVision: true, ResetReasoning: true}, config.ExternalModelConfig{Name: "a"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := UpdateWopalModelConfigs([]config.ExternalModelConfig{original, {Name: "untouched"}}, []string{"a"}, tc.patch)
+			if !reflect.DeepEqual(got.Models, []config.ExternalModelConfig{tc.want, {Name: "untouched"}}) {
+				t.Fatalf("reset = %+v", got.Models)
+			}
+			if original.ContextWindow == nil || *original.ContextWindow != 131072 || *original.Vision || *original.Reasoning {
+				t.Fatal("reset mutated original")
+			}
+		})
+	}
+}
+
+func TestSyncPreservesUnsetAndFalseOverrides(t *testing.T) {
+	current := []config.ExternalModelConfig{{Name: "bare"}, {Name: "explicit", ContextWindow: modelsIntPtr(262144), Vision: modelsBoolPtr(false), Reasoning: modelsBoolPtr(false)}}
+	got := SyncWopalModelConfigs(current, []string{"bare", "explicit", "new"}, nil)
+	want := append(append([]config.ExternalModelConfig{}, current...), config.ExternalModelConfig{Name: "new"})
+	if !reflect.DeepEqual(got.Models, want) {
+		t.Fatalf("sync = %+v, want %+v", got.Models, want)
+	}
+	*got.Models[1].ContextWindow = 9
+	*got.Models[1].Vision = true
+	*got.Models[1].Reasoning = true
+	if *current[1].ContextWindow != 262144 || *current[1].Vision || *current[1].Reasoning {
+		t.Fatal("sync shares pointers with current")
+	}
 }

@@ -105,15 +105,17 @@ const helpText = `wopal-codex-gateway
 
 Commands:
   serve --project-root <dir>                                                  Run the gateway daemon
+  config migrate --from <existing.json> --to <new.json>                         Prepare a separate version-1 config
   config show                                                                 Print the gateway configuration
-  config wopal [--base-url <url>] [--tool-mode code_mode_only|code_mode|direct] [--model <name>...] [--context-window 262144] [--vision] [--no-reasoning]
+  config wopal [--base-url <url>] [--tool-mode code_mode_only|code_mode|direct] [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
   auth set                                                                    Store and validate the Wopal AI API key
   auth test                                                                   Validate the stored Wopal AI API key
   auth status                                                                 Show whether a key is configured
   models list                                                                 List models visible to the Wopal AI API key
+  models inspect [model...]                                                    Show effective capabilities and sources
   models sync                                                                 Import all Codex-usable Wopal AI models
-  models add <model...> [--context-window 262144] [--vision] [--no-reasoning]
-  models set <model...> [--context-window N] [--vision|--no-vision] [--reasoning|--no-reasoning]
+  models add <model...> [--context-window N] [--vision] [--no-reasoning]
+  models set <model...> [--context-window N] [--vision|--no-vision] [--reasoning|--no-reasoning] [--auto|--reset-context-window|--reset-vision|--reset-reasoning]
   models remove <model...>                                                    Remove Wopal AI models and exclude them from sync
   catalog refresh                                                             Rebuild the Codex model catalog
   codex install                                                               Install the gateway into Codex

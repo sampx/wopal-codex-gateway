@@ -15,6 +15,9 @@ type wopalModelsRunner struct {
 	loadConfig     func() (*config.GatewayConfig, error)
 	saveConfig     func(*config.GatewayConfig) error
 	fetchModels    func(string, string) ([]string, error)
+	fetchMetadata  func(string, string) (*catalog.ModelMetadataSnapshot, error)
+	loadMetadata   func(string) (*catalog.ModelMetadataSnapshot, error)
+	saveMetadata   func(*catalog.ModelMetadataSnapshot) error
 	getAPIKey      func() (string, error)
 	refreshCatalog func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error)
 	out            io.Writer
@@ -27,6 +30,9 @@ func newWopalModelsRunner() wopalModelsRunner {
 		},
 		saveConfig:     config.SaveGatewayConfig,
 		fetchModels:    catalog.FetchWopalModels,
+		fetchMetadata:  catalog.FetchWopalModelMetadata,
+		loadMetadata:   catalog.LoadModelMetadata,
+		saveMetadata:   catalog.SaveModelMetadata,
 		getAPIKey:      keychain.GetWopalAPIKey,
 		refreshCatalog: catalog.RefreshCatalog,
 		out:            os.Stdout,
@@ -41,6 +47,8 @@ func (runner wopalModelsRunner) run(subcommand string, args []string) error {
 	switch subcommand {
 	case "list":
 		return runner.runList()
+	case "inspect":
+		return runner.runInspect(args)
 	case "sync":
 		return runner.runSync()
 	case "add":
@@ -85,12 +93,31 @@ func (runner wopalModelsRunner) runSync() error {
 	if err != nil {
 		return err
 	}
-	available, err := runner.fetchModels(cfg.WopalAI.BaseURL, apiKey)
-	if err != nil {
-		return err
+	var available []string
+	var snapshot *catalog.ModelMetadataSnapshot
+	if runner.fetchMetadata != nil {
+		snapshot, err = runner.fetchMetadata(cfg.WopalAI.BaseURL, apiKey)
+		if err != nil {
+			return err
+		}
+		if snapshot == nil {
+			return fmt.Errorf("provider returned no model metadata")
+		}
+		for _, m := range snapshot.Models {
+			available = append(available, m.Name)
+		}
+		if err := runner.saveMetadata(snapshot); err != nil {
+			return err
+		}
+	} else {
+		available, err = runner.fetchModels(cfg.WopalAI.BaseURL, apiKey)
+		if err != nil {
+			return err
+		}
 	}
 
-	synced := catalog.SyncWopalModelConfigs(cfg.WopalAI.Models, available, cfg.WopalAI.ExcludedModels)
+	previous := cfg.WopalAI.Models
+	synced := catalog.SyncWopalModelConfigs(previous, available, cfg.WopalAI.ExcludedModels)
 	cfg.WopalAI.Models = synced.Models
 	if err := runner.saveConfig(cfg); err != nil {
 		return err
@@ -107,6 +134,33 @@ func (runner wopalModelsRunner) runSync() error {
 	if len(synced.Excluded) > 0 {
 		runner.printf("Manually excluded model(s): %s\n", strings.Join(synced.Excluded, ", "))
 	}
+	if snapshot != nil {
+		oldNames := make(map[string]bool, len(previous))
+		newNames := make(map[string]bool, len(synced.Models))
+		for _, m := range previous {
+			oldNames[m.Name] = true
+		}
+		added, removed, overrides, defaults := 0, 0, 0, 0
+		for _, m := range synced.Models {
+			newNames[m.Name] = true
+			if !oldNames[m.Name] {
+				added++
+			}
+			if m.ContextWindow != nil || m.Vision != nil || m.Reasoning != nil {
+				overrides++
+			}
+			_, sources := catalog.ResolveModel(m, snapshot)
+			if sources.ContextWindow == "default" || sources.Vision == "default" || sources.Reasoning == "default" {
+				defaults++
+			}
+		}
+		for name := range oldNames {
+			if !newNames[name] {
+				removed++
+			}
+		}
+		runner.printf("Changes: added=%d, removed=%d, preserved-overrides=%d, using-defaults=%d.\n", added, removed, overrides, defaults)
+	}
 	runner.printModelCatalog(result)
 	return nil
 }
@@ -118,23 +172,13 @@ func (runner wopalModelsRunner) runAdd(args []string) error {
 	}
 	names := positionals(args, "--context-window")
 	if len(names) == 0 {
-		return fmt.Errorf("Usage: wopal-codex-gateway models add <model...> [--context-window 262144] [--vision] [--no-reasoning]")
+		return fmt.Errorf("Usage: wopal-codex-gateway models add <model...> [--context-window N] [--vision] [--no-reasoning]")
 	}
-	contextWindow, ok, err := numberOption(args, "--context-window")
+	patch, err := parseModelPatch(args, false)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		contextWindow = config.DefaultContextWindow
-	}
-	vision := hasFlag(args, "--vision")
-	reasoning := !hasFlag(args, "--no-reasoning")
-
-	added := catalog.AddWopalModelConfigs(cfg.WopalAI.Models, names, catalog.ModelPatch{
-		ContextWindow: &contextWindow,
-		Vision:        &vision,
-		Reasoning:     &reasoning,
-	})
+	added := catalog.AddWopalModelConfigs(cfg.WopalAI.Models, names, patch)
 	cfg.WopalAI.Models = added.Models
 
 	unexcluded := make(map[string]struct{}, len(added.Added)+len(added.Existing))
@@ -179,36 +223,12 @@ func (runner wopalModelsRunner) runSet(args []string) error {
 	if len(names) == 0 {
 		return fmt.Errorf("Usage: wopal-codex-gateway models set <model...> [--context-window N] [--vision|--no-vision] [--reasoning|--no-reasoning]")
 	}
-	if hasFlag(args, "--vision") && hasFlag(args, "--no-vision") {
-		return fmt.Errorf("Choose only one of --vision or --no-vision")
-	}
-	if hasFlag(args, "--reasoning") && hasFlag(args, "--no-reasoning") {
-		return fmt.Errorf("Choose only one of --reasoning or --no-reasoning")
-	}
-
-	var patch catalog.ModelPatch
-	contextWindow, ok, err := numberOption(args, "--context-window")
+	patch, err := parseModelPatch(args, true)
 	if err != nil {
 		return err
 	}
-	if ok {
-		patch.ContextWindow = &contextWindow
-	}
-	if hasFlag(args, "--vision") {
-		vision := true
-		patch.Vision = &vision
-	} else if hasFlag(args, "--no-vision") {
-		vision := false
-		patch.Vision = &vision
-	}
-	if hasFlag(args, "--reasoning") {
-		reasoning := true
-		patch.Reasoning = &reasoning
-	} else if hasFlag(args, "--no-reasoning") {
-		reasoning := false
-		patch.Reasoning = &reasoning
-	}
-	if patch.ContextWindow == nil && patch.Vision == nil && patch.Reasoning == nil {
+	if patch.ContextWindow == nil && patch.Vision == nil && patch.Reasoning == nil &&
+		!patch.ResetContextWindow && !patch.ResetVision && !patch.ResetReasoning {
 		return fmt.Errorf("models set requires at least one metadata option")
 	}
 
@@ -228,6 +248,14 @@ func (runner wopalModelsRunner) runSet(args []string) error {
 	runner.printf("Wopal AI model metadata updated: %s\n", strings.Join(updated.Updated, ", "))
 	for _, name := range updated.Updated {
 		model := findExternalModel(updated.Models, name)
+		var snapshot *catalog.ModelMetadataSnapshot
+		if runner.loadMetadata != nil {
+			snapshot, err = runner.loadMetadata(cfg.WopalAI.BaseURL)
+			if err != nil {
+				return err
+			}
+		}
+		model, _ = catalog.ResolveModel(model, snapshot)
 		runner.printf("  wopal-ai/%s: context=%d, vision=%t, reasoning=%t\n",
 			name, model.EffectiveContextWindow(), model.SupportsVision(), model.SupportsReasoning())
 	}

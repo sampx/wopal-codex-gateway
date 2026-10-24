@@ -6,11 +6,14 @@ import (
 	"net/url"
 	"strings"
 
+	"wopal-codex-gateway/internal/catalog"
 	"wopal-codex-gateway/internal/config"
 )
 
 func runConfigCommand(subcommand string, args []string) error {
 	switch subcommand {
+	case "migrate":
+		return runConfigMigrate(args)
 	case "show":
 		return runConfigShow()
 	case "wopal":
@@ -65,25 +68,11 @@ func runConfigWopal(args []string) error {
 
 	names := nonEmptyOptions(args, "--model")
 	if len(names) > 0 {
-		contextWindow, _, err := numberOption(args, "--context-window")
+		patch, err := parseModelPatch(args, false)
 		if err != nil {
 			return err
 		}
-		if contextWindow == 0 {
-			contextWindow = config.DefaultContextWindow
-		}
-		vision := hasFlag(args, "--vision")
-		reasoning := !hasFlag(args, "--no-reasoning")
-
-		cfg.WopalAI.Models = make([]config.ExternalModelConfig, 0, len(names))
-		for _, name := range names {
-			cfg.WopalAI.Models = append(cfg.WopalAI.Models, config.ExternalModelConfig{
-				Name:          name,
-				ContextWindow: &contextWindow,
-				Vision:        &vision,
-				Reasoning:     &reasoning,
-			})
-		}
+		cfg.WopalAI.Models = catalog.AddWopalModelConfigs(nil, names, patch).Models
 
 		explicit := make(map[string]bool, len(names))
 		for _, name := range names {

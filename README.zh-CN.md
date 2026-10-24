@@ -214,11 +214,12 @@ unsupported configuration section "ollama". Ollama support was removed; delete t
 ```text
 serve
 config show
-config wopal --base-url <url> [--model <name>...] [--context-window 262144] [--vision] [--no-reasoning]
+config wopal --base-url <url> [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
 auth set
 auth test
 auth status
 models list
+models inspect [model...]
 models sync
 models add <name...>
 models set <name...>
@@ -253,7 +254,7 @@ runtime/bin/wopal-codex-gateway config wopal \
   --context-window 262144
 ```
 
-`--model` 会替换已配置的模型列表。`--context-window`（默认 `262144`）、`--vision`、`--no-reasoning` 作用于这些模型项。用这种方式修改模型列表后，需要执行 `catalog refresh` 重建 Codex catalog。
+`--model` 会替换已配置的模型列表。只有显式传入的 `--context-window N`、`--vision` / `--no-vision`、`--reasoning` / `--no-reasoning` 才保存为用户覆盖。省略字段依次使用 provider 能力、网关默认值（100 万上下文、支持图片和推理）。用这种方式修改模型列表后，需要执行 `catalog refresh` 重建 Codex catalog。
 
 只读查看当前配置：
 
@@ -309,12 +310,25 @@ runtime/bin/wopal-codex-gateway models sync
 新发现的模型默认 metadata：
 
 ```text
-context window: 262144
-vision: false
+context window: 1000000
+vision: true
 reasoning: true
 ```
 
 这些只是本地 Codex metadata，不会修改上游模型本身。
+
+新增模型只保存名字。`models sync` 把 provider 明确返回的能力另存到 `runtime/model-metadata.json`，按 provider 地址隔离；已有手工覆盖保持原样。不接第三方能力目录，也不按模型名字猜能力。
+
+`models inspect [model...]` 显示每个字段的有效值和来源（`user`、`provider`、`default`），同时提示 Codex 全局上下文设置可能覆盖逐模型值，保留全局配置不动。`models set <模型...> --auto` 清除全部能力覆盖；`--reset-context-window`、`--reset-vision`、`--reset-reasoning` 分别清除单项。用户显式设置与默认值相同的值，也仍视为用户覆盖。
+
+升级前先生成候选配置，保留当前文件：
+
+```sh
+runtime/bin/wopal-codex-gateway config migrate --from runtime/config.json --to runtime/config-v1.json
+```
+
+该命令创建权限为 `0600` 的候选文件，增加版本号、移除 `ollama` 段，保留 provider 和模型设置；输出文件已存在时拒绝覆盖。先验证候选，再替换服务。此命令不修改 Codex 配置，也不启动或重启服务。
+
 
 ### 4.6 模型目录
 

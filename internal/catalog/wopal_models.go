@@ -36,11 +36,14 @@ type RemoveWopalModelsResult struct {
 }
 
 // ModelPatch carries the metadata a caller wants to change. A nil field is left
-// untouched so `models set --vision` never clears the context window.
+// untouched unless its reset flag is set. CLI callers reject reset/set conflicts.
 type ModelPatch struct {
-	ContextWindow *int
-	Vision        *bool
-	Reasoning     *bool
+	ContextWindow      *int
+	Vision             *bool
+	Reasoning          *bool
+	ResetContextWindow bool
+	ResetVision        bool
+	ResetReasoning     bool
 }
 
 var nonChatModelPattern = regexp.MustCompile(`(?i)(embed(ding)?|rerank)`)
@@ -88,7 +91,7 @@ func SyncWopalModelConfigs(current []config.ExternalModelConfig, availableIDs, e
 			result.Models = append(result.Models, cloneExternalModel(model))
 			continue
 		}
-		result.Models = append(result.Models, defaultExternalModelConfig(name))
+		result.Models = append(result.Models, config.ExternalModelConfig{Name: name})
 	}
 	return result
 }
@@ -207,18 +210,6 @@ func uniqueNormalizedModelNames(names []string) []string {
 	return unique
 }
 
-func defaultExternalModelConfig(name string) config.ExternalModelConfig {
-	contextWindow := config.DefaultContextWindow
-	vision := false
-	reasoning := true
-	return config.ExternalModelConfig{
-		Name:          name,
-		ContextWindow: &contextWindow,
-		Vision:        &vision,
-		Reasoning:     &reasoning,
-	}
-}
-
 func cloneExternalModel(model config.ExternalModelConfig) config.ExternalModelConfig {
 	clone := config.ExternalModelConfig{Name: model.Name}
 	if model.ContextWindow != nil {
@@ -237,6 +228,15 @@ func cloneExternalModel(model config.ExternalModelConfig) config.ExternalModelCo
 }
 
 func applyModelPatch(model config.ExternalModelConfig, patch ModelPatch) config.ExternalModelConfig {
+	if patch.ResetContextWindow {
+		model.ContextWindow = nil
+	}
+	if patch.ResetVision {
+		model.Vision = nil
+	}
+	if patch.ResetReasoning {
+		model.Reasoning = nil
+	}
 	if patch.ContextWindow != nil {
 		contextWindow := *patch.ContextWindow
 		model.ContextWindow = &contextWindow

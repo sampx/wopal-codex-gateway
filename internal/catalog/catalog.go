@@ -260,7 +260,16 @@ func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	catalog := buildCatalog(native, cfg.WopalAI.Models, cfg.WopalAI.EffectiveToolMode())
+	snapshot, err := LoadModelMetadata(cfg.WopalAI.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	models := make([]config.ExternalModelConfig, 0, len(cfg.WopalAI.Models))
+	for _, model := range cfg.WopalAI.Models {
+		resolved, _ := ResolveModel(model, snapshot)
+		models = append(models, resolved)
+	}
+	catalog := buildCatalog(native, models, cfg.WopalAI.EffectiveToolMode())
 
 	path := config.CodexGatewayCatalogPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
