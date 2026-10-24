@@ -106,7 +106,7 @@ const helpText = `wopal-codex-gateway
 Commands:
   serve --project-root <dir>                                                  Run the gateway daemon
   config show                                                                 Print the gateway configuration
-  config wopal --base-url <url> [--model <name>...] [--context-window 262144] [--vision] [--no-reasoning]
+  config wopal [--base-url <url>] [--tool-mode code_mode_only|code_mode|direct] [--model <name>...] [--context-window 262144] [--vision] [--no-reasoning]
   auth set                                                                    Store and validate the Wopal AI API key
   auth test                                                                   Validate the stored Wopal AI API key
   auth status                                                                 Show whether a key is configured

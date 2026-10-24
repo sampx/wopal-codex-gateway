@@ -1,10 +1,11 @@
 # Wopal Codex Gateway
 
 > **Status**: Active
-> **Updated**: 2026-10-20
+> **Updated**: 2026-10-24
 > **Parent Architecture**: N/A
 > **Parent Product**: N/A
-> **Sub-DESIGNs**: None
+> **Sub-DESIGNs**:
+> - `./DESIGN-model-catalog.md` — 模型目录与能力来源（Proposed）
 
 ## Project Role
 
@@ -133,6 +134,7 @@ wopal-codex-gateway quota reset-learning
   "listen": { "host": "127.0.0.1", "port": 11435 },
   "wopalAi": {
     "baseUrl": "https://example.com/v1",
+    "toolMode": "code_mode_only",
     "models": [
       { "name": "deepseek-v4.1-flash", "contextWindow": 262144, "vision": false, "reasoning": true }
     ],
@@ -148,7 +150,8 @@ wopal-codex-gateway quota reset-learning
 
 - `version` 必须是 `1`；不支持的版本在启动前失败。
 - `listen.host` 默认 `127.0.0.1`，`listen.port` 默认 `11435`。
-- `wopalAi.models` 是唯一模型来源；`excludedModels` 只影响 `models sync`。
+- `wopalAi.models` 是外部模型配置来源；`excludedModels` 只影响 `models sync`。
+- `wopalAi.toolMode` 统一设置外部模型的工具调用方式，默认 `code_mode_only`；允许 `code_mode` 和 `direct`，其他值在读写配置或刷新目录前报错。
 - `logs.maxSizeMb` 与 `logs.maxBackups` 控制日志轮转。
 - `quota.maxStepCap` 是已观测最大单步的上限，默认 `5`，允许范围 `1–10`；缺省、`<= 0` 或超出范围时按默认 `5`。
 - `maxStepCap` 只约束学习值，不改变基础阈值（5 小时 `97`、每周 `99`）与最小余量（`2`、`1`）的语义。
@@ -192,11 +195,20 @@ wopal-codex-gateway quota reset-learning
 
 官方模型的 `visibility` 原样保留。Wopal 模型使用 `wopal-ai/<model>` slug。
 
-Wopal 模型必须声明 `tool_mode = "code_mode_only"`，与官方模型使用同一套工具面。
-官方模型经由 `additional_tools` 里的 `functions` namespace 暴露 `exec`/`wait`；
-不声明 `tool_mode` 时，Codex 对外部模型回落为直接工具（`exec_command`、
-`apply_patch` …）。于是同一线程内切换模型会重建工具表，`exec` 消失，而历史仍在
-重放 `exec` 调用，Codex 报 `unsupported custom tool call: exec`。
+`runtime/config.json` 是用户配置；`wopal-codex-gateway-models.json` 是 Codex
+读取的生成目录。用户调整能力后刷新目录，生成文件可重建。
+
+`config wopal --tool-mode <mode>` 选择整个 Wopal provider 的工具模式；
+`catalog refresh` 把选择写进目录。默认 `code_mode_only` 提供 `exec`/`wait`，
+`code_mode` 同时提供编排工具与直接工具，`direct` 只提供直接工具。
+官方模型保留自身模式。改为 `direct` 时，已有 `exec` 历史的会话需要新建对话。
+选择模式本身不构成任意模型切换成功的保证。
+
+生成器省略外部条目的空值、Codex 已有的等价默认值和未识别字段。
+官方 `base_instructions` 与 `model_messages.instructions_template` 完全相同时只保留
+后一份；不同值均保留。每个模型至少保留一份有效的基础指令。
+外部模型使用网关的简短编码助手指令，官方模型的有效指令保持原样。
+能力来源和同步优化目标见子设计。
 
 ### Client compatibility logging
 

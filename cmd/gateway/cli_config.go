@@ -39,6 +39,18 @@ func runConfigWopal(args []string) error {
 		return err
 	}
 
+	if mode, ok := option(args, "--tool-mode"); ok {
+		if mode == "" {
+			return fmt.Errorf("--tool-mode requires direct, code_mode or code_mode_only")
+		}
+		cfg.WopalAI.ToolMode = mode
+		if err := cfg.WopalAI.ValidateToolMode(); err != nil {
+			return err
+		}
+	} else if hasFlag(args, "--tool-mode") {
+		return fmt.Errorf("--tool-mode requires direct, code_mode or code_mode_only")
+	}
+
 	if baseURL, ok := option(args, "--base-url"); ok {
 		parsed, err := url.Parse(baseURL)
 		if err != nil {
@@ -97,6 +109,12 @@ func runConfigWopal(args []string) error {
 	models := make([]string, 0, len(cfg.WopalAI.Models))
 	for _, model := range cfg.WopalAI.Models {
 		models = append(models, "wopal-ai/"+model.Name)
+	}
+	if hasFlag(args, "--tool-mode") {
+		fmt.Printf("Wopal AI tool mode: %s. Run catalog refresh, then use a new turn/conversation to load the catalog.\n", cfg.WopalAI.EffectiveToolMode())
+		if cfg.WopalAI.ToolMode == "direct" {
+			fmt.Println("Direct mode has no exec tool; start a new conversation when switching from a code-mode model.")
+		}
 	}
 	fmt.Printf("Wopal AI configured: %s; models=%s\n", baseURL, strings.Join(models, ", "))
 	return nil

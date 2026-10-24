@@ -52,15 +52,23 @@ var catalogReasoningLevels = []any{
 	map[string]any{"effort": "high", "description": "Greater reasoning depth for complex work"},
 }
 
-func buildCatalog(native []map[string]any, wopalModels []config.ExternalModelConfig) []map[string]any {
+func buildCatalog(native []map[string]any, wopalModels []config.ExternalModelConfig, toolMode string) []map[string]any {
 	catalog := make([]map[string]any, 0, len(wopalModels)+len(native))
 	for index, model := range wopalModels {
-		catalog = append(catalog, wopalCatalogEntry(model, -200+index))
+		catalog = append(catalog, wopalCatalogEntry(model, -200+index, toolMode))
 	}
 	for _, model := range native {
 		copied := make(map[string]any, len(model))
 		for key, value := range model {
 			copied[key] = value
+		}
+		// Current Codex promotes base_instructions into model_messages only
+		// when instructions_template is absent. Drop exact duplicates only;
+		// retain every distinct instruction and all other official metadata.
+		if messages, ok := copied["model_messages"].(map[string]any); ok {
+			if template, ok := messages["instructions_template"].(string); ok && copied["base_instructions"] == template {
+				delete(copied, "base_instructions")
+			}
 		}
 		copied["supported_in_api"] = false
 		catalog = append(catalog, copied)
@@ -68,7 +76,7 @@ func buildCatalog(native []map[string]any, wopalModels []config.ExternalModelCon
 	return catalog
 }
 
-func wopalCatalogEntry(model config.ExternalModelConfig, priority int) map[string]any {
+func wopalCatalogEntry(model config.ExternalModelConfig, priority int, toolMode string) map[string]any {
 	contextWindow := model.EffectiveContextWindow()
 	reasoningLevels := catalogReasoningLevels
 	defaultReasoningLevel := "high"
@@ -82,16 +90,10 @@ func wopalCatalogEntry(model config.ExternalModelConfig, priority int) map[strin
 	}
 
 	return map[string]any{
-		"additional_speed_tiers":            []any{},
-		"apply_patch_tool_type":             nil,
-		"auto_compact_token_limit":          nil,
-		"availability_nux":                  nil,
 		"base_instructions":                 "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.",
 		"context_window":                    contextWindow,
 		"default_reasoning_level":           defaultReasoningLevel,
 		"default_reasoning_summary":         "auto",
-		"default_service_tier":              nil,
-		"default_verbosity":                 nil,
 		"description":                       "Wopal AI (New API) model",
 		"display_name":                      "Wopal AI · " + model.Name,
 		"effective_context_window_percent":  95,
@@ -101,32 +103,18 @@ func wopalCatalogEntry(model config.ExternalModelConfig, priority int) map[strin
 		"include_skills_usage_instructions": true,
 		"input_modalities":                  inputModalities,
 		"max_context_window":                contextWindow,
-		"model_messages":                    nil,
 		"priority":                          priority,
-		"service_tiers":                     []any{},
 		"shell_type":                        "unified_exec",
-		// Codex derives the model-visible tool surface from tool_mode. Official
-		// models declare code_mode_only, which exposes exec and wait under the
-		// `functions` namespace. Leaving this unset makes Codex fall back to
-		// direct tools (exec_command, apply_patch, ...) for the external model,
-		// so switching models inside one thread rebuilds the tool set, drops
-		// `exec`, and rejects the replayed history with "unsupported custom tool
-		// call: exec". Declaring the same surface keeps a thread usable across a
-		// switch.
-		"tool_mode":                            "code_mode_only",
+		// The provider default matches Codex official code-mode models so
+		// their exec calls remain available across a model switch.
+		"tool_mode":                            toolMode,
 		"slug":                                 "wopal-ai/" + model.Name,
 		"support_verbosity":                    false,
 		"supported_in_api":                     true,
 		"supported_reasoning_levels":           reasoningLevels,
-		"supports_image_detail_original":       false,
-		"supports_parallel_tool_calls":         true,
-		"supports_reasoning_summaries":         false,
 		"supports_reasoning_summary_parameter": false,
-		"supports_search_tool":                 false,
 		"truncation_policy":                    map[string]any{"limit": 10000, "mode": "tokens"},
-		"upgrade":                              nil,
 		"visibility":                           "list",
-		"web_search_tool_type":                 "text",
 	}
 }
 
@@ -265,11 +253,14 @@ func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 		return nil, fmt.Errorf("refresh model catalog: gateway config is nil")
 	}
 
+	if err := cfg.WopalAI.ValidateToolMode(); err != nil {
+		return nil, err
+	}
 	native, err := loadBundledNativeCatalog()
 	if err != nil {
 		return nil, err
 	}
-	catalog := buildCatalog(native, cfg.WopalAI.Models)
+	catalog := buildCatalog(native, cfg.WopalAI.Models, cfg.WopalAI.EffectiveToolMode())
 
 	path := config.CodexGatewayCatalogPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

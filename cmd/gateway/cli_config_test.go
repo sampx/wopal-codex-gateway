@@ -184,3 +184,37 @@ func TestConfigCommandWopalUsesDefaultMetadataAndReasoningFlag(t *testing.T) {
 		t.Fatalf("Reasoning = %v", model.Reasoning)
 	}
 }
+
+func TestConfigToolModeFlagPersistsAndRejectsInvalidValue(t *testing.T) {
+	root := setupConfigAuthTestRoot(t)
+	for _, mode := range []string{"code_mode", "direct", "code_mode_only"} {
+		_, err := captureConfigAuthTestStdout(t, func() error { return runConfigWopal([]string{"--tool-mode", mode}) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.LoadGatewayConfig(config.ConfigPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.WopalAI.ToolMode != mode {
+			t.Fatalf("saved mode = %q", cfg.WopalAI.ToolMode)
+		}
+	}
+	path := filepath.Join(root, "runtime", "config.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"--tool-mode", "bogus"}, {"--tool-mode"}, {"--tool-mode", "--vision"}} {
+		if err := runConfigWopal(args); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Fatalf("invalid mode changed config: %v", args)
+		}
+	}
+}

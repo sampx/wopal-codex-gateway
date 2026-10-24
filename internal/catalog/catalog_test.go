@@ -14,16 +14,10 @@ import (
 )
 
 var catalogEntryKeys = []string{
-	"additional_speed_tiers",
-	"apply_patch_tool_type",
-	"auto_compact_token_limit",
-	"availability_nux",
 	"base_instructions",
 	"context_window",
 	"default_reasoning_level",
 	"default_reasoning_summary",
-	"default_service_tier",
-	"default_verbosity",
 	"description",
 	"display_name",
 	"effective_context_window_percent",
@@ -33,24 +27,16 @@ var catalogEntryKeys = []string{
 	"include_skills_usage_instructions",
 	"input_modalities",
 	"max_context_window",
-	"model_messages",
 	"priority",
-	"service_tiers",
 	"shell_type",
 	"slug",
 	"tool_mode",
 	"support_verbosity",
 	"supported_in_api",
 	"supported_reasoning_levels",
-	"supports_image_detail_original",
-	"supports_parallel_tool_calls",
-	"supports_reasoning_summaries",
 	"supports_reasoning_summary_parameter",
-	"supports_search_tool",
 	"truncation_policy",
-	"upgrade",
 	"visibility",
-	"web_search_tool_type",
 }
 
 func catalogTestValue(t *testing.T, entry map[string]any, key string) any {
@@ -85,7 +71,7 @@ func TestBuildCatalogWopalContractAndNativeCopy(t *testing.T) {
 		{"slug": "native-unlisted"},
 	}
 
-	got := buildCatalog(native, wopalModels)
+	got := buildCatalog(native, wopalModels, config.DefaultToolMode)
 	if len(got) != 5 {
 		t.Fatalf("buildCatalog() returned %d entries, want 5", len(got))
 	}

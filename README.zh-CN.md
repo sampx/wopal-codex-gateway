@@ -1030,3 +1030,19 @@ go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
 如果 `runtime/config.json` 已经存在，先确认其中包含 `"version": 1`，并且没有旧的 `"ollama"` 块。
 
 然后重启 ChatGPT/Codex Desktop，即可开始使用。
+
+### 工具调用模式
+
+Wopal 模型统一使用 `wopalAi.toolMode`，默认 `code_mode_only`。
+`code_mode_only` 通过 `exec` 编排工具，`code_mode` 同时提供编排和直接调用，
+`direct` 只提供直接调用。官方模型保留自己的模式。
+
+```sh
+runtime/bin/wopal-codex-gateway config wopal --tool-mode code_mode_only
+runtime/bin/wopal-codex-gateway catalog refresh
+```
+
+同样可以在 `runtime/config.json` 的 `wopalAi` 下设置 `"toolMode"`。
+非法值会报错。Codex 读取更新后的目录后才会使用新模式；改为 `direct` 时，
+包含 `exec` 历史的对话应新建对话。模式选择不会重启网关。
+模型目录是生成文件；手工能力覆盖应写入 `runtime/config.json`，刷新时会重新生成目录。

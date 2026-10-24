@@ -1026,3 +1026,21 @@ If `runtime/config.json` already exists, make sure it contains `"version": 1` an
 `"ollama"` block.
 
 Then restart ChatGPT/Codex Desktop and start using the merged model catalog.
+
+### Tool invocation mode
+
+`wopalAi.toolMode` selects one tool mode for all Wopal models and defaults to
+`code_mode_only`. `code_mode_only` orchestrates tools through `exec`, `code_mode`
+provides both orchestration and direct calls, and `direct` provides direct calls
+only. Official entries retain their own modes.
+
+```sh
+runtime/bin/wopal-codex-gateway config wopal --tool-mode code_mode_only
+runtime/bin/wopal-codex-gateway catalog refresh
+```
+
+The same value can be set under `wopalAi` in `runtime/config.json`. Invalid values
+are rejected. Codex must load the refreshed catalog to use the new mode. Start a
+new conversation when choosing `direct` from a conversation with `exec` history.
+Selecting a mode does not restart the gateway. The model catalog is generated;
+maintain capability overrides in `runtime/config.json`, then refresh it.

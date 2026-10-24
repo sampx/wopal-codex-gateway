@@ -12,6 +12,7 @@ const (
 	DefaultListenHost     = "127.0.0.1"
 	DefaultListenPort     = 11435
 	DefaultContextWindow  = 262144
+	DefaultToolMode       = "code_mode_only"
 	defaultWopalModelName = "qwen3-coder"
 
 	// gatewayConfigVersion is the only schema version this binary understands.
@@ -62,9 +63,28 @@ type ListenConfig struct {
 }
 
 type WopalAIConfig struct {
+	ToolMode       string                `json:"toolMode,omitempty"`
 	BaseURL        string                `json:"baseUrl,omitempty"`
 	Models         []ExternalModelConfig `json:"models,omitempty"`
 	ExcludedModels []string              `json:"excludedModels,omitempty"`
+}
+
+// EffectiveToolMode keeps provider entries on the same default tool surface.
+func (c WopalAIConfig) EffectiveToolMode() string {
+	if c.ToolMode == "" {
+		return DefaultToolMode
+	}
+	return c.ToolMode
+}
+
+// ValidateToolMode rejects typos before Codex silently falls back to direct tools.
+func (c WopalAIConfig) ValidateToolMode() error {
+	switch c.EffectiveToolMode() {
+	case "direct", "code_mode", "code_mode_only":
+		return nil
+	default:
+		return fmt.Errorf("wopalAi.toolMode must be direct, code_mode or code_mode_only; got %q", c.ToolMode)
+	}
 }
 
 type Logs struct {
@@ -124,6 +144,7 @@ func DefaultGatewayConfig() *GatewayConfig {
 		Version: gatewayConfigVersion,
 		Listen:  ListenConfig{Host: DefaultListenHost, Port: DefaultListenPort},
 		WopalAI: WopalAIConfig{
+			ToolMode: DefaultToolMode,
 			Models: []ExternalModelConfig{{
 				Name:          defaultWopalModelName,
 				ContextWindow: &ContextWindow,
@@ -157,6 +178,9 @@ func LoadGatewayConfig(path string) (*GatewayConfig, error) {
 	}
 	if err := rejectRemovedSections(data, path); err != nil {
 		return nil, err
+	}
+	if err := saved.WopalAI.ValidateToolMode(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return MergeGatewayConfig(&saved), nil
 }
@@ -203,6 +227,7 @@ func MergeGatewayConfig(saved *GatewayConfig) *GatewayConfig {
 	}
 	merged.Version = gatewayConfigVersion
 	merged.WopalAI.BaseURL = strings.TrimSpace(merged.WopalAI.BaseURL)
+	merged.WopalAI.ToolMode = merged.WopalAI.EffectiveToolMode()
 	if merged.WopalAI.Models == nil {
 		merged.WopalAI.Models = defaults.WopalAI.Models
 	}
@@ -250,6 +275,9 @@ func LoadInstallConfig() (*GatewayConfig, error) {
 
 // SaveGatewayConfig writes the configuration atomically with 0600 permissions.
 func SaveGatewayConfig(cfg *GatewayConfig) error {
+	if err := cfg.WopalAI.ValidateToolMode(); err != nil {
+		return err
+	}
 	// Every write stamps the current schema version, so a file this binary
 	// produced can never be rejected by the next run.
 	cfg.Version = gatewayConfigVersion
