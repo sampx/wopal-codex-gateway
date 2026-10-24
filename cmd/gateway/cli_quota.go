@@ -11,8 +11,8 @@ import (
 )
 
 // runQuotaCommand owns the quota maintenance commands. These run as short-lived
-// CLI processes and only touch the persisted state file; the daemon adopts the
-// change immediately (see quota.Guard.adoptExternalLearningReset).
+// CLI processes and only touch the persisted state file; the running daemon adopts
+// the change on its next decision (see quota.Guard.resetLearningFromDiskIfNewer).
 func runQuotaCommand(subcommand string, args []string) error {
 	switch subcommand {
 	case "reset-learning":

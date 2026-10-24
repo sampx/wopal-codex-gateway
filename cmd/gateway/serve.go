@@ -103,7 +103,7 @@ func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, i
 	}
 	logger.Write(map[string]any{
 		"event": "gateway_starting", "host": gateway.Listen.Host, "port": gateway.Listen.Port,
-		"wopal_models": len(gateway.WopalAI.Models), "ollama_enabled": false, "relay_port": nil,
+		"wopal_models": len(gateway.WopalAI.Models), "relay_port": nil,
 	})
 	quotaGuard := quota.NewGuardWithStateAndMaxStep(logger, filepath.Join(root, "runtime", "official-quota-state.json"), time.Now(), gateway.Quota.MaxStepCap)
 	quotaGuard.SetNotifier(notify.NewQuotaNotifier(logger, gateway.Notifications))
@@ -132,7 +132,6 @@ func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, i
 						"official_quota":       quotaGuard.Status(time.Now()),
 						"notifications":        quotaGuard.NotificationStatus(),
 						"wopal":                "cliproxy-responses-to-chat",
-						"ollama":               "disabled",
 						"request_body_logging": requestBodyLogging,
 					})
 				})

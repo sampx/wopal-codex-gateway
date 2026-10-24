@@ -192,10 +192,21 @@ Gateway 读取 `runtime/config.json`。文件不存在时使用默认配置；�
 - `wopalAi.models` 是配置的模型列表；`excludedModels` 只影响 `models sync`。
 - `wopalAi.models` 缺失时使用内置默认项。
 
-**从旧版本升级：** 如果 `runtime/config.json` 已经存在，先在文件中加入 `"version": 1`，再启动新二进制。否则 `serve` 和所有配置命令都会失败，并指出：
+**从旧版本升级：** 如果 `runtime/config.json` 已经存在，启动新二进制前要先做两件事。
+
+1. 加入 `"version": 1`。
+2. 删除 `"ollama"` 块。Ollama 支持已经移除，残留的块会被明确拒绝，而不是被静默忽略。
+
+缺少 `version` 时会失败并指出：
 
 ```text
 unsupported gateway config version 0 (expected 1)
+```
+
+仍带已移除段落时会失败并指出：
+
+```text
+unsupported configuration section "ollama". Ollama support was removed; delete the "ollama" block
 ```
 
 ### 4.2 CLI 总览

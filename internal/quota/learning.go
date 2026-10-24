@@ -105,6 +105,9 @@ func (g *Guard) clearFailoverOnReset() {
 	g.failoverSince = time.Time{}
 	g.failoverModel = ""
 	g.recoveryKey = ""
+	// Advance the generation so a timer armed for the cleared failover can never be
+	// mistaken for the owner of the next one.
+	g.failoverSeq++
 	g.failoverMu.Unlock()
 	if wasActive {
 		g.logger.Write(map[string]any{"event": "official_quota_failover_cleared_by_reset"})
@@ -171,9 +174,20 @@ func writeQuotaStateFile(path string, state PersistedState) error {
 	return nil
 }
 
-// ResetLearning clears every learned step for every account and reports how
-// many accounts changed. The daemon picks the change up on its next persist.
+// ResetLearning clears every learned step for every account and reports how many
+// accounts changed. It takes the cross-process state file lock, so a daemon
+// snapshot prepared before the reset cannot be renamed over the result afterwards.
+// The running daemon adopts the cleared value on its next Blocked, Status or
+// persist call, so a successful reset is visible immediately.
 func ResetLearning(path string) (int, error) {
+	// Serialize with the daemon writer before reading, so the read-modify-write is
+	// atomic with respect to a concurrent persist.
+	fileLock, lockErr := lockStateFile(path)
+	if lockErr != nil {
+		return 0, lockErr
+	}
+	defer fileLock.Unlock()
+
 	state, err := readQuotaStateFile(path)
 	if err != nil {
 		// No state file means the guard never learned a step, which is already

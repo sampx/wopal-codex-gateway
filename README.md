@@ -194,10 +194,21 @@ Rules:
 - `wopalAi.models` is the configured model list; `excludedModels` only affects `models sync`.
 - If `wopalAi.models` is omitted, the built-in default entry is used.
 
-**Upgrading from an older release:** if `runtime/config.json` already exists, add `"version": 1` before starting the new binary. Otherwise `serve` and every configuration command fail with:
+**Upgrading from an older release:** if `runtime/config.json` already exists, make both changes below before starting the new binary.
+
+1. Add `"version": 1`.
+2. Delete the `"ollama"` block. Ollama support was removed, and a leftover block is rejected rather than silently ignored.
+
+A file missing `version` fails with:
 
 ```text
 unsupported gateway config version 0 (expected 1)
+```
+
+A file that still carries the removed section fails with:
+
+```text
+unsupported configuration section "ollama". Ollama support was removed; delete the "ollama" block
 ```
 
 ### 4.2 CLI overview

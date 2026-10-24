@@ -87,9 +87,16 @@ type Guard struct {
 	failoverSince  time.Time
 	failoverModel  string
 	recoveryKey    string
+	// failoverSeq increments on every new failover generation so recovery timers
+	// can prove which generation they belong to.
+	failoverSeq uint64
 
 	// scheduleAfter is overridden in tests; production uses time.AfterFunc.
 	scheduleAfter func(time.Duration, func())
+
+	// beforeRename is a test-only seam: it runs after the snapshot payload is
+	// prepared and before it is renamed into place. Production leaves it nil.
+	beforeRename func()
 
 	// persistenceMu serializes the whole adopt -> snapshot -> write -> record
 	// cycle. Concurrent official traffic (HTTP responses, WebSocket frames and
@@ -207,6 +214,15 @@ func (g *Guard) loadPersisted(now time.Time) {
 	if g == nil || g.persistencePath == "" {
 		return
 	}
+	// Hold the cross-process lock across read + stat, so a reset that lands during
+	// startup cannot leave the guard with the old value and the new mtime.
+	fileLock, lockErr := lockStateFile(g.persistencePath)
+	if lockErr != nil {
+		g.logger.Write(map[string]any{"event": "official_quota_state_load_failed", "error": lockErr.Error()})
+		return
+	}
+	defer fileLock.Unlock()
+
 	raw, err := os.ReadFile(g.persistencePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -305,6 +321,9 @@ func (g *Guard) persist(now time.Time) {
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
+	if hook := g.beforeRename; hook != nil {
+		hook()
+	}
 	if err == nil {
 		err = os.Rename(tmpPath, g.persistencePath)
 		ok = err == nil
@@ -369,15 +388,23 @@ func (g *Guard) enterFailover(requestedModel, reason, accountID string, now time
 		return
 	}
 	resetAt := g.windowResetAt(accountID, reason)
-	key := quotaRecoveryKey(reason, resetAt, requestedModel)
 
 	g.failoverMu.Lock()
-	alreadyArmed := g.recoveryKey == key
 	firstEntry := !g.failoverActive
 	g.failoverActive = true
 	g.failoverSince = now
 	g.failoverModel = requestedModel
-	if !alreadyArmed && !resetAt.IsZero() {
+	// A new generation begins whenever this is a new failover, not a repeat of the
+	// one already in force.
+	var key string
+	alreadyArmed := false
+	if !firstEntry && g.recoveryKey != "" && !resetAt.IsZero() {
+		// Re-entering the failover that is already armed: keep its timer.
+		alreadyArmed = true
+		key = g.recoveryKey
+	} else if !resetAt.IsZero() {
+		g.failoverSeq++
+		key = quotaRecoveryKey(reason, resetAt, requestedModel, g.failoverSeq)
 		g.recoveryKey = key
 	}
 	g.failoverMu.Unlock()
@@ -420,8 +447,12 @@ func quotaObservationSignature(window string, usedPercent float64, resetAt time.
 	return fmt.Sprintf("%s|%.0f|%s|%t", window, usedPercent, resetAt.UTC().Format(time.RFC3339), reserveActive)
 }
 
-func quotaRecoveryKey(reason string, resetAt time.Time, requestedModel string) string {
-	return reason + "|" + resetAt.UTC().Format(time.RFC3339) + "|" + requestedModel
+// quotaRecoveryKey identifies one failover generation. The incoming sequence makes
+// it unique even when a later failover shares the same reason, window and model:
+// otherwise a leftover timer from an earlier generation would look like the owner
+// of the current one and could clear it.
+func quotaRecoveryKey(reason string, resetAt time.Time, requestedModel string, sequence uint64) string {
+	return fmt.Sprintf("%s|%s|%s|%d", reason, resetAt.UTC().Format(time.RFC3339), requestedModel, sequence)
 }
 
 // notifyRecovered clears the failover state and tells the user native models
@@ -431,12 +462,18 @@ func (g *Guard) notifyRecovered(requestedModel, reason string, resetAt time.Time
 		return
 	}
 	g.failoverMu.Lock()
-	superseded := g.recoveryKey != key
+	// Check ownership before mutating anything: a timer left over from a
+	// superseded failover must not clear the failover that replaced it.
+	if g.recoveryKey != key {
+		g.failoverMu.Unlock()
+		return
+	}
 	g.failoverActive = false
 	g.failoverSince = time.Time{}
 	g.failoverModel = ""
+	g.recoveryKey = ""
 	g.failoverMu.Unlock()
-	if superseded || g.notifier == nil {
+	if g.notifier == nil {
 		return
 	}
 	g.notifier.NotifyQuotaRecovered(requestedModel, reason, resetAt, time.Now())
@@ -636,6 +673,17 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 		g.mu.Unlock()
 		return false
 	}
+	// Reject a sample older than the one already stored for this window. Callers
+	// observe on different goroutines (HTTP responses, WebSocket frames, compaction
+	// replays), so a goroutine descheduled between capturing and locking would
+	// otherwise overwrite a newer sample and make the account look unprotected.
+	if current != nil && current.ResetAt.Equal(window.ResetAt) &&
+		!window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() &&
+		window.ObservedAt.Before(current.ObservedAt) {
+		g.latestAccount = key
+		g.mu.Unlock()
+		return false
+	}
 	copy := window
 	// A positive delta between two nearby samples is the only evidence about how
 	// much one sampling step costs. A wider gap can span many turns or an idle
@@ -644,11 +692,15 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 	// the stop point.
 	step := 0.0
 	if current != nil && window.ResetAt.Equal(current.ResetAt) &&
-		!window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() &&
-		window.ObservedAt.Sub(current.ObservedAt) <= officialMaxStepSampleGap {
-		delta := window.UsedPercent - current.UsedPercent
-		if delta > 0 && delta <= g.maxStepCap {
-			step = delta
+		!window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() {
+		// A zero or negative delta is not evidence about the next step: it means
+		// the samples are out of order or duplicated.
+		elapsed := window.ObservedAt.Sub(current.ObservedAt)
+		if elapsed > 0 && elapsed <= officialMaxStepSampleGap {
+			delta := window.UsedPercent - current.UsedPercent
+			if delta > 0 && delta <= g.maxStepCap {
+				step = delta
+			}
 		}
 	}
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
