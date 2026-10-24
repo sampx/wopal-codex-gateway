@@ -95,12 +95,13 @@ func TestServedGatewayNeverWritesPromptBodies(t *testing.T) {
 		t.Fatalf("failure turn unexpectedly succeeded: %s", body)
 	}
 
-	// Malformed request: rejected before routing, must not be logged either.
-	status, _ = postJSON(t, base+"/v1/responses", map[string]any{
-		"model": "wopal-ai/qwen3-coder",
-		"input": e2ePromptMarker,
-	})
-	_ = status
+	// Truly malformed body: not valid JSON, so it is rejected before any
+	// handler runs. This is the pre-routing 4xx path, distinct from upstream
+	// failures.
+	status, body = postRaw(t, base+"/v1/responses", "{"+e2ePromptMarker)
+	if status < 400 || status >= 500 {
+		t.Fatalf("malformed body status=%d, want a 4xx: %s", status, body)
+	}
 
 	if upstreamHits == 0 {
 		t.Fatal("fake upstream was never called; the test proved nothing")
@@ -134,6 +135,25 @@ func waitForHealth(t *testing.T, url string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("gateway never became healthy at %s", url)
+}
+
+// postRaw sends a body that is not valid JSON and asserts nothing about how
+// the gateway rejects it beyond the status class.
+func postRaw(t *testing.T, url, raw string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
 }
 
 func postJSON(t *testing.T, url string, payload map[string]any) (int, string) {
