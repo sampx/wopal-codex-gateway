@@ -95,9 +95,10 @@ func TestServedGatewayNeverWritesPromptBodies(t *testing.T) {
 		t.Fatalf("failure turn unexpectedly succeeded: %s", body)
 	}
 
-	// Truly malformed body: not valid JSON, so it is rejected before any
-	// handler runs. This is the pre-routing 4xx path, distinct from upstream
-	// failures.
+	// Truly malformed body: not valid JSON, so it is rejected before being
+	// forwarded upstream while still traversing the downstream SDK chain,
+	// where a request logger would capture it. This is distinct from the
+	// upstream-failure path above.
 	status, body = postRaw(t, base+"/v1/responses", "{"+e2ePromptMarker)
 	if status < 400 || status >= 500 {
 		t.Fatalf("malformed body status=%d, want a 4xx: %s", status, body)
