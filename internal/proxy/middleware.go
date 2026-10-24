@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/clientfp"
 	"wopal-codex-gateway/internal/compaction"
 	"wopal-codex-gateway/internal/config"
 	"wopal-codex-gateway/internal/quota"
@@ -36,6 +37,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 	chatgptProxy := newOfficialReverseProxy(chatgptTarget, true, logger, quotaGuard)
 	openaiProxy := newOfficialReverseProxy(openaiTarget, false, logger, quotaGuard)
 	nativeReplay := compaction.NewNativeBridge(chatgptTarget, openaiTarget, logger, quotaGuard)
+	clientWatcher := clientfp.NewWatcher(64)
 
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -53,11 +55,31 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 			return
 		}
 
-		model, err := detectRequestModel(c.Request)
+		model, shape, err := detectRequestShape(c.Request)
 		if err != nil {
 			logger.Write(map[string]any{"event": "route_detection_failed", "path": path, "error": err.Error()})
 			c.Next()
 			return
+		}
+		// Record which Codex build sent this request. Codex ships several times
+		// a week and a release can change the request contract without breaking
+		// a build, so the version and the observed shape are written next to the
+		// routing decision instead of being reconstructed after a failure.
+		fingerprint := clientfp.From(c.Request.Header)
+		clientFields := fingerprint.Fields()
+		if shape.ToolSurface != "" && shape.ToolSurface != "none" {
+			for key, value := range shape.Fields() {
+				clientFields[key] = value
+			}
+			if change := clientWatcher.Observed(fingerprint.Version, model, shape, fingerprint.Encoding, fingerprint.BetaFeatures); change != nil {
+				fields := change.Fields()
+				for key, value := range fingerprint.Fields() {
+					if _, ok := fields[key]; !ok {
+						fields[key] = value
+					}
+				}
+				logger.Write(fields)
+			}
 		}
 		if c.Request.Method == http.MethodPost && isGatewayCompactionRequest(c.Request, path) {
 			logger.Write(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": compaction.DedicatedModel, "path": path, "purpose": "compaction"})
@@ -67,7 +89,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 
 		switch routing.Classify(model) {
 		case routing.Wopal:
-			logger.Write(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": model, "path": path})
+			logger.Write(withClient(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": model, "path": path}, clientFields))
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Set("native_compaction_bridge", nativeReplay)
 				c.Abort()
@@ -118,7 +140,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 					return
 				}
 			}
-			logger.Write(map[string]any{"event": "route_selected", "provider": provider, "model": model, "path": path})
+			logger.Write(withClient(map[string]any{"event": "route_selected", "provider": provider, "model": model, "path": path}, clientFields))
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Abort()
 				serveOfficialWebsocketBridge(c, logger, target, quotaGuard, accountID, model, nativeReplay)
@@ -129,7 +151,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 			proxy.ServeHTTP(c.Writer, c.Request)
 			return
 		case routing.Disabled:
-			logger.Write(map[string]any{"event": "route_rejected", "model": model, "path": path, "reason": "unsupported_namespace"})
+			logger.Write(withClient(map[string]any{"event": "route_rejected", "model": model, "path": path, "reason": "unsupported_namespace"}, clientFields))
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "model namespace is disabled", "type": "invalid_request_error"}})
 			return
 		default:
@@ -192,34 +214,37 @@ func isGatewayCompactionRequest(req *http.Request, path string) bool {
 	return json.Unmarshal(decoded, &payload) == nil && routing.InputHasCompactionTrigger(payload.Input)
 }
 
-func detectRequestModel(req *http.Request) (string, error) {
+// detectRequestShape resolves the model and, for requests that carry a body,
+// summarizes the part of the request that tells the gateway how this Codex
+// build talks to it. The body is read once and restored, and the decoded copy is
+// reused for the summary so a request is never decoded twice.
+func detectRequestShape(req *http.Request) (string, clientfp.Shape, error) {
 	hint := routing.ParseRoutingHintModel(req.Header.Get("X-Codex-Routing-Hint"))
 	if req.Method == http.MethodGet || req.Body == nil {
-		return hint, nil
+		return hint, clientfp.Shape{}, nil
 	}
 	raw, err := io.ReadAll(io.LimitReader(req.Body, routing.MaxBodyBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("read request body for routing: %w", err)
+		return "", clientfp.Shape{}, fmt.Errorf("read request body for routing: %w", err)
 	}
 	req.Body = io.NopCloser(bytes.NewReader(raw))
 	req.ContentLength = int64(len(raw))
 	if len(raw) > routing.MaxBodyBytes {
-		return "", fmt.Errorf("request body exceeds routing limit")
+		return "", clientfp.Shape{}, fmt.Errorf("request body exceeds routing limit")
 	}
 	decoded, err := compaction.DecodeBody(raw, req.Header.Get("Content-Encoding"))
 	if err != nil {
-		return "", err
+		return "", clientfp.Shape{}, err
 	}
-	var payload struct {
-		Model string `json:"model"`
-	}
+	var payload map[string]any
 	if err := json.Unmarshal(decoded, &payload); err != nil {
-		return "", fmt.Errorf("parse request body for routing: %w", err)
+		return "", clientfp.Shape{}, fmt.Errorf("parse request body for routing: %w", err)
 	}
-	if model := strings.TrimSpace(payload.Model); model != "" {
-		return model, nil
+	shape := clientfp.ShapeFromBody(payload)
+	if model := shape.Model; model != "" {
+		return model, shape, nil
 	}
-	return hint, nil
+	return hint, shape, nil
 }
 
 func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activity.Logger, quotaGuard *quota.Guard) *httputil.ReverseProxy {
@@ -269,4 +294,17 @@ func mustURL(raw string) *url.URL {
 		panic(err)
 	}
 	return parsed
+}
+
+// withClient copies base and adds the client fingerprint fields. It keeps the
+// existing event payloads readable while making every routing decision
+// attributable to a specific Codex build.
+func withClient(base map[string]any, clientFields map[string]any) map[string]any {
+	if len(clientFields) == 0 {
+		return base
+	}
+	for key, value := range clientFields {
+		base[key] = value
+	}
+	return base
 }

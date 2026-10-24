@@ -149,7 +149,7 @@ func TestNativeCompactionModelSwitch(t *testing.T) {
 func TestPostRoutingUsesActualModelOverStaleHint(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6-luna","input":[]}`))
 	req.Header.Set("X-Codex-Routing-Hint", "model=wopal-ai/old")
-	model, err := detectRequestModel(req)
+	model, _, err := detectRequestShape(req)
 	if err != nil || model != "gpt-6-luna" {
 		t.Fatalf("routed by stale handshake hint: %q %v", model, err)
 	}

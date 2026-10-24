@@ -38,6 +38,7 @@ var catalogEntryKeys = []string{
 	"service_tiers",
 	"shell_type",
 	"slug",
+	"tool_mode",
 	"support_verbosity",
 	"supported_in_api",
 	"supported_reasoning_levels",
@@ -116,6 +117,13 @@ func TestBuildCatalogWopalContractAndNativeCopy(t *testing.T) {
 	}
 	if value := catalogTestString(t, first, "visibility"); value != "list" {
 		t.Fatalf("visibility = %q, want list", value)
+	}
+	// The tool surface must match the official models. Codex rebuilds the tool
+	// set when a thread switches models; a direct-only Wopal entry would drop
+	// `exec` while history still replays exec calls, and Codex rejects those
+	// with "unsupported custom tool call: exec".
+	if value := catalogTestString(t, first, "tool_mode"); value != "code_mode_only" {
+		t.Fatalf("tool_mode = %q, want code_mode_only", value)
 	}
 	if value, ok := catalogTestValue(t, first, "priority").(int); !ok || value != -200 {
 		t.Fatalf("priority = %#v, want int -200", first["priority"])

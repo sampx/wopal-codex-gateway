@@ -192,6 +192,46 @@ wopal-codex-gateway quota reset-learning
 
 官方模型的 `visibility` 原样保留。Wopal 模型使用 `wopal-ai/<model>` slug。
 
+Wopal 模型必须声明 `tool_mode = "code_mode_only"`，与官方模型使用同一套工具面。
+官方模型经由 `additional_tools` 里的 `functions` namespace 暴露 `exec`/`wait`；
+不声明 `tool_mode` 时，Codex 对外部模型回落为直接工具（`exec_command`、
+`apply_patch` …）。于是同一线程内切换模型会重建工具表，`exec` 消失，而历史仍在
+重放 `exec` 调用，Codex 报 `unsupported custom tool call: exec`。
+
+### Client compatibility logging
+
+Codex 每周发布多次，新版本可能在不破坏构建的情况下改变请求契约：压缩算法、
+工具面形状、beta 特性集合、请求字段。为了让升级后的问题可归因，`gateway.log`
+的每条路由与 turn 记录都带上客户端指纹：
+
+| 字段 | 来源 | 用途 |
+| --- | --- | --- |
+| `client_version` | `version` 头，缺失时从 `User-Agent` 解析 | 把请求绑定到具体 Codex 构建 |
+| `client_originator` | `originator` 头 | 区分 Desktop / `codex_exec` / SDK |
+| `client_user_agent` | `User-Agent`（折叠控制字符、截断） | 兜底身份 |
+| `client_encoding` | `Content-Encoding` | 新压缩算法会让网关无法解码 |
+| `client_features` | `x-codex-beta-features` | 契约变化的最早信号 |
+
+请求体只做形状摘要，不留内容：
+
+| 字段 | 含义 |
+| --- | --- |
+| `request_tool_surface` | `code_mode`（`additional_tools` namespace）或 `direct`（顶层 `tools`） |
+| `request_tool_count` | 工具总数 |
+| `request_tool_digest` | 排序后工具名的 8 字节摘要；集合变化即变化 |
+| `request_functions` | `functions` namespace 内的工具名，例如 `[exec wait]` |
+| `request_input_types` | 历史条目类型计数，例如 `message=12` |
+| `request_keys` | 顶层请求字段 |
+
+同一 `client_version` + model 的形状发生变化时，额外写一条
+`client_request_contract_changed`，记录 `tool_surface_from/to`、
+`tool_count_from/to`、`functions_from/to`、`keys_added/removed`、
+`encoding_from/to`、`features_from/to`。变化只在发生的那次记录一次，不是每个
+turn 都写。观察表有界（64 项），淘汰只会导致重复记录，不会漏掉请求。
+
+这些字段全部是 header 值或计数，仍然满足 metadata-only 边界：不记录 prompt、
+正文、工具参数或工具输出。
+
 ### Status
 
 `/_status` 至少包含：

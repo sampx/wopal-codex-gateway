@@ -115,7 +115,7 @@ func TestDetectRequestModelPrefersRoutingHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("X-Codex-Routing-Hint", "model=wopal-ai/glm-5.3-flash;tier=auto")
-	got, err := detectRequestModel(req)
+	got, _, err := detectRequestShape(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestDetectRequestModelPreservesCompressedBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Encoding", "zstd")
-	got, err := detectRequestModel(req)
+	got, _, err := detectRequestShape(req)
 	if err != nil {
 		t.Fatal(err)
 	}

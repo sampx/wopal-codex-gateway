@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"wopal-codex-gateway/internal/activity"
+	"wopal-codex-gateway/internal/clientfp"
 	"wopal-codex-gateway/internal/compaction"
 	"wopal-codex-gateway/internal/config"
 	"wopal-codex-gateway/internal/quota"
@@ -267,11 +268,23 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 	if input, ok := normalized["input"].([]any); ok {
 		inputItems = len(input)
 	}
-	s.logger.Write(map[string]any{
+	turnFields := map[string]any{
 		"event": "turn_started", "turn_id": turnID, "provider": "wopal-ai", "client_model": model,
 		"client_transport": "websocket", "upstream_transport": "http-sse", "input_items": inputItems,
 		"previous_response_id_present": routing.PreviousResponseID(message) != "",
-	})
+	}
+	for key, value := range clientfp.From(s.request.Header).Fields() {
+		turnFields[key] = value
+	}
+	if shape := clientfp.ShapeFromBody(normalized); shape.ToolSurface != "" && shape.ToolSurface != "none" {
+		turnFields["request_tool_surface"] = shape.ToolSurface
+		turnFields["request_tool_count"] = shape.ToolCount
+		turnFields["request_tool_digest"] = shape.ToolDigest
+		if len(shape.Functions) > 0 {
+			turnFields["request_functions"] = shape.Functions
+		}
+	}
+	s.logger.Write(turnFields)
 
 	target := "http://" + s.request.Host + "/v1/responses"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(prepared.Body))
