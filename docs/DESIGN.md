@@ -220,11 +220,12 @@ wopal-codex-gateway quota reset-learning
 
 日志与临时文件规则：
 
-- `serve` 在构建 SDK 前把进程环境变量 `WRITABLE_PATH` 固定到 `runtime/cliproxy`，使 SDK 日志目录解析的第一优先级始终落在这里。
-- `runtime/cliproxy/logs` 与 `runtime/cliproxy-auth/logs` 都被替换为普通文件，SDK 的 request logger 与 body source 无法在这些路径下创建目录或文件。
-- 任一封堵失败时 `serve` 直接启动失败；只有两处封堵全部成功时，`/_status` 才报告 `request_body_logging: "disabled"`。
-- 请求正文只在内存中处理，不写入 `logs/`、`runtime/cliproxy*` 或其他 runtime 目录。
+- `serve` 通过 `sdkapi.WithRequestLoggerFactory` 返回 nil request logger。SDK 只在工厂返回非 nil 日志器时才安装 request-logging middleware；正文捕获能力只存在于该中间件中，因此成功与出错路径都不会把正文写入磁盘。
+- 不实现 no-op logger：`sdk/logging.RequestLogger` 的方法签名引用 SDK 内部类型，外部模块无法实现；返回 nil 是 SDK 支持的退出方式。
+- `/_status` 的 `request_body_logging` 固定报告 `"disabled"`，与实际安装的机制一致。
+- 请求正文只在内存中处理，不写入 `logs/`、`runtime/` 或其他目录。
 - 错误诊断只记录状态码、模型、错误码、request id 和耗时。
+- 升级前提：升级 CLIProxyAPI 后必须重新确认「factory 返回 nil 时仍不安装 request-logging middleware，且 reload 不会重新创建 logger」。这是该机制唯一的升级审计点。
 
 ## Reference Documents
 

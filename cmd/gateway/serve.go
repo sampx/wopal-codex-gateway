@@ -53,13 +53,10 @@ func runServe(args []string) error {
 	if err := config.ValidateServeConfig(gateway); err != nil {
 		return fmt.Errorf("%s: %w", gatewayConfigPath, err)
 	}
-	// Pin the SDK log directory before any SDK code can resolve it. This must
-	// happen before the service is built and before the keychain is touched so
-	// an unsafe log layout always fails the startup.
-	requestBodyLogging, err := installSDKLogProtection(root)
-	if err != nil {
-		return err
-	}
+	// The SDK request logger is disabled at construction time (see
+	// disableSDKRequestLogging): no request-logging middleware is installed, so
+	// no request or response body can be written to disk.
+	requestBodyLogging := requestBodyLoggingState
 
 	wopalKey, err := keychain.GetWopalAPIKey()
 	if err != nil {
@@ -96,6 +93,7 @@ func runServe(args []string) error {
 		WithConfig(cliConfig).
 		WithConfigPath(cliConfigPath).
 		WithServerOptions(
+			sdkapi.WithRequestLoggerFactory(disableSDKRequestLogging),
 			sdkapi.WithMiddleware(proxy.RoutingMiddleware(logger, quotaGuard)),
 			sdkapi.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *sdkconfig.Config) {
 				engine.GET("/_health", func(c *gin.Context) {
