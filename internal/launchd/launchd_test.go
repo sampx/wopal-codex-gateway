@@ -113,7 +113,7 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 	return f(request)
 }
 
-func stubHealthClient(t *testing.T, status int) {
+func stubHealthClient(t *testing.T, status int, body string) {
 	t.Helper()
 	original := HealthClient
 	HealthClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -121,7 +121,7 @@ func stubHealthClient(t *testing.T, status int) {
 			StatusCode: status,
 			Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
 			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Body:       io.NopCloser(strings.NewReader(body)),
 			Request:    request,
 		}, nil
 	})}
@@ -421,13 +421,10 @@ func TestWaitForHealthRetriesUntilHealthy(t *testing.T) {
 }
 
 func TestWaitForHealthTimesOutWithLastError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer server.Close()
+	stubHealthClient(t, http.StatusServiceUnavailable, `{"ok":false}`)
 
 	withHealthTiming(t, 150*time.Millisecond, 10*time.Millisecond)
-	host, port := hostPortFromURL(t, server.URL)
+	host, port := "gateway.test", 11435
 	started := time.Now()
 	err := WaitForHealth(host, port)
 	if err == nil {
@@ -436,7 +433,7 @@ func TestWaitForHealthTimesOutWithLastError(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("waitForHealth took %s, want roughly 150ms", elapsed)
 	}
-	for _, want := range []string{server.URL + "/_health", "150ms", "503"} {
+	for _, want := range []string{HealthURL(host, port), "150ms", "503"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err, want)
 		}
@@ -444,14 +441,10 @@ func TestWaitForHealthTimesOutWithLastError(t *testing.T) {
 }
 
 func TestWaitForInstanceRejectsHealthyForeignInstance(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"instance":"someone-else"}`))
-	}))
-	defer server.Close()
+	stubHealthClient(t, http.StatusOK, `{"ok":true,"instance":"someone-else"}`)
 
 	withHealthTiming(t, 150*time.Millisecond, 10*time.Millisecond)
-	host, port := hostPortFromURL(t, server.URL)
+	host, port := "gateway.test", 11435
 	err := WaitForInstance(host, port, "mine")
 	if err == nil {
 		t.Fatal("WaitForInstance accepted a healthy daemon from another instance")
@@ -478,14 +471,10 @@ func TestWaitForInstanceAcceptsMatchingInstance(t *testing.T) {
 }
 
 func TestWaitForInstanceRejectsLegacyHealthWithoutInstance(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"mode":"single-process"}`))
-	}))
-	defer server.Close()
+	stubHealthClient(t, http.StatusOK, `{"ok":true,"mode":"single-process"}`)
 
 	withHealthTiming(t, 150*time.Millisecond, 10*time.Millisecond)
-	host, port := hostPortFromURL(t, server.URL)
+	host, port := "gateway.test", 11435
 	err := WaitForInstance(host, port, "mine")
 	if err == nil {
 		t.Fatal("WaitForInstance accepted a health response without an instance id")

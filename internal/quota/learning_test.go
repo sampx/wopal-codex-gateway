@@ -2,6 +2,7 @@ package quota
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -496,57 +497,72 @@ func TestQuotaResetSurvivesConcurrentDaemonPersist(t *testing.T) {
 	}
 }
 
-// TestQuotaResetSurvivesStartupLoadInterleaving covers the second half of
-// B-R9-01: the guard must not end up holding the old value together with the
-// post-reset file mtime, which would make later adoption impossible.
+// TestQuotaResetSurvivesStartupLoadInterleaving holds the writer lock while a
+// constructor starts, then commits a reset before releasing that lock. The actual
+// constructor must wait and load the reset value together with its file mtime.
 func TestQuotaResetSurvivesStartupLoadInterleaving(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	path := filepath.Join(t.TempDir(), "official-quota-state.json")
 	account := AccountKey("acct")
-	seeded := `{"version":1,"accounts":{"` + account + `":{"five_hour_max_step":3}},` +
-		`"latest_account":"` + account + `"}`
-	if err := os.WriteFile(path, []byte(seeded), 0o600); err != nil {
+	seeded := quotaTestGuardState(now, 3, 2)
+	if err := writeQuotaStateFile(path, seeded); err != nil {
 		t.Fatal(err)
 	}
-
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// A fresh guard is what a restart does: it loads and records the mtime.
-			g := NewGuardWithState(nil, path, now)
-			_ = g
-		}()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := ResetLearning(path); err != nil {
-				t.Errorf("ResetLearning: %v", err)
-			}
-		}()
-	}
-	wg.Wait()
-
-	if _, err := ResetLearning(path); err != nil {
-		t.Fatal(err)
-	}
-
-	// A guard that started during the storm must still adopt the reset rather than
-	// keeping a stale learned step forever.
-	guard := NewGuardWithState(nil, path, now)
-	guard.persist(now.Add(time.Minute))
-
-	raw, err := os.ReadFile(path)
+	fileLock, err := lockStateFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var persisted PersistedState
-	if err := json.Unmarshal(raw, &persisted); err != nil {
+	defer fileLock.Unlock()
+	started := make(chan struct{})
+	loaded := make(chan *Guard, 1)
+	go func() {
+		close(started)
+		loaded <- NewGuardWithState(nil, path, now)
+	}()
+	<-started
+	select {
+	case <-loaded:
+		t.Fatal("startup loaded state while another writer held the state-file lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// Act as the CLI writer inside the lock it normally holds in ResetLearning.
+	state := seeded.Accounts[account]
+	state.FiveHourMaxStep, state.WeeklyMaxStep = 0, 0
+	seeded.Accounts[account] = state
+	if err := writeQuotaStateFile(path, seeded); err != nil {
 		t.Fatal(err)
 	}
-	if got := persisted.Accounts[account].FiveHourMaxStep; got != 0 {
-		t.Fatalf("persisted learned step = %v, want 0", got)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileLock.Unlock()
+	var guard *Guard
+	select {
+	case guard = <-loaded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup did not finish after the writer released its lock")
+	}
+	// Inspect the participating guard directly: Status/Blocked would adopt a reset
+	// as a side effect and could hide an inconsistent startup snapshot.
+	got := guard.accounts[account]
+	if got.FiveHourMaxStep != 0 || got.WeeklyMaxStep != 0 {
+		t.Fatalf("startup loaded stale learned steps: %+v", got)
+	}
+	if got.FiveHour == nil || got.FiveHour.UsedPercent != 93 {
+		t.Fatalf("startup lost the quota observation: %+v", got)
+	}
+	if !guard.lastPersistModTime.Equal(info.ModTime()) {
+		t.Fatalf("startup mtime = %v, want reset mtime %v", guard.lastPersistModTime, info.ModTime())
+	}
+	guard.persist(now.Add(time.Minute))
+	persisted, err := readQuotaStateFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = persisted.Accounts[account]
+	if got.FiveHourMaxStep != 0 || got.WeeklyMaxStep != 0 {
+		t.Fatalf("startup resurrected reset steps on persist: %+v", got)
 	}
 }
 
@@ -775,5 +791,105 @@ func TestFailoverGenerationFollowsReasonChange(t *testing.T) {
 	fiveHourCallback()
 	if active, _ := guard.FailoverStatus()["active"].(bool); !active {
 		t.Fatal("the five-hour timer cleared a still-warranted weekly failover")
+	}
+}
+
+// Repeated percentages still carry ordering information. Exercise both production
+// ingress paths so persistence cannot accidentally depend on a value change.
+func TestQuotaDuplicateAdvancesObservationWatermark(t *testing.T) {
+	for _, ingress := range []string{"headers", "payload"} {
+		for _, minutes := range []int{officialFiveHourWindowMinutes, officialWeeklyWindowMinutes} {
+			t.Run(fmt.Sprintf("%s/%d", ingress, minutes), func(t *testing.T) {
+				now := time.Unix(1_800_000_000, 0)
+				path := filepath.Join(t.TempDir(), "state.json")
+				guard := NewGuardWithState(nil, path, now)
+				resetAt := now.Add(2 * time.Hour)
+				observe := func(used float64, at time.Time) {
+					if ingress == "headers" {
+						h := make(http.Header)
+						h.Set("X-Codex-Primary-Used-Percent", strconv.FormatFloat(used, 'f', -1, 64))
+						h.Set("X-Codex-Primary-Window-Minutes", strconv.Itoa(minutes))
+						h.Set("X-Codex-Primary-Reset-At", strconv.FormatInt(resetAt.Unix(), 10))
+						guard.ObserveHeaders("acct", h, at)
+					} else {
+						payload := fmt.Sprintf(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":%v,"window_minutes":%d,"reset_at":%d}}}`, used, minutes, resetAt.Unix())
+						guard.ObserveRateLimitPayload("acct", []byte(payload), at)
+					}
+				}
+				protectedUsage := 99.0
+				if minutes == officialFiveHourWindowMinutes {
+					protectedUsage = 98
+				}
+				latest := now.Add(2 * time.Minute)
+				observe(protectedUsage, now)
+				observe(protectedUsage, latest)
+				// This read occurs before a later changed value could trigger a write.
+				persisted, err := readQuotaStateFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				windowOf := func(state AccountState) *Window {
+					if minutes == officialFiveHourWindowMinutes {
+						return state.FiveHour
+					}
+					return state.Weekly
+				}
+				check := func(label string, state AccountState) {
+					t.Helper()
+					w := windowOf(state)
+					if w == nil || w.UsedPercent != protectedUsage || !w.ObservedAt.Equal(latest) {
+						t.Errorf("%s window = %+v, want %v%% at %v", label, w, protectedUsage, latest)
+					}
+				}
+				check("persisted duplicate", persisted.Accounts[AccountKey("acct")])
+				observe(90, now.Add(time.Minute))
+				// An older identical sample must not move the watermark backwards either.
+				observe(protectedUsage, now.Add(30*time.Second))
+				guard.mu.RLock()
+				live := guard.accounts[AccountKey("acct")]
+				guard.mu.RUnlock()
+				check("live after delayed samples", live)
+				persisted, err = readQuotaStateFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				check("persisted after delayed samples", persisted.Accounts[AccountKey("acct")])
+				if blocked, _ := guard.Blocked("acct", latest); !blocked {
+					t.Error("delayed sample disabled live quota protection")
+				}
+				restarted := NewGuardWithState(nil, path, latest)
+				check("reloaded", restarted.accounts[AccountKey("acct")])
+				if blocked, _ := restarted.Blocked("acct", latest); !blocked {
+					t.Error("delayed sample disabled persisted quota protection")
+				}
+			})
+		}
+	}
+}
+
+func TestQuotaRepeatedUsageRefreshesStepSamplingTime(t *testing.T) {
+	for _, minutes := range []int{officialFiveHourWindowMinutes, officialWeeklyWindowMinutes} {
+		t.Run(strconv.Itoa(minutes), func(t *testing.T) {
+			now := time.Unix(1_800_000_000, 0)
+			guard := NewGuard(nil)
+			for i, used := range []float64{80, 80, 83} {
+				at := []time.Time{now, now.Add(2 * time.Minute), now.Add(2*time.Minute + 10*time.Second)}[i]
+				if !guard.ObserveWindow("acct", Window{UsedPercent: used, WindowMinutes: minutes, ResetAt: now.Add(time.Hour), ObservedAt: at}) {
+					t.Fatalf("sample %d did not update state", i)
+				}
+			}
+			state := guard.accounts[AccountKey("acct")]
+			step := state.WeeklyMaxStep
+			current := state.Weekly
+			if minutes == officialFiveHourWindowMinutes {
+				step, current = state.FiveHourMaxStep, state.FiveHour
+			}
+			if step != 3 {
+				t.Fatalf("learned step = %v, want 3 from the latest nearby pair", step)
+			}
+			if guard.ObserveWindow("acct", *current) {
+				t.Fatal("exact duplicate reported a state change")
+			}
+		})
 	}
 }

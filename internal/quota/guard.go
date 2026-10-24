@@ -689,11 +689,6 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
 		current = state.FiveHour
 	}
-	if current != nil && current.UsedPercent == window.UsedPercent && current.WindowMinutes == window.WindowMinutes && current.ResetAt.Equal(window.ResetAt) {
-		g.latestAccount = key
-		g.mu.Unlock()
-		return false
-	}
 	// Reject a sample that belongs to an older quota window than the one already
 	// stored: a delayed response from the previous window must not replace the
 	// current one, or the guard would protect against a window that has already
@@ -712,6 +707,16 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 	if current != nil && current.ResetAt.Equal(window.ResetAt) &&
 		!window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() &&
 		window.ObservedAt.Before(current.ObservedAt) {
+		g.latestAccount = key
+		g.mu.Unlock()
+		return false
+	}
+	// Only an exact duplicate carries no state change. Equal usage with a newer
+	// timestamp must advance the watermark and be persisted by the caller, or a
+	// delayed lower sample could replace it. Logging deduplication stays below.
+	if current != nil && current.UsedPercent == window.UsedPercent &&
+		current.WindowMinutes == window.WindowMinutes && current.ResetAt.Equal(window.ResetAt) &&
+		current.ObservedAt.Equal(window.ObservedAt) {
 		g.latestAccount = key
 		g.mu.Unlock()
 		return false
