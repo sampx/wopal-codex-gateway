@@ -138,8 +138,6 @@ bin/wopal-codex-gateway quota reset-learning
 
 `bin/`、`runtime/`、`logs/`、`recovery/` 都在本机，不进 Git。
 
-从旧布局升级后，`runtime/bin/` 是一个指向 `../bin/` 的兼容软链，让已安装的 LaunchAgent 在重启后仍能找到程序。重新执行 `service install` 会把 plist 改成直接指向 `bin/`，那时就可以删掉这个软链。
-
 
 ## 3. 系统要求
 

@@ -140,8 +140,6 @@ Three rules:
 
 `bin/`, `runtime/`, `logs/`, and `recovery/` are local to your machine and stay out of Git.
 
-After upgrading from the old layout, `runtime/bin/` is a compatibility symlink to `../bin/` so an already-installed LaunchAgent still finds the program after a reboot. Running `service install` again rewrites the plist to point straight at `bin/`; the symlink can be removed afterwards.
-
 
 ## 3. Requirements
 

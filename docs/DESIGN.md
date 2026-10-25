@@ -82,7 +82,7 @@ Wopal Codex Gateway 是 macOS 上的本地模型路由网关。它让 Codex Desk
 | `docs/` | 目标态设计文档 | 与代码同步演进 |
 | `runtime/` | 用户配置与跨重启状态 | 程序独占写入，`0600` |
 | `logs/` | 网关与服务的日志 | 只写 metadata，正文不落盘 |
-| `recovery/` | 回滚入口：上一版可执行文件与启动脚本 | 只在当前版本不可用时使用 |
+| `recovery/` | 回滚入口：上一版可执行文件、启动脚本与 LaunchAgent 回滚模板 | 只在当前版本不可用时使用 |
 
 三条边界把上面九块分开：
 
@@ -91,6 +91,8 @@ Wopal Codex Gateway 是 macOS 上的本地模型路由网关。它让 Codex Desk
 - **`recovery/` 不参与运行。** 正常启动路径从不读取它，它只回答一个问题：当前版本不可用时，怎么回到可用状态。
 
 `bin/`、`runtime/`、`logs/`、`recovery/` 都是本机内容，不进入 Git。
+
+回滚契约：`recovery/start-gateway.sh` 不依赖当前版本，按三条独立路径依次尝试——用 `recovery/rollback-launchd.plist` 重新注册 launchd、直接后台运行上一版 daemon、再失败则报告需人工处理。每次发布新版本前，必须将当前可执行文件留一份到 `recovery/`，否则回滚就没有可用的目标。
 
 ## Technical Stack Choices
 

@@ -55,7 +55,7 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 
 - **路径只有一个来源。** 所有目录与文件路径都来自 `internal/config/paths.go` 的 helper；不在别处拼 `filepath.Join(root, "runtime", ...)`。新增路径先加 helper。
 - **四块目录各司其职。** 可执行文件只进 `bin/`，跨重启状态只进 `runtime/`，人类诊断输出只进 `logs/`，回滚材料只进 `recovery/`。不要新增第五处，也不要把临时文件塞进 `runtime/`。
-- **`recovery/` 不被代码引用。** 正常运行路径不读它；它的存在只回答「当前版本不可用时怎么回到可用状态」。
+- **`recovery/` 不被代码引用。** 正常运行路径不读它；它的存在只回答「当前版本不可用时怎么回到可用状态」。发布新版本前必须把当前可执行文件存一份到这里，否则回滚没有可用目标。
 - **请求正文永不落盘。** 日志只写 metadata：状态码、模型、错误码、request id、耗时、header 指纹与形状计数。prompt、正文、工具参数、工具输出、凭证、原始账号标识都不得写入任何文件。改日志前先看 DESIGN 的 `### Client compatibility logging` 与 `## Data and State Model`。
 - **SDK request logger 保持 nil。** `serve` 通过 `sdkapi.WithRequestLoggerFactory` 返回 nil 是关闭正文捕获的唯一机制。升级 CLIProxyAPI 后必须重新确认 DESIGN 日志规则里的三件事。
 - **密钥只经 Keychain 写入。** 真实 API Key 不进入 `config.json`、`cliproxy-runtime.json`、日志或测试夹具。生成的 SDK 配置用 `__KEYCHAIN__` 占位。
