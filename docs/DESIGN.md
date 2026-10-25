@@ -283,9 +283,24 @@ turn 都写。观察表有界（64 项），淘汰只会导致重复记录，不
 - `official_quota.observed_five_hour_max_step`
 - `official_quota.observed_weekly_max_step`
 - `official_quota.failover`
+- `official_quota.quota_telemetry`
 - `notifications`
 
 `effective_*` 是按观测最大单步计算后的实际停止点。基础阈值与实际阈值同时存在，操作者能解释提前停的原因。
+
+`quota_telemetry` 回答“这个读数还活着吗”：`stale`、`last_accepted_seconds_ago`、`rejected_in_a_row`。没有它，一个已停止接收样本的 guard 与一个“额度充足”的 guard 在 `/_status` 上完全一样，2026-10-25 的事故正是这样隐藏了三小时。
+
+### Quota window identity
+
+`ResetAt` 标识窗口代号，但上游并不逐秒稳定：同一个 5 小时窗口被观测为 `11:14:57Z`、`11:14:59Z` 和 `11:15:01Z`。因此窗口比较必须带容差（`officialResetAtJitterTolerance`，5 秒）：
+
+- 差值在容差内：同一窗口，接受并记 `official_quota_window_jitter`。
+- 样本明显更旧：拒绝，避免延迟响应把状态退回已重置的窗口。
+- 样本明显更新：新窗口，接受并重置该窗口的学习值。
+
+若把 `ResetAt` 当精确身份，一次 2 秒抖动就会让一侧的样本永远被判为旧窗口。存储值单调抬高后再也无法被替换，guard 于是一边保持 `state=open` 一边永久丢弃遥测。
+
+首次接受的样本与首个被拒样本都必须写日志（`official_quota_observed`、`official_quota_sample_rejected`），否则“从未学到任何东西”和“一切正常”在日志里无法区分。
 
 ## Data and State Model
 

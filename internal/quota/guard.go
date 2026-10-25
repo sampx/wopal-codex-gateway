@@ -40,6 +40,19 @@ const (
 	// delta as one sampling step. A wider gap can span many turns or an idle
 	// period, and its delta is not evidence about the next single step.
 	officialMaxStepSampleGap = 60 * time.Second
+
+	// officialResetAtJitterTolerance is how far the reported reset time of one
+	// window may drift between transports and still count as the same window.
+	// Upstream reported the single 5-hour window ending 2026-10-25T11:15Z as
+	// 11:14:57Z, 11:14:59Z and 11:15:01Z. Anything inside this band is the same
+	// generation, not a newer or older one.
+	officialResetAtJitterTolerance = 5 * time.Second
+
+	// QuotaTelemetryStaleAfter is how long /_status may report an open reserve
+	// without a single accepted sample before that reading is marked stale. An
+	// open reserve the guard cannot verify is exactly what a missing sample looks
+	// like, so the two must not be reported the same way.
+	QuotaTelemetryStaleAfter = 15 * time.Minute
 )
 
 type Window struct {
@@ -81,6 +94,17 @@ type Guard struct {
 	// lastObserved deduplicates high-frequency quota telemetry by signature.
 	lastObservedMu sync.Mutex
 	lastObserved   string
+	// seenObservation makes the first accepted sample visible even though it only
+	// establishes the baseline. Without it a guard that never learns anything is
+	// indistinguishable in the log from one that is working.
+	seenObservation bool
+
+	// blindness tracks how the guard is being told about usage. Rejected samples
+	// used to be silent, so a guard that stopped accepting telemetry looked exactly
+	// like a reserve that stayed open.
+	blindMu       sync.Mutex
+	lastAccepted  time.Time
+	rejectedCount int
 
 	failoverMu     sync.Mutex
 	failoverActive bool
@@ -349,13 +373,6 @@ func (g *Guard) persist(now time.Time) {
 	if info, statErr := os.Stat(g.persistencePath); statErr == nil {
 		g.lastPersistModTime = info.ModTime()
 	}
-}
-
-func chatGPTAccountID(req *http.Request) string {
-	if req == nil {
-		return ""
-	}
-	return strings.TrimSpace(req.Header.Get("ChatGPT-Account-ID"))
 }
 
 // quotaExemptOfficialModel lists native models that may keep using the official
@@ -678,7 +695,8 @@ func quotaResetAtFromObject(window map[string]any, now time.Time) (time.Time, bo
 	return time.Time{}, false
 }
 
-func (g *Guard) ObserveWindow(accountID string, window Window) bool {
+func (g *Guard) ObserveWindow(accountID string, window Window) (accepted bool) {
+	defer func() { g.recordQuotaSample(accepted, window.ObservedAt) }()
 	if window.WindowMinutes != officialFiveHourWindowMinutes && window.WindowMinutes != officialWeeklyWindowMinutes {
 		return false
 	}
@@ -689,23 +707,40 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
 		current = state.FiveHour
 	}
-	// Reject a sample that belongs to an older quota window than the one already
-	// stored: a delayed response from the previous window must not replace the
-	// current one, or the guard would protect against a window that has already
-	// reset. ResetAt is the window generation for a given window length.
-	if current != nil && !current.ResetAt.IsZero() && !window.ResetAt.IsZero() &&
-		window.ResetAt.Before(current.ResetAt) {
-		g.latestAccount = key
-		g.mu.Unlock()
-		return false
+	// ResetAt identifies the window generation, but upstream does not report it to
+	// the second: one window was observed as 11:14:57Z, 11:14:59Z and 11:15:01Z from
+	// different transports. Compare with a tolerance, because taking the raw value
+	// as the generation made a 2-second drift permanently fatal: once the stored
+	// value had moved forward, every sample from the other transport looked like an
+	// older window, was dropped, and the newest value could never be displaced. The
+	// guard then stopped learning while usage kept climbing.
+	sameWindow := current != nil && current.ResetAt.Equal(window.ResetAt)
+	if !sameWindow && current != nil && !current.ResetAt.IsZero() && !window.ResetAt.IsZero() {
+		drift := window.ResetAt.Sub(current.ResetAt)
+		switch {
+		case drift.Abs() <= officialResetAtJitterTolerance:
+			sameWindow = true
+			g.logger.Write(map[string]any{
+				"event":             "official_quota_window_jitter",
+				"drift_seconds":     drift.Seconds(),
+				"previous_reset_at": current.ResetAt.UTC().Format(time.RFC3339),
+				"reset_at":          window.ResetAt.UTC().Format(time.RFC3339),
+			})
+		case drift < 0:
+			// A genuinely older window: a delayed response from the previous window
+			// must not replace the current one, or the guard would protect against a
+			// window that has already reset.
+			g.latestAccount = key
+			g.mu.Unlock()
+			return false
+		}
 	}
 	// Within the same window, reject a sample captured before the stored one.
 	// Callers observe on different goroutines (HTTP responses, WebSocket frames,
 	// compaction replays), so a goroutine descheduled between capturing and locking
 	// would otherwise overwrite a newer sample and make the account look
 	// unprotected.
-	if current != nil && current.ResetAt.Equal(window.ResetAt) &&
-		!window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() &&
+	if sameWindow && !window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() &&
 		window.ObservedAt.Before(current.ObservedAt) {
 		g.latestAccount = key
 		g.mu.Unlock()
@@ -728,8 +763,7 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 	// discarded rather than clamped, so a noisy sample never permanently lowers
 	// the stop point.
 	step := 0.0
-	if current != nil && window.ResetAt.Equal(current.ResetAt) &&
-		!window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() {
+	if sameWindow && !window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() {
 		// A zero or negative delta is not evidence about the next step: it means
 		// the samples are out of order or duplicated.
 		elapsed := window.ObservedAt.Sub(current.ObservedAt)
@@ -768,9 +802,10 @@ func (g *Guard) ObserveWindow(accountID string, window Window) bool {
 	reserveActive := window.UsedPercent >= threshold && window.ObservedAt.Before(window.ResetAt)
 	signature := quotaObservationSignature(windowName, window.UsedPercent, window.ResetAt, reserveActive)
 	g.lastObservedMu.Lock()
-	changed := g.lastObserved != signature
+	changed := g.lastObserved != signature || !g.seenObservation
 	if changed {
 		g.lastObserved = signature
+		g.seenObservation = true
 	}
 	g.lastObservedMu.Unlock()
 	if changed {
@@ -802,6 +837,7 @@ func (g *Guard) Status(now time.Time) map[string]any {
 	// Report the state the daemon would actually use now, so a pending external
 	// reset is visible on /_status immediately.
 	g.resetLearningFromDiskIfNewer(now)
+	result["quota_telemetry"] = g.telemetryStatus(now)
 	result["failover"] = g.FailoverStatus()
 	g.mu.RLock()
 	accountID := g.latestAccount
@@ -826,6 +862,56 @@ func (g *Guard) Status(now time.Time) map[string]any {
 		result["weekly"] = quotaWindowStatus(state.Weekly)
 	}
 	return result
+}
+
+// recordQuotaSample tracks whether the guard is still being told about usage. A
+// rejected sample is logged the first time it happens in a run, so a guard that
+// has gone blind shows up in the log instead of only in the numbers it stopped
+// updating.
+func (g *Guard) recordQuotaSample(accepted bool, now time.Time) {
+	if g == nil {
+		return
+	}
+	// Prefer the sample's own capture time so staleness is measured on the same
+	// clock the caller reasons about; fall back to the wall clock for callers that
+	// leave it unset.
+	if now.IsZero() {
+		now = time.Now()
+	}
+	g.blindMu.Lock()
+	firstReject := false
+	if accepted {
+		g.lastAccepted = now
+		g.rejectedCount = 0
+	} else {
+		g.rejectedCount++
+		firstReject = g.rejectedCount == 1
+	}
+	rejected := g.rejectedCount
+	g.blindMu.Unlock()
+	if firstReject {
+		g.logger.Write(map[string]any{"event": "official_quota_sample_rejected", "rejected_in_a_row": rejected})
+	}
+}
+
+// telemetryStatus reports how long ago the guard last accepted a sample. An open
+// reserve is only a real reading while samples are still arriving; without this a
+// silent telemetry break reads as "plenty of quota left".
+func (g *Guard) telemetryStatus(now time.Time) map[string]any {
+	g.blindMu.Lock()
+	last := g.lastAccepted
+	rejected := g.rejectedCount
+	g.blindMu.Unlock()
+	status := map[string]any{"stale": true, "rejected_in_a_row": rejected}
+	if !last.IsZero() {
+		age := now.Sub(last)
+		if age < 0 {
+			age = 0
+		}
+		status["last_accepted_seconds_ago"] = int64(age / time.Second)
+		status["stale"] = age >= QuotaTelemetryStaleAfter
+	}
+	return status
 }
 
 func quotaWindowStatus(window *Window) map[string]any {
