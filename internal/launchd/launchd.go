@@ -104,7 +104,7 @@ func (e *launchctlError) Error() string {
 	return fmt.Sprintf("launchctl failed with exit code %d", e.exitCode)
 }
 
-// LaunchdDomain is the per-user launchd domain, matching the TypeScript CLI.
+// LaunchdDomain is the per-user launchd domain.
 func LaunchdDomain() string {
 	return fmt.Sprintf("gui/%d", os.Getuid())
 }

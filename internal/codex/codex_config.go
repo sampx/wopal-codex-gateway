@@ -50,7 +50,7 @@ type tomlSectionRange struct {
 }
 
 // splitLines keeps each line's trailing newline and omits the synthetic empty
-// line produced by a final newline, matching the TypeScript implementation.
+// line produced by a final newline.
 func splitLines(text string) []string {
 	var lines []string
 	for len(text) > 0 {
