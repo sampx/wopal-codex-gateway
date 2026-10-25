@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-Wopal Codex Gateway 是运行在 macOS 本机上的 Codex 路由网关，交付形态是单个 Go 二进制 `runtime/bin/wopal-codex-gateway`。它让 ChatGPT / Codex Desktop 或 Codex CLI 在保留官方模型能力的同时，也能在同一个模型选择器、同一个会话中使用 `wopal-ai/*` 模型。
+Wopal Codex Gateway 是运行在 macOS 本机上的 Codex 路由网关，交付形态是单个 Go 二进制 `bin/wopal-codex-gateway`。它让 ChatGPT / Codex Desktop 或 Codex CLI 在保留官方模型能力的同时，也能在同一个模型选择器、同一个会话中使用 `wopal-ai/*` 模型。
 
 它不只是一个 HTTP 代理，还负责模型目录合并、Codex 配置接管与恢复、WebSocket/HTTP 跨 Provider 路由、可移植的会话压缩、老会话兼容，以及官方额度保护与自动 failover/failback。
 
@@ -11,19 +11,21 @@ Wopal Codex Gateway 是运行在 macOS 本机上的 Codex 路由网关，交付�
 ## 目录
 
 - [1. 能力概览](#1-能力概览)
-- [2. 系统要求](#2-系统要求)
-- [3. 从源码构建](#3-从源码构建)
-- [4. 首次配置](#4-首次配置)
-- [5. 启用 Gateway](#5-启用-gateway)
-- [6. 验证安装](#6-验证安装)
-- [7. 日常使用](#7-日常使用)
-- [8. 模型管理](#8-模型管理)
-- [9. 服务管理](#9-服务管理)
-- [10. 更新 Gateway](#10-更新-gateway)
-- [11. 停用与卸载](#11-停用与卸载)
-- [12. 故障排查](#12-故障排查)
-- [13. 安全与本地状态](#13-安全与本地状态)
-- [14. 开发与验证](#14-开发与验证)
+- [2. 项目结构](#2-项目结构)
+- [3. 系统要求](#3-系统要求)
+- [4. 从源码构建](#4-从源码构建)
+- [5. 首次配置](#5-首次配置)
+- [6. 启用 Gateway](#6-启用-gateway)
+- [7. 验证安装](#7-验证安装)
+- [8. 日常使用](#8-日常使用)
+- [9. 模型管理](#9-模型管理)
+- [10. 服务管理](#10-服务管理)
+- [11. 更新 Gateway](#11-更新-gateway)
+- [12. 回滚](#12-回滚)
+- [13. 停用与卸载](#13-停用与卸载)
+- [14. 故障排查](#14-故障排查)
+- [15. 安全与本地状态](#15-安全与本地状态)
+- [16. 开发与验证](#16-开发与验证)
 
 ## 1. 能力概览
 
@@ -90,7 +92,7 @@ consolidation_model = "wopal-ai/deepseek-v4.1-flash"
 额度 reset 后，下一次安全的 sampling step 会重新连接并切回原来请求的官方模型。
 
 ```sh
-runtime/bin/wopal-codex-gateway quota reset-learning
+bin/wopal-codex-gateway quota reset-learning
 ```
 
 会清除已学习的单步值，让有效阈值回到基础值，直到再次观测到新的步长。
@@ -114,7 +116,32 @@ runtime/bin/wopal-codex-gateway quota reset-learning
 
 **不修改当前 `model`。** `codex restore` 会恢复这些键在安装前保存的值；`model` 仅在当前值仍以 `wopal-ai/` 开头时回退到安装前取值，如果你已经切到官方模型，则保留你的选择。
 
-## 2. 系统要求
+## 2. 项目结构
+
+| 目录 | 放什么 | 说明 |
+| --- | --- | --- |
+| `bin/` | 构建出来的可执行文件 | 只有 `wopal-codex-gateway` 一个二进制，进去就删 |
+| `cmd/gateway/` | 进程入口与子命令 | 只做装配，业务规则在 `internal/` |
+| `internal/` | 配置、路由、额度、压缩等实现 | 每个包有独立测试 |
+| `launchd/` | LaunchAgent 模板 | 安装时渲染成 `~/Library/LaunchAgents` 下的 plist |
+| `scripts/` | `scripts/gateway` 薄入口 | 只是转发到 `bin/`，不实现逻辑 |
+| `docs/` | 设计文档 | 目标态规范，不是使用手册 |
+| `runtime/` | 配置与运行状态 | 你的设置、额度状态、安装恢复记录 |
+| `logs/` | 三个日志文件 | 只记 metadata，不含对话内容 |
+| `recovery/` | 回滚用 | 上一版程序，正常运行时完全不用 |
+
+三条规则：
+
+- **可执行、状态、日志分开放。** `bin/` 可以随时删了重建，`runtime/` 删了就丢配置，`logs/` 可以随便清。生命周期不同，所以不同目录。
+- **`runtime/` 只放需要跨重启保留的东西。** 临时文件不进这里。
+- **`recovery/` 不参与运行。** 正常启动路径从不读它，它只回答一个问题：新版本起不来时怎么退回。
+
+`bin/`、`runtime/`、`logs/`、`recovery/` 都在本机，不进 Git。
+
+从旧布局升级后，`runtime/bin/` 是一个指向 `../bin/` 的兼容软链，让已安装的 LaunchAgent 在重启后仍能找到程序。重新执行 `service install` 会把 plist 改成直接指向 `bin/`，那时就可以删掉这个软链。
+
+
+## 3. 系统要求
 
 当前运行环境是 macOS，因为项目依赖：
 
@@ -147,30 +174,28 @@ codex debug models --bundled
 
 它使用 Codex 当前版本自带的 bundled catalog 作为官方模型目录真相源。
 
-## 3. 从源码构建
+## 4. 从源码构建
 
 以下命令都在项目根目录执行。
 
 ```sh
-mkdir -p runtime/bin
-go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
+mkdir -p bin
+go build -o bin/wopal-codex-gateway ./cmd/gateway
 ```
 
 最终二进制：
 
 ```text
-runtime/bin/wopal-codex-gateway
+bin/wopal-codex-gateway
 ```
 
-`scripts/gateway` 只是同一个二进制的薄包装器，二进制缺失时会直接报错。验证命令见 [第 14 节](#14-开发与验证)。
+`scripts/gateway` 只是同一个二进制的薄包装器，二进制缺失时会直接报错。验证命令见 [第 16 节](#16-开发与验证)。
 
-## 4. 首次配置
+## 5. 首次配置
 
-### 4.1 创建或升级 `runtime/config.json`
+### 5.1 配置文件
 
-Gateway 读取 `runtime/config.json`。文件不存在时使用默认配置；每次写入都使用临时文件加 rename，权限为 `0600`。
-
-已存在的文件**必须**包含 `"version": 1`。完整 schema：
+Gateway 读 `runtime/config.json`。文件不存在就用默认值；写入走临时文件加 rename，权限 `0600`。
 
 ```json
 {
@@ -183,185 +208,71 @@ Gateway 读取 `runtime/config.json`。文件不存在时使用默认配置；�
 }
 ```
 
-规则：
+`version` 必须是 `1`，其他值在启动前就被拒绝。缺 `listen` 默认 `127.0.0.1:11435`；缺 `logs` 默认 10 MB、留 5 份；`quota.maxStepCap` 默认 `5`，范围 `1–10`，越界按默认值处理。
 
-- `version` 必须是 `1`；其他值会在启动前被拒绝。
-- 缺少 `listen` 时默认 `127.0.0.1:11435`。
-- 缺少 `logs` 时默认单文件 10 MB、保留 5 份备份。
-- `quota.maxStepCap` 是已观测最大单步的上限，默认 `5`，允许范围 `1–10`；缺省、`<= 0` 或超出范围时按默认 `5`。
-- `wopalAi.models` 是配置的模型列表；`excludedModels` 只影响 `models sync`。
-- `wopalAi.models` 缺失时使用内置默认项。
+旧版本的文件如果缺 `version` 或还带 `ollama` 段，用 [5.4](#54-升级旧配置) 的迁移命令处理，不要手工改。
 
-**从旧版本升级：** 如果 `runtime/config.json` 已经存在，启动新二进制前要先做两件事。
-
-1. 加入 `"version": 1`。
-2. 删除 `"ollama"` 块。Ollama 支持已经移除，残留的块会被明确拒绝，而不是被静默忽略。
-
-缺少 `version` 时会失败并指出：
-
-```text
-unsupported gateway config version 0 (expected 1)
-```
-
-仍带已移除段落时会失败并指出：
-
-```text
-unsupported configuration section "ollama". Ollama support was removed; delete the "ollama" block
-```
-
-### 4.2 CLI 总览
-
-```text
-serve
-config show
-config wopal --base-url <url> [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
-auth set
-auth test
-auth status
-models list
-models inspect [model...]
-models sync
-models add <name...>
-models set <name...>
-models remove <name...>
-catalog refresh
-codex install
-codex restore
-service install
-service start
-service stop
-service restart
-service status
-service uninstall
-quota reset-learning
-help
-```
-
-### 4.3 配置 Wopal AI 地址
+### 5.2 配置地址与 Key
 
 ```sh
-runtime/bin/wopal-codex-gateway config wopal --base-url https://your-new-api.example.com/v1
+bin/wopal-codex-gateway config wopal --base-url https://your-new-api.example.com/v1
+bin/wopal-codex-gateway auth set      # 写入 Keychain 并立即验证
 ```
 
-`--base-url` 应填写 OpenAI-compatible API 的根地址。
-
-也可以同时设置模型列表：
+`--base-url` 填 OpenAI-compatible API 的根地址。要同时指定模型：
 
 ```sh
-runtime/bin/wopal-codex-gateway config wopal \
+bin/wopal-codex-gateway config wopal \
   --base-url https://your-new-api.example.com/v1 \
   --model deepseek-v4.1-flash \
   --context-window 262144
 ```
 
-`--model` 会替换已配置的模型列表。只有显式传入的 `--context-window N`、`--vision` / `--no-vision`、`--reasoning` / `--no-reasoning` 才保存为用户覆盖。省略字段依次使用 provider 能力、网关默认值（100 万上下文、支持图片和推理）。用这种方式修改模型列表后，需要执行 `catalog refresh` 重建 Codex catalog。
+`--model` 会替换整个模型列表。只有显式给出的 `--context-window`、`--vision`/`--no-vision`、`--reasoning`/`--no-reasoning` 才存成你的覆盖，其余走 provider 值再走默认值。
 
-只读查看当前配置：
-
-```sh
-runtime/bin/wopal-codex-gateway config show
-```
-
-修改 `runtime/config.json` 后，`serve` 会在下次启动时读取新值；服务已安装时需要重启服务。
-
-### 4.4 保存 Wopal AI API Key
+Key 存在 Keychain（`service: com.wopal.codex-gateway.wopal-ai`，`account: wopal-ai`），不落任何配置文件。检查状态：
 
 ```sh
-runtime/bin/wopal-codex-gateway auth set
+bin/wopal-codex-gateway auth status
+bin/wopal-codex-gateway auth test
 ```
 
-API Key 使用 macOS `security` 命令写入 Keychain：
+用 `config show` 只读查看当前配置。改完 `runtime/config.json` 要重启服务才生效。
 
-```text
-service: com.wopal.codex-gateway.wopal-ai
-account: wopal-ai
-```
-
-真实 API Key 不写入项目配置文件。`auth set` 写入后会立即调用 Wopal AI `/models` 进行验证。
-
-检查状态并重新测试：
+### 5.3 导入模型
 
 ```sh
-runtime/bin/wopal-codex-gateway auth status
-runtime/bin/wopal-codex-gateway auth test
+bin/wopal-codex-gateway models sync
 ```
 
-### 4.5 查看与同步模型
+读远端 `/models`、跳过 embedding 与 rerank、保留你手工设过的能力值，重建 Codex catalog。新模型默认 100 万上下文、支持图片和推理。增删改模型、看能力来源、何时刷新 catalog 见 [第 9 节](#9-模型管理)。
+
+### 5.4 升级旧配置
 
 ```sh
-runtime/bin/wopal-codex-gateway models list
+bin/wopal-codex-gateway config migrate --from runtime/config.json --to runtime/config-v1.json
 ```
 
-该命令使用已保存的 Key 读取远端 `/models`。
+生成 `0600` 的候选文件：补版本号、去掉 `ollama` 段、保留 provider 与模型设置；目标已存在时拒绝覆盖。验证候选无误后再替换。该命令不动 Codex 配置，也不启停服务。
 
-```sh
-runtime/bin/wopal-codex-gateway models sync
-```
+### 5.5 `scripts/gateway` 包装器
 
-`models sync` 会：
+`scripts/gateway <command>` 转发到同一个二进制，只改了命令名：
 
-1. 从 Wopal AI `/models` 获取模型 ID；
-2. 跳过明显的 embedding 与 rerank 模型；
-3. 保留已经手工设置过的模型 metadata；
-4. 遵守本地 exclusion 列表；
-5. 更新 `runtime/config.json`；
-6. 重新生成 Codex 合并模型目录。
-
-新发现的模型默认 metadata：
-
-```text
-context window: 1000000
-vision: true
-reasoning: true
-```
-
-这些只是本地 Codex metadata，不会修改上游模型本身。
-
-新增模型只保存名字。`models sync` 把 provider 明确返回的能力另存到 `runtime/model-metadata.json`，按 provider 地址隔离；已有手工覆盖保持原样。不接第三方能力目录，也不按模型名字猜能力。
-
-`models inspect [model...]` 显示每个字段的有效值和来源（`user`、`provider`、`default`），同时提示 Codex 全局上下文设置可能覆盖逐模型值，保留全局配置不动。`models set <模型...> --auto` 清除全部能力覆盖；`--reset-context-window`、`--reset-vision`、`--reset-reasoning` 分别清除单项。用户显式设置与默认值相同的值，也仍视为用户覆盖。
-
-升级前先生成候选配置，保留当前文件：
-
-```sh
-runtime/bin/wopal-codex-gateway config migrate --from runtime/config.json --to runtime/config-v1.json
-```
-
-该命令创建权限为 `0600` 的候选文件，增加版本号、移除 `ollama` 段，保留 provider 和模型设置；输出文件已存在时拒绝覆盖。先验证候选，再替换服务。此命令不修改 Codex 配置，也不启动或重启服务。
-
-
-### 4.6 模型目录
-
-`catalog refresh` 从 `codex debug models --bundled` 读取官方基线，合并已配置的 Wopal AI 模型，写入：
-
-```text
-~/.codex/wopal-codex-gateway-models.json
-```
-
-刷新失败时，上一份可用目录会保留，命令以非 0 状态退出并说明原因。常见原因包括：
-
-- `codex` 命令缺失；
-- `codex debug models --bundled` 返回非 0 退出码；
-- 命令输出非法 JSON；
-- bundled catalog 为空。
-
-### 4.7 `scripts/gateway` 包装器
-
-`scripts/gateway <command>` 运行同一个二进制，只重命名两个命令：
-
-| 包装器命令 | 实际命令 |
+| 包装器 | 实际命令 |
 | --- | --- |
 | `install` | `codex install` |
 | `disable` | `codex restore` |
-| `start`、`stop`、`restart`、`status` | `service start`、`service stop`、`service restart`、`service status` |
+| `start`、`stop`、`restart`、`status` | `service` 同名子命令 |
 | 其他 | 原样透传 |
 
-## 5. 启用 Gateway
+
+## 6. 启用 Gateway
 
 推荐的完整安装命令：
 
 ```sh
-runtime/bin/wopal-codex-gateway codex install
+bin/wopal-codex-gateway codex install
 ```
 
 或通过包装器：
@@ -405,12 +316,12 @@ wopal-ai/*
 
 Codex 内部 `visibility=hide` 的模型仍会留在 catalog 中供内部流程使用，但不应显示在正常用户模型选择器里。
 
-## 6. 验证安装
+## 7. 验证安装
 
-### 6.1 检查服务
+### 7.1 检查服务
 
 ```sh
-runtime/bin/wopal-codex-gateway service status
+bin/wopal-codex-gateway service status
 ```
 
 正常结果：
@@ -419,7 +330,7 @@ runtime/bin/wopal-codex-gateway service status
 installed=yes loaded=yes healthy=yes
 ```
 
-### 6.2 检查健康端点
+### 7.2 检查健康端点
 
 ```sh
 curl -fsS http://127.0.0.1:11435/_health
@@ -431,7 +342,7 @@ curl -fsS http://127.0.0.1:11435/_health
 {"mode":"single-process","ok":true,"wopal_models":33}
 ```
 
-### 6.3 查看运行状态与官方额度
+### 7.3 查看运行状态与官方额度
 
 ```sh
 curl -fsS http://127.0.0.1:11435/_status
@@ -456,13 +367,13 @@ official_quota.observed_weekly_max_step
 
 `/_status` 不暴露 API Key 或原始 ChatGPT account ID。
 
-### 6.4 再次验证 Wopal API
+### 7.4 再次验证 Wopal API
 
 ```sh
-runtime/bin/wopal-codex-gateway auth test
+bin/wopal-codex-gateway auth test
 ```
 
-### 6.5 检查模型 catalog
+### 7.5 检查模型 catalog
 
 从 Codex 侧检查当前实际模型目录：
 
@@ -478,7 +389,7 @@ codex debug models --bundled
 
 Gateway 不使用容易被运行时覆盖的 `~/.codex/models_cache.json` 作为官方 canonical source。
 
-## 7. 日常使用
+## 8. 日常使用
 
 ### 使用官方模型
 
@@ -548,54 +459,28 @@ curl -fsS http://127.0.0.1:11435/_status
 "notifications": { "enabled": false }
 ```
 
-## 8. 模型管理
+## 9. 模型管理
 
-### 查看远端模型
+模型列表来自 `/models`，能力顺序是：你的显式设置 → provider 明确返回的值 → 网关默认值（100 万上下文、支持图片和推理）。不猜、不接第三方能力库。
 
-```sh
-runtime/bin/wopal-codex-gateway models list
-```
-
-### 同步可用模型
+### 同步与查看
 
 ```sh
-runtime/bin/wopal-codex-gateway models sync
+bin/wopal-codex-gateway models list     # 读远端 /models
+bin/wopal-codex-gateway models sync     # 导入可用模型 + 刷新 catalog
 ```
 
-同步后需要重启 ChatGPT/Codex Desktop 才能确保模型选择器重新加载 catalog。
+`models sync` 会跳过 embedding 与 rerank，保留你手工设过的能力值，尊重本地排除列表，把 provider 明确返回的能力另存到 `runtime/model-metadata.json`，最后重建 Codex catalog。之后重启 ChatGPT/Codex Desktop。
 
-### 手工添加模型
+### 手工增删改
 
 ```sh
-runtime/bin/wopal-codex-gateway models add my-model --context-window 262144
+bin/wopal-codex-gateway models add my-model --context-window 262144
+bin/wopal-codex-gateway models set deepseek-v4.1-flash --context-window 1000000 --reasoning --no-vision
+bin/wopal-codex-gateway models remove model-a model-b
 ```
 
-支持：
-
-```text
---context-window N
---vision
---no-reasoning
-```
-
-例如：
-
-```sh
-runtime/bin/wopal-codex-gateway models add vision-model \
-  --context-window 131072 \
-  --vision
-```
-
-### 修改模型 metadata
-
-```sh
-runtime/bin/wopal-codex-gateway models set deepseek-v4.1-flash \
-  --context-window 1000000 \
-  --reasoning \
-  --no-vision
-```
-
-可修改：
+三个命令共用同一组参数：
 
 ```text
 --context-window N
@@ -603,48 +488,41 @@ runtime/bin/wopal-codex-gateway models set deepseek-v4.1-flash \
 --reasoning / --no-reasoning
 ```
 
-修改已经被现有 Codex session 加载过的模型 metadata 后，建议重启客户端或重新打开/分叉相应会话。
+`remove` 会把模型加进本地排除列表，后续 `models sync` 不会把它加回来；要恢复就显式 `models add`。
 
-### 移除模型
+`models set <模型...> --auto` 清除全部能力覆盖；`--reset-context-window`、`--reset-vision`、`--reset-reasoning` 分别清单项。显式设成和默认值相同的值，仍算你的覆盖。
 
-```sh
-runtime/bin/wopal-codex-gateway models remove model-a model-b
-```
-
-被移除的模型会加入本地 exclusion 列表，后续 `models sync` 不会自动把它们重新加回来。
-
-要恢复被排除的模型，显式执行：
+### 看清每个值从哪来
 
 ```sh
-runtime/bin/wopal-codex-gateway models add model-a
+bin/wopal-codex-gateway models inspect deepseek-v4.1-flash
 ```
 
-### 刷新 catalog
+逐字段显示有效值和来源（`user` / `provider` / `default`），并提示 Codex 全局上下文设置可能覆盖逐模型值（网关不动你的全局配置）。
+
+### 何时刷新 catalog
 
 ```sh
-runtime/bin/wopal-codex-gateway catalog refresh
+bin/wopal-codex-gateway catalog refresh
 ```
 
-适合以下场景：
+三种情况要做：Codex 升级导致官方目录变化、手工改过模型配置、模型选择器与配置不同步。刷新失败会保留上一份可用目录并以非 0 退出。
 
-- Codex 升级后官方 bundled catalog 发生变化；
-- 手工调整了模型配置；
-- 模型选择器与当前配置不同步。
+刷新后重启 ChatGPT/Codex Desktop，模型选择器才会读到新目录。已经加载过某模型 metadata 的老会话，建议重新打开或分叉。
 
-刷新后重启 ChatGPT/Codex Desktop。
 
-## 9. 服务管理
+## 10. 服务管理
 
 ### 查看状态
 
 ```sh
-runtime/bin/wopal-codex-gateway service status
+bin/wopal-codex-gateway service status
 ```
 
 ### 临时停止
 
 ```sh
-runtime/bin/wopal-codex-gateway service stop
+bin/wopal-codex-gateway service stop
 ```
 
 这只停止 Gateway 服务，**不会恢复 Codex 配置**。因此 `service stop` 适合短时间维护，不适合正式卸载。服务停止期间 Codex 仍可能指向 `127.0.0.1:11435`，此时模型请求会失败。
@@ -652,7 +530,7 @@ runtime/bin/wopal-codex-gateway service stop
 ### 启动
 
 ```sh
-runtime/bin/wopal-codex-gateway service start
+bin/wopal-codex-gateway service start
 ```
 
 前提是 LaunchAgent 已安装。
@@ -660,13 +538,13 @@ runtime/bin/wopal-codex-gateway service start
 ### 重启
 
 ```sh
-runtime/bin/wopal-codex-gateway service restart
+bin/wopal-codex-gateway service restart
 ```
 
 ### 只安装服务
 
 ```sh
-runtime/bin/wopal-codex-gateway service install
+bin/wopal-codex-gateway service install
 ```
 
 该命令只负责 LaunchAgent，不负责完整 Codex 接入。二进制缺失、配置非法或服务未通过 `/_health` 时，会以非 0 状态退出。
@@ -674,7 +552,7 @@ runtime/bin/wopal-codex-gateway service install
 ### 只卸载服务
 
 ```sh
-runtime/bin/wopal-codex-gateway service uninstall
+bin/wopal-codex-gateway service uninstall
 ```
 
 **不要把它当作正常卸载命令。** 它只移除 LaunchAgent，不会恢复 Codex 配置。如果 Codex 仍然指向 Gateway，而服务已经卸载，Codex 请求会失败。
@@ -682,59 +560,99 @@ runtime/bin/wopal-codex-gateway service uninstall
 正常停用请使用：
 
 ```sh
-runtime/bin/wopal-codex-gateway codex restore
+bin/wopal-codex-gateway codex restore
 ```
 
 或 `./scripts/gateway disable`。
 
-## 10. 更新 Gateway
+## 11. 更新 Gateway
 
-### 10.1 升级既有配置
-
-如果 `runtime/config.json` 来自旧版本，在启动新二进制前先按
-[从旧版本升级](#从旧版本升级) 的两步处理：加入 `"version": 1`，并删除旧的 `"ollama"` 块。
-否则 `serve` 和所有配置命令都会拒绝该文件。
-
-### 10.2 临时停止服务
+### 11.1 升级步骤
 
 ```sh
-runtime/bin/wopal-codex-gateway service stop
+# 1. 先把手头这个版本存进 recovery/，这是回滚的本钱
+cp -p bin/wopal-codex-gateway recovery/wopal-codex-gatewayd
+
+# 2. 停服务
+bin/wopal-codex-gateway service stop
+
+# 3. 重新构建
+go build -o bin/wopal-codex-gateway ./cmd/gateway
+
+# 4. 重新接管 Codex 并等健康检查通过
+bin/wopal-codex-gateway codex install
 ```
 
-### 10.3 重新构建二进制
+`codex install` 重复执行是安全的：它保留最初的 restore point，不会把网关自己改过的配置当成「原始配置」，并且在 `/_health` 通过之后才报告成功。
+
+### 11.2 配置不兼容时
+
+`runtime/config.json` 缺 `version` 或还带 `ollama` 段时，先按 [5.4](#54-升级旧配置) 生成迁移候选，再替换。否则所有命令都会拒绝这个文件。
+
+### 11.3 只改了模型列表
+
+不需要重新构建，也不需要停服务：
 
 ```sh
-go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
+bin/wopal-codex-gateway catalog refresh
 ```
 
-### 10.4 重新应用安装状态
+然后完全退出并重启 ChatGPT/Codex Desktop。
+
+
+## 12. 回滚
+
+新版本起不来时，回到上一个可用版本。
+
+### 12.1 什么时候用
+
+- 升级后服务起不来，`curl 127.0.0.1:11435/_health` 没有响应；
+- 服务起来了但请求报错，日志指向新版本的问题；
+- 想先退回旧版本，再慢慢排查。
+
+### 12.2 回滚步骤
+
+先停掉当前服务：
 
 ```sh
-runtime/bin/wopal-codex-gateway codex install
+bin/wopal-codex-gateway service stop
 ```
 
-重复执行 `install` 是支持的。Gateway 会保留最初的 Codex restore point，而不是把 Gateway 自己已经修改后的配置错误地当作「原始配置」。该命令会安装 LaunchAgent、等待 `/_health` 通过，然后才报告成功。
-
-### 10.5 重启客户端
-
-完全退出并重启 ChatGPT/Codex Desktop。
-
-如果只是模型列表变化，也可以只执行：
+再启动 `recovery/` 里的旧版本：
 
 ```sh
-runtime/bin/wopal-codex-gateway catalog refresh
+recovery/start-gateway.sh
 ```
 
-然后重启客户端。
+确认它已经接管端口：
 
-## 11. 停用与卸载
+```sh
+curl -s 127.0.0.1:11435/_health
+```
 
-### 11.1 推荐：完整停用 Gateway
+返回带 `instance` 和 `"ok": true` 的 JSON 就说明旧版本正在服务。
+
+### 12.3 回滚后的状态
+
+- `runtime/config.json` 和额度状态都是共享的，不需要恢复；
+- Codex 的接管配置不需要动，它指向的端口没变；
+- 旧版本会自己接管 `logs/`，日志继续写在同一处。
+
+确认旧版本稳定后，再决定是修新版本，还是让 `recovery/` 里的版本继续跑。
+
+### 12.4 保持 recovery 可用
+
+`recovery/` 里的东西不要删。每次发布新版本时，把当前版本的可执行文件留一份在 `recovery/`，替换掉更旧的那份即可。
+
+
+## 13. 停用与卸载
+
+### 13.1 推荐：完整停用 Gateway
 
 使用：
 
 ```sh
-runtime/bin/wopal-codex-gateway codex restore
+bin/wopal-codex-gateway codex restore
 ```
 
 或 `./scripts/gateway disable`。
@@ -752,7 +670,7 @@ runtime/bin/wopal-codex-gateway codex restore
 
 完成后必须重启 ChatGPT/Codex Desktop，让客户端重新加载原始配置。
 
-### 11.2 restore 不会删除什么
+### 13.2 restore 不会删除什么
 
 正常 restore 不会删除：
 
@@ -764,7 +682,7 @@ runtime/bin/wopal-codex-gateway codex restore
 
 这样以后重新启用时不需要重新输入所有配置。
 
-### 11.3 可选：删除 Keychain API Key
+### 13.3 可选：删除 Keychain API Key
 
 在 `codex restore` 之后，如果确定不再使用 Gateway，可以手工删除 Keychain 项：
 
@@ -776,262 +694,173 @@ runtime/bin/wopal-codex-gateway codex restore
 
 这一步是不可逆的凭证清理，不属于默认 restore 行为。
 
-### 11.4 可选：完全删除项目目录
+### 13.4 可选：完全删除项目目录
 
 先执行 `codex restore`，并确认服务不再运行。如果不再需要源码、日志和本地配置，可以通过 Finder 将整个项目目录移到废纸篓。
 
 不要在 Codex 仍指向 Gateway 时直接删除项目目录。
 
-## 12. 故障排查
+## 14. 故障排查
 
-### 启动时报配置版本不受支持
+### 服务起不来
 
-按 [从旧版本升级](#从旧版本升级) 的两步处理：加入 `"version": 1`，并删除旧的 `"ollama"` 块。
-错误信息会指出文件路径和期望的版本号。
+```sh
+bin/wopal-codex-gateway service status
+curl -v http://127.0.0.1:11435/_health
+tail -n 100 logs/service-error.log
+```
 
-### 启动时报 unsupported configuration section
+新构建的二进制首次运行偶尔被杀毒与系统扫描拖慢。安装器会等约 90 秒的 `/_health`，别因为头十几秒没响应就判定失败。真要退回上一版，见 [第 12 节](#12-回滚)。
 
-Ollama 支持已经移除。请从 `runtime/config.json` 删除 `"ollama"` 块，它不会被自动迁移。
+### 配置被拒绝
+
+- `unsupported gateway config version 0 (expected 1)`：文件缺 `version`；
+- `unsupported configuration section "ollama"`：文件还有已移除的 `ollama` 段。
+
+两种都按 [5.4](#54-升级旧配置) 生成迁移候选，不要手工改。
 
 ### 官方模型突然不见了
 
-先刷新 catalog：
-
 ```sh
-runtime/bin/wopal-codex-gateway catalog refresh
-```
-
-然后完全退出并重启 ChatGPT/Codex Desktop。
-
-如果刷新失败，请阅读错误信息：它会区分 `codex` 命令缺失、非 0 退出码、非法 JSON 和空目录。上一份可用 catalog 会保留。
-
-检查：
-
-```sh
-codex debug models
+bin/wopal-codex-gateway catalog refresh
 codex debug models --bundled
 ```
 
-Gateway 的官方 catalog 基线来自 `codex debug models --bundled`，而不是 `~/.codex/models_cache.json`。
+官方基线只来自 `codex debug models --bundled`，不读 `~/.codex/models_cache.json`。刷新失败会说明是 `codex` 缺失、非 0 退出、非法 JSON 还是空目录，并保留上一份可用目录。刷新后完全退出并重启 ChatGPT/Codex Desktop。
 
 ### Wopal 模型没有显示
 
-依次执行：
-
 ```sh
-runtime/bin/wopal-codex-gateway auth test
-runtime/bin/wopal-codex-gateway models list
-runtime/bin/wopal-codex-gateway models sync
-runtime/bin/wopal-codex-gateway catalog refresh
+bin/wopal-codex-gateway auth test
+bin/wopal-codex-gateway models list
+bin/wopal-codex-gateway models sync
+bin/wopal-codex-gateway catalog refresh
 ```
 
-然后重启 ChatGPT/Codex Desktop。
-
-### 服务不健康
-
-```sh
-runtime/bin/wopal-codex-gateway service status
-curl -v http://127.0.0.1:11435/_health
-```
-
-本地日志：
-
-```text
-logs/gateway.log
-logs/service.log
-logs/service-error.log
-```
-
-查看最近日志：
-
-```sh
-tail -n 100 logs/service-error.log
-tail -n 100 logs/service.log
-tail -n 100 logs/gateway.log
-```
-
-首次运行新构建的 macOS 二进制偶尔可能受到系统安全扫描影响而启动较慢。安装器最多等待约 90 秒的 `/_health` 健康检查，不应因为第一次十几秒没有响应就立刻判定服务已崩溃。
+都在报错之前先跑完，然后重启客户端。
 
 ### API Key 验证失败
 
-检查配置与认证状态：
-
 ```sh
-runtime/bin/wopal-codex-gateway config show
-runtime/bin/wopal-codex-gateway auth status
-runtime/bin/wopal-codex-gateway auth test
+bin/wopal-codex-gateway config show
+bin/wopal-codex-gateway auth status
+bin/wopal-codex-gateway auth test
 ```
 
-确认 `wopalAi.baseUrl` 正确，并且该 API Key 能访问对应 `/models`。
+确认 `wopalAi.baseUrl` 正确、Key 能访问对应 `/models`。需要重录就 `auth set`。
 
-需要重新录入：
-
-```sh
-runtime/bin/wopal-codex-gateway auth set
-```
-
-### 修改模型后当前会话仍使用旧 metadata
+### 改了模型但当前会话还是旧的
 
 ```sh
-runtime/bin/wopal-codex-gateway catalog refresh
+bin/wopal-codex-gateway catalog refresh
 ```
 
-然后重启 ChatGPT/Codex Desktop，或对已经加载旧 catalog 的会话重新打开/分叉。
+重启客户端，或对已经加载旧 catalog 的会话重新打开/分叉。
 
-### Provider 切换时看到 WebSocket 1012
+### 看到 WebSocket 1012
 
-如果日志或客户端显示 `1012 Service Restart`，并且发生在：
-
-- 官方模型 <-> Wopal AI 切换；
-- quota failover；
-- quota reset 后 failback；
-
-这通常是预期行为。Gateway 用它要求 Codex 重新建立绑定正确 Provider 和凭证的 socket，并重放完整输入。
+发生在官方模型与 Wopal AI 互切、quota failover、或 reset 后 failback 时，`1012 Service Restart` 是预期的：网关用它让 Codex 重连到绑定正确 Provider 与凭证的 socket，并重放输入。
 
 ### 老会话遇到 legacy native compaction
 
-很早的会话可能仍然包含 OpenAI native opaque compaction。
-
-Gateway 会尝试通过官方 Provider 将它物化为可继续使用的历史，而不是静默丢弃。
-
-如果此时官方 quota 已进入 protected 状态，legacy native compaction restore 可能会被暂停到额度 reset。新的 compaction 已经使用 `wgcp1`，不会继续制造这种官方专属 opaque state。
+很早的会话里可能有 OpenAI native opaque compaction。网关会通过官方线路把它物化成可继续使用的历史，不静默丢弃。如果此时官方额度已在保护区，这一步会等到 reset。新会话用 `wgcp1`，不会再产生这种状态。
 
 ### 还没到 97% / 99% 就停了
-
-观测到较大单步时，有效阈值会低于基础阈值。检查：
 
 ```sh
 curl -fsS http://127.0.0.1:11435/_status
 ```
 
-比较 `official_quota.five_hour_stop_percent`、`official_quota.weekly_stop_percent` 与 `official_quota.effective_five_hour_stop_percent`、`official_quota.effective_weekly_stop_percent`，并查看 `observed_five_hour_max_step`、`observed_weekly_max_step`。
+对比 `official_quota.five_hour_stop_percent` / `weekly_stop_percent`（基础阈值）与 `effective_five_hour_stop_percent` / `effective_weekly_stop_percent`（实际停止点），再看 `observed_five_hour_max_step` / `observed_weekly_max_step`。观测到大步长时实际停止点会提前，这是保护余量。
 
-清除学习值：
-
-```sh
-runtime/bin/wopal-codex-gateway quota reset-learning
-```
-
-### 正常卸载后客户端仍显示 Gateway 模型
-
-执行：
+清零学习值：
 
 ```sh
-runtime/bin/wopal-codex-gateway codex restore
+bin/wopal-codex-gateway quota reset-learning
 ```
 
-然后**完全退出并重新启动** ChatGPT/Codex Desktop。客户端运行期间通常会缓存模型目录，仅修改磁盘配置并不会立即刷新 UI。
+### 卸载后客户端还显示 Gateway 模型
 
-### 没有收到 quota failover 通知
+```sh
+bin/wopal-codex-gateway codex restore
+```
 
-依次检查：
+然后**完全退出并重新启动** ChatGPT/Codex Desktop。客户端会在内存里缓存模型目录，只改磁盘不刷新 UI。
 
-1. `terminal-notifier` 是否可用：`command -v terminal-notifier`；
-2. 「系统设置 → 通知」里是否允许 `terminal-notifier` 发送通知；
-3. `runtime/config.json` 中 `notifications.enabled` 是否为 `false`；
-4. 当前保护周期是否已经通知过（同一保护周期、同一窗口、同一被替换模型只通知一次）；
-5. `logs/gateway.log` 中的 `quota_failover_notified`、`quota_recovery_notified`、`quota_failover_notify_unavailable`、`quota_failover_notify_failed` 事件；
-6. Gateway 是否在保护周期内重启过（重启会丢失「恢复通知」的定时器，该周期不会再补发）。
+### 没收到 quota 切换通知
 
-## 13. 安全与本地状态
+1. `command -v terminal-notifier` 是否可用；
+2. 系统设置 → 通知里是否允许它发通知；
+3. `runtime/config.json` 的 `notifications.enabled` 是否为 `false`；
+4. 同一保护周期、同一窗口、同一被替换模型只通知一次，是否已经通知过；
+5. `logs/gateway.log` 里搜 `quota_failover_notified`、`quota_recovery_notified`、`quota_failover_notify_unavailable`、`quota_failover_notify_failed`；
+6. 保护周期内网关是否重启过——重启会丢掉「恢复通知」的定时器，该周期不再补发。
+
+
+## 15. 安全与本地状态
 
 ### API Key
 
-Wopal AI API Key 保存在 macOS Keychain。
-
-Gateway 生成的：
+Wopal AI 的 Key 只存在 macOS Keychain：
 
 ```text
-runtime/cliproxy-runtime.json
+service: com.wopal.codex-gateway.wopal-ai
+account: wopal-ai
 ```
 
-只保存：
-
-```text
-__KEYCHAIN__
-```
-
-占位符。真实 Key 只在 daemon 启动时读取到内存并注入内嵌 CLIProxyAPI SDK 配置。
+网关生成的 `runtime/cliproxy-runtime.json` 里只有 `__KEYCHAIN__` 占位符；真实 Key 只在进程启动时读进内存。
 
 ### 本地监听
 
-默认：
-
-```text
-127.0.0.1:11435
-```
-
-Gateway 设计为本机用户服务，不是公开多租户 API。
+默认 `127.0.0.1:11435`，只服务本机用户，不是公开多租户 API。
 
 ### 日志
 
-日志只包含 metadata：
-
 ```text
-logs/gateway.log
-logs/service.log
-logs/service-error.log
+logs/gateway.log        JSONL metadata，按请求与 turn 记录
+logs/service.log        daemon 的 stdout
+logs/service-error.log  daemon 的 stderr
 ```
 
-按 `runtime/config.json` 中的 `logs.maxSizeMb` 与 `logs.maxBackups` 轮转（默认单文件 10 MB、保留 5 份备份）。请求与响应正文从不写入磁盘，`/_status` 报告 `request_body_logging: "disabled"`。
+三个文件共用 `runtime/config.json` 的 `logs.maxSizeMb` 与 `logs.maxBackups`（默认 10 MB、留 5 份）。请求与响应正文从不落盘，`/_status` 固定报告 `request_body_logging: "disabled"`。
 
-### 额度状态
+每条路由记录带客户端指纹（`client_version`、`originator`、`user_agent`、`encoding`、`beta_features`）与请求形状摘要（工具面、工具数量与摘要、输入条目类型计数、顶层字段名）。同一版本同一模型形状变化时额外记一条 `client_request_contract_changed`。全是 header 与计数，仍然不含正文。
 
-官方 quota 状态保存在：
+### 本地状态文件
 
-```text
-runtime/official-quota-state.json
-```
+| 文件 | 作用 |
+| --- | --- |
+| `runtime/config.json` | 你的配置 |
+| `runtime/cliproxy-runtime.json` | 每次启动重生成的 SDK 配置，不含密钥 |
+| `runtime/cliproxy-auth/` | SDK 要求的认证目录 |
+| `runtime/model-metadata.json` | provider 返回的模型能力快照 |
+| `runtime/official-quota-state.json` | 额度窗口与学习值，account key 是 SHA-256 |
+| `runtime/codex-restore.json` | 安装前的 Codex 配置，restore 时用 |
 
-ChatGPT account ID 不以明文保存，而是使用 SHA-256 后的 key。
-
-### Codex 恢复状态
-
-`codex restore` 需要的安装前配置保存在：
-
-```text
-runtime/codex-restore.json
-```
-
-不要在 Gateway 正常启用期间手工删除该文件。
+`codex-restore.json` 在网关启用期间不要手工删。
 
 ### Git
 
-运行时配置、日志、构建产物、认证状态和其他本地运行数据都应保持 Git ignored，不应提交敏感凭证。
+`bin/`、`runtime/`、`logs/`、`recovery/` 都在 `.gitignore` 里。凭证、运行状态、日志、构建产物都不进版本库。
 
-## 14. 开发与验证
 
-CLI 与依赖装配位于 `cmd/gateway/`。业务能力拆分在 `internal/*`：`internal/config`（版本化配置）、`internal/codex`（Codex 接管/恢复）、`internal/catalog`（模型目录）、`internal/keychain`、`internal/launchd`（LaunchAgent 生命周期）、`internal/routing`、`internal/proxy`、`internal/quota`、`internal/compaction`、`internal/notify`、`internal/activity`。`cmd/gateway` 只解析子命令并把它们装配进进程。
+## 16. 开发与验证
 
-CLIProxyAPI 不是独立运行的第二个 Proxy。项目把：
+`cmd/gateway` 只解析子命令并装配依赖；规则在 `internal/*` 各包里。CLIProxyAPI 不是第二个进程，它以 Go SDK 形式编译进来（`github.com/router-for-me/CLIProxyAPI/v8`），完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。
 
-```text
-github.com/router-for-me/CLIProxyAPI/v8
-```
-
-作为 Go SDK 直接编译进 `wopal-codex-gateway`。完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。
-
-标准验证命令：
+### 标准命令
 
 ```sh
-go test ./...
+go build ./...
 go vet ./...
-go build -o /tmp/wopal-codex-gateway ./cmd/gateway
+gofmt -l cmd internal          # 应无输出
+go test -race ./... -count=1
 ```
 
-正式构建：
+### 最短安装流程
 
 ```sh
-go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
-```
-
----
-
-如果只是第一次安装，最短可执行流程是：
-
-```sh
-mkdir -p runtime/bin
-go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
+go build -o bin/wopal-codex-gateway ./cmd/gateway
 
 ./scripts/gateway config wopal --base-url https://your-new-api.example.com/v1
 ./scripts/gateway auth set
@@ -1041,22 +870,25 @@ go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
 ./scripts/gateway status
 ```
 
-如果 `runtime/config.json` 已经存在，先确认其中包含 `"version": 1`，并且没有旧的 `"ollama"` 块。
-
-然后重启 ChatGPT/Codex Desktop，即可开始使用。
+然后完全退出并重启 ChatGPT/Codex Desktop。
 
 ### 工具调用模式
 
-Wopal 模型统一使用 `wopalAi.toolMode`，默认 `code_mode_only`。
-`code_mode_only` 通过 `exec` 编排工具，`code_mode` 同时提供编排和直接调用，
-`direct` 只提供直接调用。官方模型保留自己的模式。
+Wopal 模型统一用 `wopalAi.toolMode`，默认 `code_mode_only`：
+
+| 模式 | 提供什么 |
+| --- | --- |
+| `code_mode_only` | 只有 `exec` 编排工具 |
+| `code_mode` | 编排工具 + 直接工具 |
+| `direct` | 只有直接工具 |
+
+官方模型保留自己的模式。
 
 ```sh
-runtime/bin/wopal-codex-gateway config wopal --tool-mode code_mode_only
-runtime/bin/wopal-codex-gateway catalog refresh
+bin/wopal-codex-gateway config wopal --tool-mode code_mode_only
+bin/wopal-codex-gateway catalog refresh
 ```
 
-同样可以在 `runtime/config.json` 的 `wopalAi` 下设置 `"toolMode"`。
-非法值会报错。Codex 读取更新后的目录后才会使用新模式；改为 `direct` 时，
-包含 `exec` 历史的对话应新建对话。模式选择不会重启网关。
-模型目录是生成文件；手工能力覆盖应写入 `runtime/config.json`，刷新时会重新生成目录。
+也可以在 `runtime/config.json` 的 `wopalAi` 下设 `"toolMode"`。非法值直接报错。切到 `direct` 时，历史里带 `exec` 的对话要新建。改模式不重启网关，但 Codex 要读到新目录才生效。
+
+

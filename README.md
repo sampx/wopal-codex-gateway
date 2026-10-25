@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Wopal Codex Gateway is a local macOS routing gateway for Codex, shipped as a single Go binary at `runtime/bin/wopal-codex-gateway`. It lets ChatGPT/Codex Desktop or Codex CLI keep native official models while also using `wopal-ai/*` models from the same model picker and the same conversation.
+Wopal Codex Gateway is a local macOS routing gateway for Codex, shipped as a single Go binary at `bin/wopal-codex-gateway`. It lets ChatGPT/Codex Desktop or Codex CLI keep native official models while also using `wopal-ai/*` models from the same model picker and the same conversation.
 
 It is more than an HTTP proxy. It also owns model-catalog composition, reversible Codex configuration, HTTP/WebSocket provider switching, portable conversation compaction, legacy-session compatibility, and automatic native-quota failover/failback.
 
@@ -11,19 +11,21 @@ For architecture and behavioral invariants, see [`docs/DESIGN.md`](docs/DESIGN.m
 ## Contents
 
 - [1. Features](#1-features)
-- [2. Requirements](#2-requirements)
-- [3. Build from source](#3-build-from-source)
-- [4. First-time configuration](#4-first-time-configuration)
-- [5. Enable the gateway](#5-enable-the-gateway)
-- [6. Verify the installation](#6-verify-the-installation)
-- [7. Daily use](#7-daily-use)
-- [8. Model management](#8-model-management)
-- [9. Service management](#9-service-management)
-- [10. Update the gateway](#10-update-the-gateway)
-- [11. Disable and uninstall](#11-disable-and-uninstall)
-- [12. Troubleshooting](#12-troubleshooting)
-- [13. Security and local state](#13-security-and-local-state)
-- [14. Development](#14-development)
+- [2. Project layout](#2-project-layout)
+- [3. Requirements](#3-requirements)
+- [4. Build from source](#4-build-from-source)
+- [5. First-time configuration](#5-first-time-configuration)
+- [6. Enable the gateway](#6-enable-the-gateway)
+- [7. Verify the installation](#7-verify-the-installation)
+- [8. Daily use](#8-daily-use)
+- [9. Model management](#9-model-management)
+- [10. Service management](#10-service-management)
+- [11. Update the gateway](#11-update-the-gateway)
+- [12. Rollback](#12-rollback)
+- [13. Disable and uninstall](#13-disable-and-uninstall)
+- [14. Troubleshooting](#14-troubleshooting)
+- [15. Security and local state](#15-security-and-local-state)
+- [16. Development](#16-development)
 
 ## 1. Features
 
@@ -92,7 +94,7 @@ requested native model
 After the quota reset time, the next safe sampling step reconnects and returns to the originally requested native model.
 
 ```sh
-runtime/bin/wopal-codex-gateway quota reset-learning
+bin/wopal-codex-gateway quota reset-learning
 ```
 
 clears the learned step values, returning the effective thresholds to the base values until new steps are observed.
@@ -116,7 +118,32 @@ Request and response bodies are never written to disk. The gateway logs metadata
 
 It does not change the current `model`. `codex restore` restores the captured pre-install values for those keys. It restores `model` only when the current value still starts with `wopal-ai/`; if you have switched to an official model, that choice is preserved.
 
-## 2. Requirements
+## 2. Project layout
+
+| Directory | Holds | Notes |
+| --- | --- | --- |
+| `bin/` | Built executables | Only `wopal-codex-gateway`; safe to delete and rebuild |
+| `cmd/gateway/` | Process entry and subcommands | Assembly only; rules live in `internal/` |
+| `internal/` | Config, routing, quota, compaction | Each package owns its tests |
+| `launchd/` | LaunchAgent template | Rendered into `~/Library/LaunchAgents` at install time |
+| `scripts/` | The `scripts/gateway` wrapper | Forwards to `bin/`; no logic of its own |
+| `docs/` | Design documents | Target-state spec, not a user manual |
+| `runtime/` | Config and run state | Your settings, quota state, install restore point |
+| `logs/` | Three log files | Metadata only; no conversation content |
+| `recovery/` | Rollback material | Previous release; never read during normal startup |
+
+Three rules:
+
+- **Executables, state, and logs live apart.** `bin/` is disposable and rebuildable, `runtime/` is not, `logs/` is freely clearable. Different lifetimes, different directories.
+- **`runtime/` holds only what must survive a restart.** Temporary files do not belong there.
+- **`recovery/` does not take part in running.** The normal startup path never reads it; it answers one question: how to step back when a new release will not start.
+
+`bin/`, `runtime/`, `logs/`, and `recovery/` are local to your machine and stay out of Git.
+
+After upgrading from the old layout, `runtime/bin/` is a compatibility symlink to `../bin/` so an already-installed LaunchAgent still finds the program after a reboot. Running `service install` again rewrites the plist to point straight at `bin/`; the symlink can be removed afterwards.
+
+
+## 3. Requirements
 
 The runtime target is macOS because the project uses:
 
@@ -149,30 +176,28 @@ codex debug models --bundled
 
 The bundled catalog is the canonical source for official model definitions.
 
-## 3. Build from source
+## 4. Build from source
 
 Run these commands from the repository root.
 
 ```sh
-mkdir -p runtime/bin
-go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
+mkdir -p bin
+go build -o bin/wopal-codex-gateway ./cmd/gateway
 ```
 
 The binary is:
 
 ```text
-runtime/bin/wopal-codex-gateway
+bin/wopal-codex-gateway
 ```
 
-`scripts/gateway` is a thin wrapper around the same binary; it fails early if this file is missing. For validation commands, see [section 14](#14-development).
+`scripts/gateway` is a thin wrapper around the same binary; it fails early if this file is missing. For validation commands, see [section 14](#16-development).
 
-## 4. First-time configuration
+## 5. First-time configuration
 
-### 4.1 Create or upgrade `runtime/config.json`
+### 5.1 The configuration file
 
-The gateway reads `runtime/config.json`. A missing file is treated as the default configuration, and every write is atomic with permissions `0600`.
-
-An existing file must contain `"version": 1`. Full schema:
+The gateway reads `runtime/config.json`. A missing file means defaults; every write goes through a temp file and rename with mode `0600`.
 
 ```json
 {
@@ -185,185 +210,71 @@ An existing file must contain `"version": 1`. Full schema:
 }
 ```
 
-Rules:
+`version` must be `1`; anything else is rejected before startup. Absent `listen` defaults to `127.0.0.1:11435`; absent `logs` defaults to 10 MB with 5 backups; `quota.maxStepCap` defaults to `5` within `1–10`, with out-of-range values falling back to the default.
 
-- `version` must be `1`; any other value is rejected before startup.
-- Missing `listen` values default to `127.0.0.1:11435`.
-- Missing `logs` values default to 10 MB per file and 5 backups.
-- `quota.maxStepCap` bounds the largest learned single step. It defaults to `5` and accepts `1–10`; a missing, non-positive, or out-of-range value falls back to `5`.
-- `wopalAi.models` is the configured model list; `excludedModels` only affects `models sync`.
-- If `wopalAi.models` is omitted, the built-in default entry is used.
+When an older file lacks `version` or still carries an `ollama` block, use the migration command in [5.4](#54-upgrade-an-older-configuration) instead of editing by hand.
 
-**Upgrading from an older release:** if `runtime/config.json` already exists, make both changes below before starting the new binary.
-
-1. Add `"version": 1`.
-2. Delete the `"ollama"` block. Ollama support was removed, and a leftover block is rejected rather than silently ignored.
-
-A file missing `version` fails with:
-
-```text
-unsupported gateway config version 0 (expected 1)
-```
-
-A file that still carries the removed section fails with:
-
-```text
-unsupported configuration section "ollama". Ollama support was removed; delete the "ollama" block
-```
-
-### 4.2 CLI overview
-
-```text
-serve
-config show
-config wopal --base-url <url> [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
-auth set
-auth test
-auth status
-models list
-models inspect [model...]
-models sync
-models add <name...>
-models set <name...>
-models remove <name...>
-catalog refresh
-codex install
-codex restore
-service install
-service start
-service stop
-service restart
-service status
-service uninstall
-quota reset-learning
-help
-```
-
-### 4.3 Configure the Wopal AI base URL
+### 5.2 Base URL and API key
 
 ```sh
-runtime/bin/wopal-codex-gateway config wopal --base-url https://your-new-api.example.com/v1
+bin/wopal-codex-gateway config wopal --base-url https://your-new-api.example.com/v1
+bin/wopal-codex-gateway auth set      # stores in Keychain and validates immediately
 ```
 
-Use the root URL of the OpenAI-compatible API.
-
-You may also set the model list at the same time:
+`--base-url` takes the root of an OpenAI-compatible API. To set the model list at the same time:
 
 ```sh
-runtime/bin/wopal-codex-gateway config wopal \
+bin/wopal-codex-gateway config wopal \
   --base-url https://your-new-api.example.com/v1 \
   --model deepseek-v4.1-flash \
   --context-window 262144
 ```
 
-`--model` replaces the configured model list. Only explicit `--context-window N`, `--vision` / `--no-vision`, and `--reasoning` / `--no-reasoning` options are saved as user overrides. Omitted fields resolve from provider metadata, then defaults (1,000,000 tokens, vision and reasoning enabled). After changing the model list this way, run `catalog refresh` to rebuild the Codex catalog.
+`--model` replaces the whole list. Only an explicit `--context-window`, `--vision`/`--no-vision`, or `--reasoning`/`--no-reasoning` is stored as your override; anything omitted falls back to the provider value and then the default.
 
-For a read-only view of the current configuration:
-
-```sh
-runtime/bin/wopal-codex-gateway config show
-```
-
-Changes to `runtime/config.json` are read when `serve` starts, so restart the service after editing it while installed.
-
-### 4.4 Store the API key in macOS Keychain
+The key lives in Keychain (`service: com.wopal.codex-gateway.wopal-ai`, `account: wopal-ai`) and never in a config file. Check it with:
 
 ```sh
-runtime/bin/wopal-codex-gateway auth set
+bin/wopal-codex-gateway auth status
+bin/wopal-codex-gateway auth test
 ```
 
-The key is stored as:
+`config show` prints the current configuration without writing. Restart the service after editing `runtime/config.json`.
 
-```text
-service: com.wopal.codex-gateway.wopal-ai
-account: wopal-ai
-```
-
-The real key is never written to the repository configuration. `auth set` validates the key against the Wopal AI `/models` endpoint.
-
-Check status and re-test:
+### 5.3 Import models
 
 ```sh
-runtime/bin/wopal-codex-gateway auth status
-runtime/bin/wopal-codex-gateway auth test
+bin/wopal-codex-gateway models sync
 ```
 
-### 4.5 List and sync models
+Reads the remote `/models`, skips embedding and rerank models, keeps capability values you set by hand, and rebuilds the Codex catalog. New models default to 1M context with images and reasoning. For adding, changing, removing models, seeing where each value came from, and when to refresh, see [Section 9](#9-model-management).
+
+### 5.4 Upgrade an older configuration
 
 ```sh
-runtime/bin/wopal-codex-gateway models list
+bin/wopal-codex-gateway config migrate --from runtime/config.json --to runtime/config-v1.json
 ```
 
-This reads the remote `/models` endpoint with the stored key.
+Writes a `0600` candidate: adds the version field, drops the `ollama` block, keeps provider and model settings, and refuses to overwrite an existing target. Validate the candidate before switching over. The command does not touch Codex configuration and does not start or stop the service.
 
-```sh
-runtime/bin/wopal-codex-gateway models sync
-```
+### 5.5 The `scripts/gateway` wrapper
 
-`models sync`:
+`scripts/gateway <command>` forwards to the same binary and only renames commands:
 
-1. reads model IDs from the Wopal AI `/models` endpoint;
-2. skips obvious embedding and rerank models;
-3. preserves metadata already customized locally;
-4. respects the local exclusion list;
-5. updates `runtime/config.json`;
-6. rebuilds the merged Codex catalog.
-
-Newly discovered models default to:
-
-```text
-context window: 1000000
-vision: true
-reasoning: true
-```
-
-These values are local Codex metadata only; they do not change the upstream model.
-
-New models store only their names. `models sync` saves explicit provider capabilities separately in `runtime/model-metadata.json`, tied to the provider URL. Existing manual overrides remain intact. No external capability directory or model-name guessing is used.
-
-Use `models inspect [model...]` to see effective values and their `user`, `provider`, or `default` source. It also warns about Codex global context overrides without changing them. `models set <model...> --auto` clears all capability overrides; `--reset-context-window`, `--reset-vision`, or `--reset-reasoning` clears one field. Reapplying a value equal to the default still counts as an intentional user override.
-
-Prepare an upgrade config without touching the current file:
-
-```sh
-runtime/bin/wopal-codex-gateway config migrate --from runtime/config.json --to runtime/config-v1.json
-```
-
-This creates a private candidate with version 1 and no `ollama` section, preserves the provider/model settings, and refuses to overwrite an existing output. Validate the candidate before service replacement. This command does not change Codex configuration or start/restart a service.
-
-
-### 4.6 Model catalog
-
-`catalog refresh` reads the official baseline from `codex debug models --bundled`, merges the configured Wopal AI models, and writes:
-
-```text
-~/.codex/wopal-codex-gateway-models.json
-```
-
-If the refresh fails, the previous usable catalog is kept and the command exits non-zero with the reason. Possible causes include:
-
-- the `codex` command is missing;
-- `codex debug models --bundled` returns a non-zero exit code;
-- the command prints invalid JSON;
-- the bundled catalog is empty.
-
-### 4.7 The `scripts/gateway` wrapper
-
-`scripts/gateway <command>` runs the same binary and only renames two commands:
-
-| Wrapper command | Binary command |
+| Wrapper | Real command |
 | --- | --- |
 | `install` | `codex install` |
 | `disable` | `codex restore` |
-| `start`, `stop`, `restart`, `status` | `service start`, `service stop`, `service restart`, `service status` |
+| `start`, `stop`, `restart`, `status` | the matching `service` subcommand |
 | anything else | passed through unchanged |
 
-## 5. Enable the gateway
+
+## 6. Enable the gateway
 
 The recommended complete installation command is:
 
 ```sh
-runtime/bin/wopal-codex-gateway codex install
+bin/wopal-codex-gateway codex install
 ```
 
 or, through the wrapper:
@@ -407,12 +318,12 @@ wopal-ai/*
 
 Official entries marked `visibility=hide` remain in the catalog for internal Codex workflows but should not appear in the normal user picker.
 
-## 6. Verify the installation
+## 7. Verify the installation
 
-### 6.1 Service status
+### 7.1 Service status
 
 ```sh
-runtime/bin/wopal-codex-gateway service status
+bin/wopal-codex-gateway service status
 ```
 
 A healthy installation prints:
@@ -421,7 +332,7 @@ A healthy installation prints:
 installed=yes loaded=yes healthy=yes
 ```
 
-### 6.2 Health endpoint
+### 7.2 Health endpoint
 
 ```sh
 curl -fsS http://127.0.0.1:11435/_health
@@ -433,7 +344,7 @@ Example:
 {"mode":"single-process","ok":true,"wopal_models":33}
 ```
 
-### 6.3 Runtime and quota status
+### 7.3 Runtime and quota status
 
 ```sh
 curl -fsS http://127.0.0.1:11435/_status
@@ -458,13 +369,13 @@ official_quota.observed_weekly_max_step
 
 It does not expose the API key or raw ChatGPT account ID.
 
-### 6.4 Re-test Wopal authentication
+### 7.4 Re-test Wopal authentication
 
 ```sh
-runtime/bin/wopal-codex-gateway auth test
+bin/wopal-codex-gateway auth test
 ```
 
-### 6.5 Inspect the effective Codex model catalog
+### 7.5 Inspect the effective Codex model catalog
 
 ```sh
 codex debug models
@@ -478,7 +389,7 @@ codex debug models --bundled
 
 The gateway deliberately does not use the mutable `~/.codex/models_cache.json` as the canonical official source.
 
-## 7. Daily use
+## 8. Daily use
 
 ### Use an official model
 
@@ -544,54 +455,28 @@ Notifications require `terminal-notifier`; without it nothing is posted and rout
 "notifications": { "enabled": false }
 ```
 
-## 8. Model management
+## 9. Model management
 
-### List remote models
+The model list comes from `/models`. Capabilities resolve in this order: your explicit setting, then what the provider actually reports, then the gateway default (1M context, images, reasoning). Nothing is guessed, and no third-party capability index is consulted.
 
-```sh
-runtime/bin/wopal-codex-gateway models list
-```
-
-### Sync usable models
+### Sync and inspect
 
 ```sh
-runtime/bin/wopal-codex-gateway models sync
+bin/wopal-codex-gateway models list     # read the remote /models
+bin/wopal-codex-gateway models sync     # import usable models and refresh the catalog
 ```
 
-Restart ChatGPT/Codex Desktop after catalog changes.
+`models sync` skips embedding and rerank models, keeps any capability you set by hand, honours the local exclusion list, stores provider-reported capabilities in `runtime/model-metadata.json`, and rebuilds the Codex catalog. Restart ChatGPT/Codex Desktop afterwards.
 
-### Add models manually
+### Add, change, remove
 
 ```sh
-runtime/bin/wopal-codex-gateway models add my-model --context-window 262144
+bin/wopal-codex-gateway models add my-model --context-window 262144
+bin/wopal-codex-gateway models set deepseek-v4.1-flash --context-window 1000000 --reasoning --no-vision
+bin/wopal-codex-gateway models remove model-a model-b
 ```
 
-Supported options:
-
-```text
---context-window N
---vision
---no-reasoning
-```
-
-Example:
-
-```sh
-runtime/bin/wopal-codex-gateway models add vision-model \
-  --context-window 131072 \
-  --vision
-```
-
-### Update model metadata
-
-```sh
-runtime/bin/wopal-codex-gateway models set deepseek-v4.1-flash \
-  --context-window 1000000 \
-  --reasoning \
-  --no-vision
-```
-
-Supported update flags:
+All three take the same flags:
 
 ```text
 --context-window N
@@ -599,48 +484,41 @@ Supported update flags:
 --reasoning / --no-reasoning
 ```
 
-After changing metadata already loaded by an active Codex session, restart the client or reopen/fork the affected session.
+`remove` adds the model to the local exclusion list, so a later `models sync` will not bring it back; restore it with an explicit `models add`.
 
-### Remove models
+`models set <model...> --auto` clears every capability override. `--reset-context-window`, `--reset-vision`, and `--reset-reasoning` clear one field each. Setting a field explicitly to its default value still counts as your override.
 
-```sh
-runtime/bin/wopal-codex-gateway models remove model-a model-b
-```
-
-Removed models are added to a local exclusion list so a later `models sync` does not immediately add them back.
-
-To restore one explicitly:
+### See where each value came from
 
 ```sh
-runtime/bin/wopal-codex-gateway models add model-a
+bin/wopal-codex-gateway models inspect deepseek-v4.1-flash
 ```
 
-### Refresh the merged catalog
+Shows the effective value and its source (`user`, `provider`, `default`) per field, and warns that a Codex global context setting can override per-model values. The gateway never edits your global Codex settings.
+
+### When to refresh the catalog
 
 ```sh
-runtime/bin/wopal-codex-gateway catalog refresh
+bin/wopal-codex-gateway catalog refresh
 ```
 
-Useful after:
+Three triggers: a Codex upgrade changed the bundled catalog, you changed model configuration by hand, or the picker disagrees with your configuration. A failed refresh keeps the previous usable catalog and exits non-zero.
 
-- a Codex upgrade changes the bundled official catalog;
-- local model metadata changes;
-- the client model picker becomes stale.
+Restart ChatGPT/Codex Desktop afterwards so the picker reads the new catalog. Conversations that already loaded a model's metadata should be reopened or forked.
 
-Restart ChatGPT/Codex Desktop after refreshing.
 
-## 9. Service management
+## 10. Service management
 
 ### Status
 
 ```sh
-runtime/bin/wopal-codex-gateway service status
+bin/wopal-codex-gateway service status
 ```
 
 ### Temporarily stop the service
 
 ```sh
-runtime/bin/wopal-codex-gateway service stop
+bin/wopal-codex-gateway service stop
 ```
 
 This stops the gateway but **does not restore Codex configuration**. It is intended for short maintenance windows, not uninstall. While stopped, Codex may still point at `127.0.0.1:11435` and requests will fail.
@@ -648,7 +526,7 @@ This stops the gateway but **does not restore Codex configuration**. It is inten
 ### Start
 
 ```sh
-runtime/bin/wopal-codex-gateway service start
+bin/wopal-codex-gateway service start
 ```
 
 The LaunchAgent must already be installed.
@@ -656,13 +534,13 @@ The LaunchAgent must already be installed.
 ### Restart
 
 ```sh
-runtime/bin/wopal-codex-gateway service restart
+bin/wopal-codex-gateway service restart
 ```
 
 ### Install only the service
 
 ```sh
-runtime/bin/wopal-codex-gateway service install
+bin/wopal-codex-gateway service install
 ```
 
 This manages only the LaunchAgent and is not a complete Codex integration. It fails with a non-zero exit status if the binary is missing, the configuration is invalid, or the service does not pass `/_health`.
@@ -670,7 +548,7 @@ This manages only the LaunchAgent and is not a complete Codex integration. It fa
 ### Uninstall only the service
 
 ```sh
-runtime/bin/wopal-codex-gateway service uninstall
+bin/wopal-codex-gateway service uninstall
 ```
 
 **Do not use this as the normal uninstall command.** It removes the LaunchAgent but leaves Codex configuration untouched. If Codex still points at the gateway, requests will fail.
@@ -678,60 +556,99 @@ runtime/bin/wopal-codex-gateway service uninstall
 For normal removal use:
 
 ```sh
-runtime/bin/wopal-codex-gateway codex restore
+bin/wopal-codex-gateway codex restore
 ```
 
 or `./scripts/gateway disable`.
 
-## 10. Update the gateway
+## 11. Update the gateway
 
-### 10.1 Upgrade an existing configuration
-
-If `runtime/config.json` came from an older release, apply the two-step migration from
-[Upgrading from an older release](#upgrading-from-an-older-release) before starting the new
-binary: add `"version": 1` and delete the legacy `"ollama"` block. `serve` and all
-configuration commands reject the file otherwise.
-
-### 10.2 Stop the running service
+### 11.1 Upgrade steps
 
 ```sh
-runtime/bin/wopal-codex-gateway service stop
+# 1. Bank the outgoing release in recovery/ first; this is what a rollback uses
+cp -p bin/wopal-codex-gateway recovery/wopal-codex-gatewayd
+
+# 2. Stop the service
+bin/wopal-codex-gateway service stop
+
+# 3. Rebuild
+go build -o bin/wopal-codex-gateway ./cmd/gateway
+
+# 4. Reapply the takeover and wait for health
+bin/wopal-codex-gateway codex install
 ```
 
-### 10.3 Rebuild the binary
+Running `codex install` again is safe: it keeps the original restore point instead of mistaking the gateway's own edits for the original configuration, and it reports success only after `/_health` passes.
+
+### 11.2 When the configuration is incompatible
+
+If `runtime/config.json` lacks `version` or still carries an `ollama` block, generate a migration candidate per [5.4](#54-upgrade-an-older-configuration) before switching over. Otherwise every command rejects the file.
+
+### 11.3 Only the model list changed
+
+No rebuild and no restart of the service:
 
 ```sh
-go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
+bin/wopal-codex-gateway catalog refresh
 ```
 
-### 10.4 Reapply the installation
+Then fully quit and reopen ChatGPT/Codex Desktop.
+
+
+## 12. Rollback
+
+Return to the last working release when a new one will not start.
+
+### 12.1 When to use it
+
+- After an upgrade the service will not come up and `curl 127.0.0.1:11435/_health` returns nothing;
+- The service runs but requests fail, and the logs point at the new release;
+- You want the previous release back while you investigate.
+
+### 12.2 Steps
+
+Stop the current service:
 
 ```sh
-runtime/bin/wopal-codex-gateway codex install
+bin/wopal-codex-gateway service stop
 ```
 
-Repeated `install` is supported. The gateway keeps the original pre-gateway restore point instead of replacing it with the configuration it previously wrote itself. The command installs the LaunchAgent, waits for `/_health`, and only then reports success.
-
-### 10.5 Restart the client
-
-Fully quit and restart ChatGPT/Codex Desktop.
-
-If only the model list changed, you may instead run:
+Start the previous release from `recovery/`:
 
 ```sh
-runtime/bin/wopal-codex-gateway catalog refresh
+recovery/start-gateway.sh
 ```
 
-and restart the client.
+Confirm it owns the port:
 
-## 11. Disable and uninstall
+```sh
+curl -s 127.0.0.1:11435/_health
+```
 
-### 11.1 Recommended complete disable/restore
+A JSON body with `instance` and `"ok": true` means the previous release is serving.
+
+### 12.3 What a rollback keeps
+
+- `runtime/config.json` and the quota state are shared, so nothing needs restoring;
+- The Codex takeover needs no change: it points at the same port;
+- The previous release takes over `logs/` and keeps writing in place.
+
+Once it is stable, decide whether to fix the new release or keep running the one from `recovery/`.
+
+### 12.4 Keeping recovery usable
+
+Do not delete `recovery/`. When you publish a release, copy the outgoing executable into `recovery/`, replacing the older one.
+
+
+## 13. Disable and uninstall
+
+### 13.1 Recommended complete disable/restore
 
 Use:
 
 ```sh
-runtime/bin/wopal-codex-gateway codex restore
+bin/wopal-codex-gateway codex restore
 ```
 
 or `./scripts/gateway disable`.
@@ -749,7 +666,7 @@ This is the supported user-level uninstall/restore path. It:
 
 Then fully quit and restart ChatGPT/Codex Desktop.
 
-### 11.2 What restore intentionally keeps
+### 13.2 What restore intentionally keeps
 
 It does not delete:
 
@@ -761,7 +678,7 @@ It does not delete:
 
 This makes later re-enabling straightforward.
 
-### 11.3 Optional: remove the Keychain API key
+### 13.3 Optional: remove the Keychain API key
 
 After `codex restore`, if you are certain the gateway will no longer be used:
 
@@ -773,260 +690,173 @@ After `codex restore`, if you are certain the gateway will no longer be used:
 
 This is an irreversible credential cleanup step and is intentionally not part of the default restore command.
 
-### 11.4 Optional: remove the project checkout
+### 13.4 Optional: remove the project checkout
 
 First run `codex restore` and verify the service is no longer active. If the source, logs, and local configuration are no longer needed, move the project directory to Trash using Finder.
 
 Do not remove the checkout while Codex still points at the gateway.
 
-## 12. Troubleshooting
+## 14. Troubleshooting
 
-### Startup fails with an unsupported config version
+### The service will not start
 
-Apply the two-step migration from [Upgrading from an older release](#upgrading-from-an-older-release):
-add `"version": 1` and delete the legacy `"ollama"` block. The error names the file and the
-expected version; a separate error names a removed section.
+```sh
+bin/wopal-codex-gateway service status
+curl -v http://127.0.0.1:11435/_health
+tail -n 100 logs/service-error.log
+```
 
-### Startup fails with "unsupported configuration section"
+The first run of a freshly built binary can be slowed by macOS scanning. The installer waits roughly 90 seconds for `/_health`; do not call it failed after ten quiet seconds. To step back to the previous release, see [Section 12](#12-rollback).
 
-Ollama support was removed. Delete the `"ollama"` block from `runtime/config.json`; it is not
-migrated automatically.
+### The configuration is rejected
+
+- `unsupported gateway config version 0 (expected 1)`: the file has no `version`;
+- `unsupported configuration section "ollama"`: the file still carries the removed `ollama` block.
+
+Both are handled by the migration candidate in [5.4](#54-upgrade-an-older-configuration). Do not edit by hand.
 
 ### Official models disappeared
 
-Refresh the catalog:
-
 ```sh
-runtime/bin/wopal-codex-gateway catalog refresh
-```
-
-Then fully restart ChatGPT/Codex Desktop.
-
-If the refresh fails, read its error: it distinguishes a missing `codex` command, a non-zero exit code, invalid JSON, and an empty catalog. The previous usable catalog stays in place.
-
-Inspect:
-
-```sh
-codex debug models
+bin/wopal-codex-gateway catalog refresh
 codex debug models --bundled
 ```
 
-The bundled catalog, not `models_cache.json`, is the official canonical source.
+The official baseline comes only from `codex debug models --bundled`, never from `~/.codex/models_cache.json`. A failed refresh tells you whether `codex` is missing, exited non-zero, emitted invalid JSON, or returned an empty list, and keeps the previous usable catalog. Fully quit and reopen ChatGPT/Codex Desktop afterwards.
 
 ### Wopal models do not appear
 
-Run:
-
 ```sh
-runtime/bin/wopal-codex-gateway auth test
-runtime/bin/wopal-codex-gateway models list
-runtime/bin/wopal-codex-gateway models sync
-runtime/bin/wopal-codex-gateway catalog refresh
+bin/wopal-codex-gateway auth test
+bin/wopal-codex-gateway models list
+bin/wopal-codex-gateway models sync
+bin/wopal-codex-gateway catalog refresh
 ```
 
-Then restart ChatGPT/Codex Desktop.
-
-### Service is unhealthy
-
-```sh
-runtime/bin/wopal-codex-gateway service status
-curl -v http://127.0.0.1:11435/_health
-```
-
-Local logs:
-
-```text
-logs/gateway.log
-logs/service.log
-logs/service-error.log
-```
-
-Recent output:
-
-```sh
-tail -n 100 logs/service-error.log
-tail -n 100 logs/service.log
-tail -n 100 logs/gateway.log
-```
-
-A newly built macOS Mach-O can occasionally start slowly on first launch because of system security/provenance work. The installer waits up to about 90 seconds for `/_health` rather than treating the first few seconds of silence as a crash.
+Run them all before concluding anything failed, then restart the client.
 
 ### API-key validation fails
 
-Inspect configuration and auth state:
-
 ```sh
-runtime/bin/wopal-codex-gateway config show
-runtime/bin/wopal-codex-gateway auth status
-runtime/bin/wopal-codex-gateway auth test
+bin/wopal-codex-gateway config show
+bin/wopal-codex-gateway auth status
+bin/wopal-codex-gateway auth test
 ```
 
-If needed, replace the stored key:
+Confirm `wopalAi.baseUrl` is correct and the key can reach that `/models`. Re-enter it with `auth set`.
+
+### A changed model still looks stale in the current conversation
 
 ```sh
-runtime/bin/wopal-codex-gateway auth set
+bin/wopal-codex-gateway catalog refresh
 ```
 
-### Current session still uses old model metadata
+Restart the client, or reopen or fork conversations that already loaded the old catalog.
 
-```sh
-runtime/bin/wopal-codex-gateway catalog refresh
-```
+### WebSocket 1012 appears
 
-Then restart ChatGPT/Codex Desktop or reopen/fork sessions that already loaded the old catalog.
+During a switch between official and Wopal AI models, during quota failover, or during failback after a reset, `1012 Service Restart` is expected: the gateway uses it to make Codex reconnect to a socket bound to the right provider and credentials, then replay the input.
 
-### WebSocket 1012 during provider switching
+### An old conversation hits legacy native compaction
 
-`1012 Service Restart` is expected during:
+Very old conversations can contain OpenAI native opaque compaction. The gateway materializes it into usable history over the official route rather than dropping it silently. If official quota is already protected, that step waits for the reset. New conversations use `wgcp1` and never produce that state.
 
-- official <-> Wopal provider changes;
-- quota failover;
-- quota-reset failback.
-
-It tells Codex to reconnect and resend the full input on a correctly bound socket.
-
-### Legacy native compaction in old conversations
-
-Very old conversations may contain OpenAI-native opaque compaction state. The gateway attempts to materialize it through the owning official provider instead of silently dropping it.
-
-If native quota is already protected, that legacy restoration can be paused until quota reset. New compactions use `wgcp1` and do not create more OpenAI-only opaque state.
-
-### Requests are stopped before 97% / 99%
-
-The effective thresholds are lower than the base thresholds when a large single step has been observed. Check:
+### Requests stop before 97% / 99%
 
 ```sh
 curl -fsS http://127.0.0.1:11435/_status
 ```
 
-Compare `official_quota.five_hour_stop_percent` and `official_quota.weekly_stop_percent` with `official_quota.effective_five_hour_stop_percent` and `official_quota.effective_weekly_stop_percent`, and inspect `observed_five_hour_max_step` / `observed_weekly_max_step`.
+Compare `official_quota.five_hour_stop_percent` / `weekly_stop_percent` (the base thresholds) with `effective_five_hour_stop_percent` / `effective_weekly_stop_percent` (the real stop points), then read `observed_five_hour_max_step` / `observed_weekly_max_step`. A large observed step moves the real stop point earlier; that is the safety margin working.
 
-To clear the learned values:
+Clear the learned values:
 
 ```sh
-runtime/bin/wopal-codex-gateway quota reset-learning
+bin/wopal-codex-gateway quota reset-learning
 ```
 
 ### Gateway models remain visible after uninstall
 
-Run:
-
 ```sh
-runtime/bin/wopal-codex-gateway codex restore
+bin/wopal-codex-gateway codex restore
 ```
 
-Then fully quit and restart ChatGPT/Codex Desktop. The client may cache the model catalog for the lifetime of the process.
+Then **fully quit and reopen** ChatGPT/Codex Desktop. The client caches the model catalog in memory; changing files alone does not refresh the UI.
 
-### No quota failover notification
+### No quota failover notification arrived
 
-Check in order:
+1. Is `terminal-notifier` on PATH (`command -v terminal-notifier`)?
+2. Does System Settings → Notifications allow it to post?
+3. Is `notifications.enabled` set to `false` in `runtime/config.json`?
+4. One protection cycle notifies once per window and replaced model; check whether it already fired.
+5. Search `logs/gateway.log` for `quota_failover_notified`, `quota_recovery_notified`, `quota_failover_notify_unavailable`, `quota_failover_notify_failed`.
+6. Did the gateway restart inside the protection cycle? A restart drops the recovery-notification timer, and that cycle will not re-send it.
 
-1. `terminal-notifier` is available: `command -v terminal-notifier`;
-2. System Settings -> Notifications allows notifications from `terminal-notifier`;
-3. `notifications.enabled` is not set to `false` in `runtime/config.json`;
-4. the current protection period was already announced (one notification per period, window, and replaced model);
-5. the `quota_failover_notified`, `quota_recovery_notified`, `quota_failover_notify_unavailable`, and `quota_failover_notify_failed` events in `logs/gateway.log`;
-6. whether the gateway restarted during the protection period (that drops the recovery timer and the notification is not re-sent for that period).
 
-## 13. Security and local state
+## 15. Security and local state
 
 ### API key
 
-The Wopal AI API key lives in macOS Keychain.
-
-The generated file:
+The Wopal AI key lives only in macOS Keychain:
 
 ```text
-runtime/cliproxy-runtime.json
+service: com.wopal.codex-gateway.wopal-ai
+account: wopal-ai
 ```
 
-contains only the placeholder:
-
-```text
-__KEYCHAIN__
-```
-
-The real key is read into memory at daemon startup and injected into the embedded CLIProxyAPI SDK configuration.
+The generated `runtime/cliproxy-runtime.json` carries only a `__KEYCHAIN__` placeholder; the real key enters memory at process start.
 
 ### Local listener
 
-Default address:
-
-```text
-127.0.0.1:11435
-```
-
-The gateway is intended as a local user service, not a public multi-tenant endpoint.
+`127.0.0.1:11435` by default. It serves the local user only and is not a public multi-tenant API.
 
 ### Logs
 
-Logs are metadata only:
-
 ```text
-logs/gateway.log
-logs/service.log
-logs/service-error.log
+logs/gateway.log        JSONL metadata, per request and per turn
+logs/service.log        daemon stdout
+logs/service-error.log  daemon stderr
 ```
 
-They rotate according to `logs.maxSizeMb` and `logs.maxBackups` in `runtime/config.json` (defaults: 10 MB per file, 5 backups). Request and response bodies are never written to disk, and `/_status` reports `request_body_logging: "disabled"`.
+All three share `logs.maxSizeMb` and `logs.maxBackups` from `runtime/config.json` (default 10 MB, 5 backups). Request and response bodies never reach disk; `/_status` always reports `request_body_logging: "disabled"`.
 
-### Quota state
+Every routing record carries a client fingerprint (`client_version`, `originator`, `user_agent`, `encoding`, `beta_features`) plus a request-shape summary (tool surface, tool count and digest, input item type counts, top-level field names). When the shape changes for the same version and model, an extra `client_request_contract_changed` record is written. All of it is headers and counts, never content.
 
-Native quota state is persisted in:
+### Local state files
 
-```text
-runtime/official-quota-state.json
-```
+| File | Purpose |
+| --- | --- |
+| `runtime/config.json` | your configuration |
+| `runtime/cliproxy-runtime.json` | SDK config regenerated at each start, no secrets |
+| `runtime/cliproxy-auth/` | auth directory required by the SDK |
+| `runtime/model-metadata.json` | capability snapshot reported by the provider |
+| `runtime/official-quota-state.json` | quota windows and learned step sizes; account key is SHA-256 |
+| `runtime/codex-restore.json` | pre-install Codex configuration, consumed by restore |
 
-Raw ChatGPT account IDs are not persisted; account keys are SHA-256 hashed.
-
-### Codex restore state
-
-Pre-install values required by `codex restore` are stored in:
-
-```text
-runtime/codex-restore.json
-```
-
-Do not manually remove this file while the gateway is installed.
+Do not delete `codex-restore.json` while the gateway is enabled.
 
 ### Git
 
-Runtime configuration, logs, built binaries, auth state, and other local operational data are Git-ignored and must not contain committed credentials.
+`bin/`, `runtime/`, `logs/`, and `recovery/` are all in `.gitignore`. Credentials, run state, logs, and build output stay out of version control.
 
-## 14. Development
 
-The CLI and dependency assembly live in `cmd/gateway/`. Business capabilities are split across `internal/*`: `internal/config` (versioned config), `internal/codex` (Codex takeover/restore), `internal/catalog` (model catalog), `internal/keychain`, `internal/launchd` (LaunchAgent lifecycle), `internal/routing`, `internal/proxy`, `internal/quota`, `internal/compaction`, `internal/notify`, and `internal/activity`. `cmd/gateway` only parses subcommands and wires those packages into the process.
+## 16. Development
 
-CLIProxyAPI is not launched as a separate proxy process. The project imports:
+`cmd/gateway` only parses subcommands and wires dependencies; rules live in the `internal/*` packages. CLIProxyAPI is not a second process: it is compiled in as a Go SDK (`github.com/router-for-me/CLIProxyAPI/v8`). The full design is in [`docs/DESIGN.md`](docs/DESIGN.md).
 
-```text
-github.com/router-for-me/CLIProxyAPI/v8
-```
-
-as a Go SDK dependency and compiles it directly into `wopal-codex-gateway`. See [`docs/DESIGN.md`](docs/DESIGN.md) for the complete runtime architecture.
-
-Standard validation:
+### Standard commands
 
 ```sh
-go test ./...
+go build ./...
 go vet ./...
-go build -o /tmp/wopal-codex-gateway ./cmd/gateway
+gofmt -l cmd internal          # must print nothing
+go test -race ./... -count=1
 ```
 
-Production build:
+### Shortest install
 
 ```sh
-go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
-```
-
----
-
-For a first installation, the shortest complete path is:
-
-```sh
-mkdir -p runtime/bin
-go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
+go build -o bin/wopal-codex-gateway ./cmd/gateway
 
 ./scripts/gateway config wopal --base-url https://your-new-api.example.com/v1
 ./scripts/gateway auth set
@@ -1036,25 +866,25 @@ go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway
 ./scripts/gateway status
 ```
 
-If `runtime/config.json` already exists, make sure it contains `"version": 1` and no legacy
-`"ollama"` block.
-
-Then restart ChatGPT/Codex Desktop and start using the merged model catalog.
+Then fully quit and reopen ChatGPT/Codex Desktop.
 
 ### Tool invocation mode
 
-`wopalAi.toolMode` selects one tool mode for all Wopal models and defaults to
-`code_mode_only`. `code_mode_only` orchestrates tools through `exec`, `code_mode`
-provides both orchestration and direct calls, and `direct` provides direct calls
-only. Official entries retain their own modes.
+Wopal models share one `wopalAi.toolMode`, `code_mode_only` by default:
+
+| Mode | Provides |
+| --- | --- |
+| `code_mode_only` | the `exec` orchestration tool only |
+| `code_mode` | orchestration tools plus direct tools |
+| `direct` | direct tools only |
+
+Official models keep their own mode.
 
 ```sh
-runtime/bin/wopal-codex-gateway config wopal --tool-mode code_mode_only
-runtime/bin/wopal-codex-gateway catalog refresh
+bin/wopal-codex-gateway config wopal --tool-mode code_mode_only
+bin/wopal-codex-gateway catalog refresh
 ```
 
-The same value can be set under `wopalAi` in `runtime/config.json`. Invalid values
-are rejected. Codex must load the refreshed catalog to use the new mode. Start a
-new conversation when choosing `direct` from a conversation with `exec` history.
-Selecting a mode does not restart the gateway. The model catalog is generated;
-maintain capability overrides in `runtime/config.json`, then refresh it.
+You can also set `"toolMode"` under `wopalAi` in `runtime/config.json`. Invalid values fail loudly. After switching to `direct`, conversations whose history used `exec` need a new conversation. Changing the mode does not restart the gateway, but Codex only picks it up after reading the new catalog.
+
+

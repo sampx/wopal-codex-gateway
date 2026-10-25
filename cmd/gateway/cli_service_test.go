@@ -62,7 +62,10 @@ func prepareServiceInstall(t *testing.T) {
 	if root == "" {
 		t.Fatal("test did not set up a project root")
 	}
-	if err := os.MkdirAll(filepath.Join(root, "runtime", "bin"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "runtime"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 

@@ -65,7 +65,10 @@ func prepareServiceInstall(t *testing.T) {
 	if root == "" {
 		t.Fatal("test did not set up a project root")
 	}
-	if err := os.MkdirAll(filepath.Join(root, "runtime", "bin"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "runtime"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -252,7 +255,7 @@ func TestLaunchAgentInstallWritesPlistAndLoadsJob(t *testing.T) {
 	}
 	content := string(plist)
 	for _, want := range []string{
-		"<string>" + filepath.Join(root, "runtime", "bin", config.BinaryName) + "</string>",
+		"<string>" + filepath.Join(root, "bin", config.BinaryName) + "</string>",
 		"<string>serve</string>",
 		"<string>" + root + "</string>",
 		"<string>" + filepath.Join(root, "logs", "service.log") + "</string>",

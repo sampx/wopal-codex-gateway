@@ -1,7 +1,7 @@
 # Wopal Codex Gateway
 
 > **Status**: Active
-> **Updated**: 2026-10-24
+> **Updated**: 2026-10-25
 > **Parent Architecture**: N/A
 > **Parent Product**: N/A
 > **Sub-DESIGNs**:
@@ -49,6 +49,7 @@ Wopal Codex Gateway 是 macOS 上的本地模型路由网关。它让 Codex Desk
 | 日志只记录 metadata | 本地隐私边界；prompt 和请求正文不进入持久文件 |
 | `model` 仅在 Gateway 提供的模型上恢复 | 保留用户安装后新选的官方模型 |
 | 配置带版本号并由单一 Go 包读写 | CLI 与 daemon 共享同一契约，非法配置在启动前失败 |
+| 可执行、状态、日志分三个目录 | 三类内容的生命周期、权限与备份策略不同；分开后清理与恢复都有明确边界 |
 
 ## Module Architecture
 
@@ -68,6 +69,28 @@ Wopal Codex Gateway 是 macOS 上的本地模型路由网关。它让 Codex Desk
 | `internal/activity` | JSONL metadata 日志 | `internal/activity/` |
 
 `cmd/gateway` 只做装配。业务规则、协议处理、状态机各自拥有独立包和测试入口。
+
+## Project Layout
+
+| Directory | Owns | Rules |
+| --- | --- | --- |
+| `bin/` | 唯一可执行入口 | 只由构建写入，只放发布用二进制，`0755` |
+| `cmd/gateway/` | 进程入口与子命令装配 | 只做装配，规则下沉到 `internal/` |
+| `internal/` | 配置、路由、额度、压缩等领域包 | 每个包持有自己的规则与测试 |
+| `launchd/` | LaunchAgent plist 模板 | 只被渲染读取，不被执行 |
+| `scripts/` | 面向操作者的薄入口 | 只转发到 `bin/`，并给出适用范围 |
+| `docs/` | 目标态设计文档 | 与代码同步演进 |
+| `runtime/` | 用户配置与跨重启状态 | 程序独占写入，`0600` |
+| `logs/` | 网关与服务的日志 | 只写 metadata，正文不落盘 |
+| `recovery/` | 回滚入口：上一版可执行文件与启动脚本 | 只在当前版本不可用时使用 |
+
+三条边界把上面九块分开：
+
+- **可执行、状态、日志各有其家。** `bin/` 是构建输出，`runtime/` 是程序状态，`logs/` 是给人读的诊断输出。三者的生命周期、权限和备份策略都不同，混放会让清理与恢复无法界定。
+- **`runtime/` 只放必须跨重启存活的内容。** 用户配置、生成配置、额度状态、安装恢复记录都在这里；临时文件与缓存不进来。
+- **`recovery/` 不参与运行。** 正常启动路径从不读取它，它只回答一个问题：当前版本不可用时，怎么回到可用状态。
+
+`bin/`、`runtime/`、`logs/`、`recovery/` 都是本机内容，不进入 Git。
 
 ## Technical Stack Choices
 
@@ -267,11 +290,16 @@ turn 都写。观察表有界（64 项），淘汰只会导致重复记录，不
 | State | Location | Owner | Rules |
 | --- | --- | --- | --- |
 | Gateway config | `runtime/config.json` | CLI + daemon | version 1，`0600`，原子写入 |
+| SDK runtime config | `runtime/cliproxy-runtime.json` | daemon | 每次启动重新生成，`0600`，不含密钥 |
+| SDK auth directory | `runtime/cliproxy-auth/` | daemon | SDK 要求的认证目录，`0700` |
+| Model metadata | `runtime/model-metadata.json` | CLI | provider 声明的能力，按 provider URL 绑定，`0600` |
 | Codex restore | `runtime/codex-restore.json` | CLI | 安装前记录，恢复后删除，`0600` |
 | Quota state | `runtime/official-quota-state.json` | daemon | account key 使用 SHA-256；跨重启保留；最大单步跨窗口保留 |
+| Quota state lock | `runtime/official-quota-state.json.lock` | daemon | 保证同一时刻只有一个进程写额度状态 |
 | Model catalog | `~/.codex/wopal-codex-gateway-models.json` | CLI | 生成文件，`0600` |
 | Logs | `logs/gateway.log`、`logs/service.log`、`logs/service-error.log` | daemon | JSONL metadata；不记录 prompt/正文 |
-| Binary | `runtime/bin/wopal-codex-gateway` | build | 单一可执行文件 |
+| Binary | `bin/wopal-codex-gateway` | build | 单一可执行文件，`0755` |
+| Rollback binaries | `recovery/` | operator | 上一版可执行文件与启动脚本；运行路径不读取 |
 
 日志与临时文件规则：
 

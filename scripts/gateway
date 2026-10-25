@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT/runtime/bin/wopal-codex-gateway"
+BIN="$ROOT/bin/wopal-codex-gateway"
 
 usage() {
   cat <<'USAGE'
@@ -39,7 +39,7 @@ USAGE
 die() { echo "error: $*" >&2; exit 1; }
 
 require_bin() {
-  [[ -x "$BIN" ]] || die "built gateway binary not found at $BIN; run 'go build -o runtime/bin/wopal-codex-gateway ./cmd/gateway'"
+  [[ -x "$BIN" ]] || die "built gateway binary not found at $BIN; run 'go build -o bin/wopal-codex-gateway ./cmd/gateway'"
 }
 
 cmd="${1:-help}"

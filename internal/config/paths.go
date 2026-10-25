@@ -12,7 +12,13 @@ import (
 // unrelated directory.
 const projectRootMarker = "go.mod"
 
-// ResolveProjectRoot returns the directory that owns runtime/ and logs/.
+// projectRootSearchDepth bounds how far above the executable the root search
+// climbs. The released binary lives in <root>/bin/, so the answer is one level
+// up; the extra levels keep a nested build output or a scratch path working
+// without letting the search adopt a sibling project.
+const projectRootSearchDepth = 3
+
+// ResolveProjectRoot returns the directory that owns bin/, runtime/ and logs/.
 func ResolveProjectRoot(explicit string) (string, error) {
 	if explicit != "" {
 		abs, err := filepath.Abs(explicit)
@@ -23,9 +29,8 @@ func ResolveProjectRoot(explicit string) (string, error) {
 	}
 
 	if executable, err := os.Executable(); err == nil {
-		candidate := filepath.Clean(filepath.Join(filepath.Dir(executable), "..", ".."))
-		if _, err := os.Stat(filepath.Join(candidate, projectRootMarker)); err == nil {
-			return candidate, nil
+		if root, ok := searchProjectRoot(filepath.Dir(executable)); ok {
+			return root, nil
 		}
 	}
 
@@ -39,13 +44,30 @@ func ResolveProjectRoot(explicit string) (string, error) {
 	return cwd, nil
 }
 
+// searchProjectRoot walks from start upward, looking for the project root
+// marker. It stops after projectRootSearchDepth levels.
+func searchProjectRoot(start string) (string, bool) {
+	dir := filepath.Clean(start)
+	for range projectRootSearchDepth {
+		if _, err := os.Stat(filepath.Join(dir, projectRootMarker)); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+	return "", false
+}
+
 // resolvedRoot is the project root used by control-plane commands. It is filled
-// lazily on first use so `help` never touches the filesystem.
+// lazily on first use so the help path never touches the filesystem.
 var resolvedRoot string
 
-// SetProjectRoot pins the project root for this process. `serve` gets it from
-// the LaunchAgent, and the control-plane commands accept the same flag so they
-// always act on the runtime the operator named instead of guessing from cwd.
+// SetProjectRoot pins the project root for this process. The daemon gets it
+// from the LaunchAgent, and the control-plane commands accept the same flag so
+// they always act on the runtime the operator named instead of guessing from cwd.
 func SetProjectRoot(root string) error {
 	if root == "" {
 		return fmt.Errorf("project root is required")
@@ -86,8 +108,13 @@ func MustProjectRoot() string {
 	return root
 }
 
-func StateDir() string         { return filepath.Join(MustProjectRoot(), "runtime") }
-func LogsDir() string          { return filepath.Join(MustProjectRoot(), "logs") }
+// BinDir owns the released executables. It holds build output, never program
+// state, so nothing else is written here.
+func BinDir() string      { return filepath.Join(MustProjectRoot(), "bin") }
+func StateDir() string    { return filepath.Join(MustProjectRoot(), "runtime") }
+func LogsDir() string     { return filepath.Join(MustProjectRoot(), "logs") }
+func RecoveryDir() string { return filepath.Join(MustProjectRoot(), "recovery") }
+
 func ConfigPath() string       { return filepath.Join(StateDir(), "config.json") }
 func RestoreStatePath() string { return filepath.Join(StateDir(), "codex-restore.json") }
 func ActivityLogPath() string  { return filepath.Join(LogsDir(), "gateway.log") }
@@ -96,10 +123,10 @@ func ServiceErrorLogPath() string {
 	return filepath.Join(LogsDir(), "service-error.log")
 }
 
-// GatewayBinaryPath is the single runtime executable: the LaunchAgent program,
-// the `serve` target and the path documented for operators.
+// GatewayBinaryPath is the single released executable: the LaunchAgent program,
+// the serve target and the path documented for operators.
 func GatewayBinaryPath() string {
-	return filepath.Join(StateDir(), "bin", BinaryName)
+	return filepath.Join(BinDir(), BinaryName)
 }
 
 func LaunchAgentPath() string {
@@ -130,7 +157,7 @@ func CodexGatewayCatalogPath() string {
 	return filepath.Join(CodexHome(), "wopal-codex-gateway-models.json")
 }
 
-// BinaryName is the runtime executable shared by the CLI, the LaunchAgent
+// BinaryName is the released executable shared by the CLI, the LaunchAgent
 // program path and the operator-facing messages.
 const BinaryName = "wopal-codex-gateway"
 
