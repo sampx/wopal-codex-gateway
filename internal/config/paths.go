@@ -18,6 +18,13 @@ const projectRootMarker = "go.mod"
 // without letting the search adopt a sibling project.
 const projectRootSearchDepth = 3
 
+// Directory names appear once here; the process-wide and explicit-root helpers
+// both derive paths through them.
+const (
+	stateDirName = "runtime"
+	logsDirName  = "logs"
+)
+
 // ResolveProjectRoot returns the directory that owns bin/, runtime/ and logs/.
 func ResolveProjectRoot(explicit string) (string, error) {
 	if explicit != "" {
@@ -100,22 +107,47 @@ func ProjectRootDir() (string, error) {
 	return root, nil
 }
 
+// MustProjectRoot returns the resolved root or panics. It must never return an
+// empty string: joining an empty root would silently turn every state path into
+// a cwd-relative path and write the runtime into whatever directory happened to
+// launch the process.
 func MustProjectRoot() string {
 	root, err := ProjectRootDir()
 	if err != nil {
-		return ""
+		panic(fmt.Sprintf("project root is not resolved: %v", err))
 	}
 	return root
+}
+
+// Rooted helpers serve explicit-root callers (serve, the SDK runtime and model
+// metadata). They never consult cwd; only helpers with a real caller exist.
+func StateDirFor(root string) string { return filepath.Join(root, stateDirName) }
+func LogsDirFor(root string) string  { return filepath.Join(root, logsDirName) }
+
+func ConfigPathFor(root string) string {
+	return filepath.Join(StateDirFor(root), "config.json")
+}
+func CLIProxyRuntimeConfigPathFor(root string) string {
+	return filepath.Join(StateDirFor(root), "cliproxy-runtime.json")
+}
+func CLIProxyAuthDirFor(root string) string {
+	return filepath.Join(StateDirFor(root), "cliproxy-auth")
+}
+func ModelMetadataPathFor(root string) string {
+	return filepath.Join(StateDirFor(root), "model-metadata.json")
+}
+func QuotaStatePathFor(root string) string {
+	return filepath.Join(StateDirFor(root), "official-quota-state.json")
 }
 
 // BinDir owns the released executables. It holds build output, never program
 // state, so nothing else is written here.
 func BinDir() string      { return filepath.Join(MustProjectRoot(), "bin") }
-func StateDir() string    { return filepath.Join(MustProjectRoot(), "runtime") }
-func LogsDir() string     { return filepath.Join(MustProjectRoot(), "logs") }
+func StateDir() string    { return StateDirFor(MustProjectRoot()) }
+func LogsDir() string     { return LogsDirFor(MustProjectRoot()) }
 func RecoveryDir() string { return filepath.Join(MustProjectRoot(), "recovery") }
 
-func ConfigPath() string       { return filepath.Join(StateDir(), "config.json") }
+func ConfigPath() string       { return ConfigPathFor(MustProjectRoot()) }
 func RestoreStatePath() string { return filepath.Join(StateDir(), "codex-restore.json") }
 func ActivityLogPath() string  { return filepath.Join(LogsDir(), "gateway.log") }
 func ServiceLogPath() string   { return filepath.Join(LogsDir(), "service.log") }

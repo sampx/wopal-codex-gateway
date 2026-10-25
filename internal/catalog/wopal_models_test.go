@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -298,4 +299,54 @@ func TestSyncPreservesUnsetAndFalseOverrides(t *testing.T) {
 	if *current[1].ContextWindow != 262144 || *current[1].Vision || *current[1].Reasoning {
 		t.Fatal("sync shares pointers with current")
 	}
+}
+
+func TestWopalModelOperationsPreserveExtensions(t *testing.T) {
+	original := config.ExternalModelConfig{Name: "alpha"}
+	if err := json.Unmarshal([]byte(`{"name":"alpha","vision":false,"future":{"keep":1}}`), &original); err != nil {
+		t.Fatal(err)
+	}
+	check := func(t *testing.T, model config.ExternalModelConfig) {
+		t.Helper()
+		if model.Name != "alpha" || model.Vision == nil || *model.Vision {
+			t.Fatalf("typed fields changed: %+v", model)
+		}
+		raw, err := json.Marshal(model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if string(fields["future"]) != `{"keep":1}` {
+			t.Fatalf("extension lost: %s", raw)
+		}
+	}
+
+	t.Run("sync", func(t *testing.T) {
+		result := SyncWopalModelConfigs([]config.ExternalModelConfig{original}, []string{"alpha"}, nil)
+		if len(result.Models) != 1 {
+			t.Fatalf("models = %+v", result.Models)
+		}
+		check(t, result.Models[0])
+	})
+	t.Run("add", func(t *testing.T) {
+		result := AddWopalModelConfigs([]config.ExternalModelConfig{original}, []string{"alpha", "beta"}, ModelPatch{})
+		if len(result.Models) != 2 {
+			t.Fatalf("models = %+v", result.Models)
+		}
+		check(t, result.Models[0])
+	})
+	t.Run("update unrelated field", func(t *testing.T) {
+		result := UpdateWopalModelConfigs([]config.ExternalModelConfig{original}, []string{"alpha"}, ModelPatch{ContextWindow: modelsIntPtr(131072)})
+		if len(result.Models) != 1 {
+			t.Fatalf("models = %+v", result.Models)
+		}
+		check(t, result.Models[0])
+	})
+	t.Run("resolve", func(t *testing.T) {
+		resolved, _ := ResolveModel(original, nil)
+		check(t, resolved)
+	})
 }

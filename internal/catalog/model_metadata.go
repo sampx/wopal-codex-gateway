@@ -113,7 +113,7 @@ func SaveModelMetadata(snapshot *ModelMetadataSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("resolve model metadata path: %w", err)
 	}
-	path := filepath.Join(root, "runtime", "model-metadata.json")
+	path := config.ModelMetadataPathFor(root)
 	normalized := *snapshot
 	normalized.BaseURL = normalizeMetadataBaseURL(snapshot.BaseURL)
 	payload, err := json.MarshalIndent(&normalized, "", "  ")
@@ -128,29 +128,8 @@ func SaveModelMetadata(snapshot *ModelMetadataSnapshot) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create model metadata directory: %w", err)
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".model-metadata.json.tmp-*")
-	if err != nil {
-		return fmt.Errorf("create model metadata temp file: %w", err)
-	}
-	defer os.Remove(temp.Name())
-	// CreateTemp creates a 0600 file; keep this explicit as a persistence guarantee.
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("set model metadata permissions: %w", err)
-	}
-	if _, err := temp.Write(payload); err != nil {
-		_ = temp.Close()
+	if err := config.WriteFileAtomic(path, payload, 0o600); err != nil {
 		return fmt.Errorf("write model metadata: %w", err)
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("sync model metadata: %w", err)
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("close model metadata: %w", err)
-	}
-	if err := os.Rename(temp.Name(), path); err != nil {
-		return fmt.Errorf("replace model metadata: %w", err)
 	}
 	return nil
 }
@@ -162,7 +141,7 @@ func LoadModelMetadata(baseURL string) (*ModelMetadataSnapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve model metadata path: %w", err)
 	}
-	path := filepath.Join(root, "runtime", "model-metadata.json")
+	path := config.ModelMetadataPathFor(root)
 	file, err := os.Open(path)
 	if os.IsNotExist(err) {
 		return nil, nil

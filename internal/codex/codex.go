@@ -163,26 +163,8 @@ func writeCodexFileAtomic(path, content string) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create directory %s: %w", directory, err)
 	}
-	temp, err := os.CreateTemp(directory, filepath.Base(path)+".wopal-*")
-	if err != nil {
-		return fmt.Errorf("create temporary file for %s: %w", path, err)
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
-		return fmt.Errorf("set permissions on %s: %w", tempPath, err)
-	}
-	if _, err := temp.WriteString(content); err != nil {
-		temp.Close()
-		return fmt.Errorf("write %s: %w", tempPath, err)
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", tempPath, err)
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return fmt.Errorf("replace %s: %w", path, err)
+	if err := config.WriteFileAtomic(path, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }

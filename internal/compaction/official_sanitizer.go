@@ -36,14 +36,6 @@ func isWopalReasoningID(id string) bool {
 	return strings.HasPrefix(id, ReasoningIDPrefix) || strings.HasPrefix(id, "rs_cmb-")
 }
 
-func containsOfficialSanitizeMarker(payload []byte) bool {
-	return bytes.Contains(payload, []byte(CapsulePrefix)) ||
-		bytes.Contains(payload, []byte(compactionResponseIDPrefix)) ||
-		bytes.Contains(payload, []byte(ReasoningIDPrefix)) ||
-		bytes.Contains(payload, []byte("rs_cmb-")) ||
-		bytes.Contains(payload, []byte(`"reasoning"`))
-}
-
 func hasLocalPreviousResponseID(payload map[string]any) bool {
 	return strings.HasPrefix(strings.TrimSpace(routing.StringOrEmpty(payload["previous_response_id"])), compactionResponseIDPrefix)
 }
@@ -149,6 +141,66 @@ func unavailableMessage(id any) map[string]any {
 	}
 }
 
+// SanitizeParsedRequest neutralizes gateway-issued items in an already parsed
+// official-bound payload. It returns false when the payload needs no rewrite.
+// The caller can therefore reuse one parse for routing and sanitization while
+// keeping the untouched passthrough contract.
+func SanitizeParsedRequest(payload map[string]any, logger *activity.Logger) bool {
+	if payload == nil {
+		return false
+	}
+	input, ok := payload["input"].([]any)
+	if !ok {
+		return false
+	}
+	hadWopalCompaction := inputHasCapsule(input)
+	hadLocalPreviousResponse := hasLocalPreviousResponseID(payload)
+	expanded, neutralized := sanitizeRequestInput(input)
+	expanded, strippedIDs, droppedReferences, itemTypes := normalizeInputItems(expanded)
+	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse {
+		return false
+	}
+	payload["input"] = expanded
+	if hadWopalCompaction || hadLocalPreviousResponse {
+		delete(payload, "previous_response_id")
+	}
+	if logger != nil {
+		logger.Write(collectedNeutralizationFields(payload, neutralized, strippedIDs, droppedReferences, itemTypes))
+	}
+	return true
+}
+
+// writeParsedRequest replaces a request body with the parsed payload after a
+// sanitizer rewrite. It removes compression and keeps Content-Length in sync.
+func writeParsedRequest(req *http.Request, payload map[string]any) error {
+	if req == nil {
+		return fmt.Errorf("official request is nil")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.Header.Del("Content-Encoding")
+	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	return nil
+}
+
+func collectedNeutralizationFields(payload map[string]any, neutralized, strippedIDs, droppedReferences int, itemTypes map[string]int) map[string]any {
+	fields := map[string]any{
+		"event":              "official_wopal_items_neutralized",
+		"model":              routing.StringOrEmpty(payload["model"]),
+		"item_count":         neutralized,
+		"stripped_item_ids":  strippedIDs,
+		"dropped_references": droppedReferences,
+	}
+	if len(itemTypes) > 0 {
+		fields["item_types"] = itemTypes
+	}
+	return fields
+}
+
 // RewriteOfficialRequestBody neutralizes gateway-issued items in an
 // official-bound HTTP request body. Requests without gateway-issued items keep
 // their exact bytes, headers, and compression.
@@ -177,41 +229,12 @@ func RewriteOfficialRequestBody(req *http.Request, logger *activity.Logger) {
 		logger.Write(map[string]any{"event": "official_sanitizer_decode_failed", "error": err.Error()})
 		return
 	}
-	input, ok := payload["input"].([]any)
-	if !ok {
+	if !SanitizeParsedRequest(payload, logger) {
 		return
 	}
-	hadWopalCompaction := inputHasCapsule(input)
-	hadLocalPreviousResponse := hasLocalPreviousResponseID(payload)
-	expanded, neutralized := sanitizeRequestInput(input)
-	expanded, strippedIDs, droppedReferences, itemTypes := normalizeInputItems(expanded)
-	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse {
-		return
-	}
-	payload["input"] = expanded
-	if hadWopalCompaction || hadLocalPreviousResponse {
-		delete(payload, "previous_response_id")
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
+	if err := writeParsedRequest(req, payload); err != nil {
 		logger.Write(map[string]any{"event": "official_sanitizer_encode_failed", "error": err.Error()})
-		return
 	}
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.ContentLength = int64(len(body))
-	req.Header.Del("Content-Encoding")
-	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	fields := map[string]any{
-		"event":              "official_wopal_items_neutralized",
-		"model":              routing.StringOrEmpty(payload["model"]),
-		"item_count":         neutralized,
-		"stripped_item_ids":  strippedIDs,
-		"dropped_references": droppedReferences,
-	}
-	if len(itemTypes) > 0 {
-		fields["item_types"] = itemTypes
-	}
-	logger.Write(fields)
 }
 
 // officialItemTypesKeepingID lists the item types whose id carries protocol

@@ -26,11 +26,14 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 | `internal/codex/` | `~/.codex/config.toml` 行级接管与恢复 |
 | `internal/catalog/` | bundled catalog 读取、模型合并与能力解析 |
 | `internal/proxy/` | 路由 middleware、官方直通、Wopal HTTP/WS |
+| `internal/routing/` | 共享路由策略与无状态请求工具 |
+| `internal/clientfp/` | 客户端版本指纹与请求形状变化 |
 | `internal/quota/` | 额度窗口、阈值、failover 状态机 |
 | `internal/compaction/` | `wgcp1` capsule、native restore |
 | `internal/keychain/` | macOS Keychain 读写 |
 | `internal/launchd/` | plist 渲染、launchctl、健康等待 |
 | `internal/activity/` | JSONL metadata 日志与轮转 |
+| `internal/notify/` | 额度切换与恢复通知 |
 | `launchd/` | LaunchAgent plist 模板 |
 | `scripts/` | 面向操作者的薄入口，转发到 `bin/` |
 | `docs/` | 目标态设计文档 |

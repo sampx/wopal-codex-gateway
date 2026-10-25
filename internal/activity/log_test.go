@@ -67,6 +67,22 @@ func TestLogRotatingWriterZeroConfigUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestActivityLogDirectoryIsPrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "logs")
+	logger, err := New(dir, config.Logs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(logger.Close)
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("log directory permissions = %o, want 700", got)
+	}
+}
+
 func waitForRotatedLogs(t *testing.T, dir string, want int) []string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

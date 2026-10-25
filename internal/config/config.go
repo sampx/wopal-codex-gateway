@@ -16,6 +16,13 @@ const LocalAccessKey = "wopal-codex-gateway-local"
 // CLIProxyAPI config. The Wopal API key is injected into the parsed struct only,
 // so the file written next to the config never contains the credential.
 func BuildCLIProxyConfig(root string, gateway *GatewayConfig, wopalKey string) (*sdkconfig.Config, string, error) {
+	if gateway == nil {
+		return nil, "", fmt.Errorf("build CLIProxyAPI config: gateway config is nil")
+	}
+	root, err := requireRoot(root)
+	if err != nil {
+		return nil, "", err
+	}
 	models := make([]map[string]any, 0, len(gateway.WopalAI.Models))
 	for _, model := range gateway.WopalAI.Models {
 		entry := map[string]any{
@@ -32,9 +39,11 @@ func BuildCLIProxyConfig(root string, gateway *GatewayConfig, wopalKey string) (
 		models = append(models, entry)
 	}
 
-	runtimeDir := filepath.Join(root, "runtime")
-	runtimeConfigPath := filepath.Join(runtimeDir, "cliproxy-runtime.json")
-	authDir := filepath.Join(runtimeDir, "cliproxy-auth")
+	runtimeConfigPath := CLIProxyRuntimeConfigPathFor(root)
+	authDir := CLIProxyAuthDirFor(root)
+	if err := os.MkdirAll(StateDirFor(root), 0o700); err != nil {
+		return nil, "", fmt.Errorf("create CLIProxyAPI runtime dir: %w", err)
+	}
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		return nil, "", fmt.Errorf("create CLIProxyAPI auth dir: %w", err)
 	}
@@ -65,7 +74,7 @@ func BuildCLIProxyConfig(root string, gateway *GatewayConfig, wopalKey string) (
 	if err != nil {
 		return nil, "", fmt.Errorf("encode CLIProxyAPI config: %w", err)
 	}
-	if err := os.WriteFile(runtimeConfigPath, append(data, '\n'), 0o600); err != nil {
+	if err := WriteFileAtomic(runtimeConfigPath, append(data, '\n'), 0o600); err != nil {
 		return nil, "", fmt.Errorf("write sanitized CLIProxyAPI config: %w", err)
 	}
 	cfg, err := sdkconfig.ParseConfigBytes(data)
@@ -77,4 +86,17 @@ func BuildCLIProxyConfig(root string, gateway *GatewayConfig, wopalKey string) (
 	}
 	cfg.OpenAICompatibility[0].APIKeyEntries[0].APIKey = wopalKey
 	return cfg, runtimeConfigPath, nil
+}
+
+// requireRoot rejects an empty explicit root before any write. A relative root
+// stays supported and is normalized against cwd, matching --project-root.
+func requireRoot(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("project root is required")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve project root: %w", err)
+	}
+	return abs, nil
 }

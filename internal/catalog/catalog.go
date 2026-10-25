@@ -218,30 +218,8 @@ func writeCatalog(path string, catalog []map[string]any) error {
 	}
 	payload = append(payload, '\n')
 
-	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create model catalog temp file: %w", err)
-	}
-	tempPath := temp.Name()
-	defer os.Remove(tempPath)
-
-	if err := temp.Chmod(0o600); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("set model catalog permissions: %w", err)
-	}
-	if _, err := temp.Write(payload); err != nil {
-		_ = temp.Close()
+	if err := config.WriteFileAtomic(path, payload, 0o600); err != nil {
 		return fmt.Errorf("write model catalog: %w", err)
-	}
-	if err := temp.Sync(); err != nil {
-		_ = temp.Close()
-		return fmt.Errorf("sync model catalog: %w", err)
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("close model catalog: %w", err)
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return fmt.Errorf("replace model catalog: %w", err)
 	}
 	return nil
 }

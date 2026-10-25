@@ -16,8 +16,12 @@ func testOfficialCompactionItem() map[string]any {
 	return map[string]any{"type": "compaction", "id": "cmp_official", "encrypted_content": "official-openai-capsule-blob"}
 }
 
-func sanitizeOfficialWebsocketFrame(payload []byte) ([]byte, bool) {
-	return SanitizeWebsocketFrame(payload, nil)
+func containsOfficialSanitizeMarker(payload []byte) bool {
+	return bytes.Contains(payload, []byte(CapsulePrefix)) ||
+		bytes.Contains(payload, []byte(compactionResponseIDPrefix)) ||
+		bytes.Contains(payload, []byte(ReasoningIDPrefix)) ||
+		bytes.Contains(payload, []byte("rs_cmb-")) ||
+		bytes.Contains(payload, []byte(`"reasoning"`))
 }
 
 func TestSanitizeOfficialInputReplacesWopalCapsule(t *testing.T) {
@@ -177,6 +181,42 @@ func TestSanitizeOfficialInputDegradesWhenCapsuleUnreadable(t *testing.T) {
 	}
 	if strings.Contains(toString(item["content"]), "not-a-real-capsule") {
 		t.Fatal("unavailable message leaked capsule ciphertext")
+	}
+}
+
+// The proxy reuses one parsed payload for routing and sanitization. This entry
+// must mutate that payload only when a rewrite is needed, and the legacy HTTP
+// entry must keep its all-or-nothing passthrough contract.
+func TestSanitizeParsedRequestReusesPayloadAndLegacyPassthroughStaysExact(t *testing.T) {
+	ConfigureKey("parsed-sanitizer-test")
+	plain := map[string]any{
+		"model": "gpt-6.1-sol",
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": "keep"}},
+	}
+	if SanitizeParsedRequest(plain, nil) {
+		t.Fatal("plain payload reported a rewrite")
+	}
+
+	item := testWopalCompactionItem(t, "cmp_wopal_parsed-1", "remember PARSED-91")
+	payload := map[string]any{"model": "gpt-6.1-sol", "input": []any{item}}
+	if !SanitizeParsedRequest(payload, nil) {
+		t.Fatal("parsed Wopal capsule was not rewritten")
+	}
+	input, _ := payload["input"].([]any)
+	if len(input) == 0 || !strings.Contains(toString(input[0]), "PARSED-91") {
+		t.Fatalf("parsed payload lost expanded summary: %#v", payload)
+	}
+
+	original := []byte(`{"model":"gpt-6.1-sol","input":[{"type":"compaction","id":"cmp_official","encrypted_content":"official-openai-capsule-blob"}]}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(original))
+	request.Header.Set("Content-Encoding", "gzip")
+	RewriteOfficialRequestBody(request, nil)
+	got, err := io.ReadAll(request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) || request.Header.Get("Content-Encoding") != "gzip" {
+		t.Fatalf("legacy passthrough changed bytes/encoding: body=%s encoding=%q", got, request.Header.Get("Content-Encoding"))
 	}
 }
 

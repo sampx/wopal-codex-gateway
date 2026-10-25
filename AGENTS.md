@@ -26,11 +26,14 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 | `internal/codex/` | Line-level takeover and restore of `~/.codex/config.toml` |
 | `internal/catalog/` | Bundled catalog reading, model merge, capability resolution |
 | `internal/proxy/` | Routing middleware, official passthrough, Wopal HTTP/WS |
+| `internal/routing/` | Shared routing policy and stateless request helpers |
+| `internal/clientfp/` | Client version fingerprints and request-shape changes |
 | `internal/quota/` | Quota windows, thresholds, failover state machine |
 | `internal/compaction/` | `wgcp1` capsules, native restore |
 | `internal/keychain/` | macOS Keychain access |
 | `internal/launchd/` | Plist rendering, launchctl, health waiting |
 | `internal/activity/` | JSONL metadata logging and rotation |
+| `internal/notify/` | Quota failover and recovery notifications |
 | `launchd/` | LaunchAgent plist template |
 | `scripts/` | Operator-facing thin entry that forwards to `bin/` |
 | `docs/` | Target-state design documents |

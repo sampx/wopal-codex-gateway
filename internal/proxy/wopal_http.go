@@ -18,20 +18,17 @@ import (
 
 // HTTP fallback must restore the same compacted history as the websocket path.
 // Returns false when this function has handled the request (including errors).
-func prepareWopalHTTP(c *gin.Context, logger *activity.Logger, model string, nativeReplay *compaction.NativeBridge) bool {
-	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, routing.MaxBodyBytes+1))
-	if err == nil && len(raw) > routing.MaxBodyBytes {
-		err = fmt.Errorf("request exceeds routing limit")
-	}
-	if err == nil {
-		raw, err = compaction.DecodeBody(raw, c.GetHeader("Content-Encoding"))
-	}
-	if err == nil && len(raw) > routing.MaxBodyBytes {
-		err = fmt.Errorf("decoded request exceeds routing limit")
-	}
+func prepareWopalHTTP(c *gin.Context, logger *activity.Logger, model string, nativeReplay *compaction.NativeBridge, inspection *requestInspection) bool {
 	var message map[string]any
-	if err == nil {
-		err = json.Unmarshal(raw, &message)
+	var err error
+	if inspection == nil || inspection.payload == nil {
+		err = fmt.Errorf("request body is required")
+	} else {
+		if len(inspection.decoded) > routing.MaxBodyBytes {
+			err = fmt.Errorf("decoded request exceeds routing limit")
+		} else {
+			message = inspection.payload
+		}
 	}
 	if err == nil {
 		err = nativeReplay.Expand(c.Request.Context(), c.Request, message)

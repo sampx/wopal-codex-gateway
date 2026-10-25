@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -41,18 +40,10 @@ type NativeBridge struct {
 }
 
 func NativeModel() (string, error) {
-	home := os.Getenv("CODEX_HOME")
-	if home == "" {
-		userHome, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		home = filepath.Join(userHome, ".codex")
-	}
 	// Codex refreshes models_cache.json through the gateway's /models, which
 	// contains third-party models only. Prefer the installed merged catalog.
-	for _, name := range []string{"wopal-codex-gateway-models.json", "models_cache.json"} {
-		raw, err := os.ReadFile(filepath.Join(home, name))
+	for _, path := range []string{config.CodexGatewayCatalogPath(), config.CodexNativeCatalogPath()} {
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}

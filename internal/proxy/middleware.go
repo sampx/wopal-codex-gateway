@@ -2,6 +2,10 @@ package proxy
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,8 +42,13 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 	openaiProxy := newOfficialReverseProxy(openaiTarget, false, logger, quotaGuard)
 	nativeReplay := compaction.NewNativeBridge(chatgptTarget, openaiTarget, logger, quotaGuard)
 	clientWatcher := clientfp.NewWatcher(64)
+	selfLoopToken := newSelfLoopToken()
 
 	return func(c *gin.Context) {
+		// Every request gets the process-local token once. Clones and contexts
+		// derived from this request retain it, so every Wopal websocket entry
+		// point can identify its own loopback hop without shared mutable state.
+		c.Request = attachSelfLoopToken(c.Request, selfLoopToken)
 		path := c.Request.URL.Path
 		if path == "/_health" || path == "/_status" {
 			c.Next()
@@ -55,35 +64,29 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 			return
 		}
 
-		model, shape, err := detectRequestShape(c.Request)
+		inspection, err := inspectRequest(c.Request)
 		if err != nil {
 			logger.Write(map[string]any{"event": "route_detection_failed", "path": path, "error": err.Error()})
 			c.Next()
 			return
 		}
+		model, shape := inspection.model, inspection.shape
 		// Record which Codex build sent this request. Codex ships several times
 		// a week and a release can change the request contract without breaking
 		// a build, so the version and the observed shape are written next to the
 		// routing decision instead of being reconstructed after a failure.
 		fingerprint := clientfp.From(c.Request.Header)
 		clientFields := fingerprint.Fields()
-		if shape.ToolSurface != "" && shape.ToolSurface != "none" {
+		internalHop := isSelfLoopRequest(c.Request, selfLoopToken)
+		if !internalHop && shape.ToolSurface != "" && shape.ToolSurface != "none" {
 			for key, value := range shape.Fields() {
 				clientFields[key] = value
 			}
-			if change := clientWatcher.Observed(fingerprint.Version, model, shape, fingerprint.Encoding, fingerprint.BetaFeatures); change != nil {
-				fields := change.Fields()
-				for key, value := range fingerprint.Fields() {
-					if _, ok := fields[key]; !ok {
-						fields[key] = value
-					}
-				}
-				logger.Write(fields)
-			}
+			observeClientContract(logger, clientWatcher, c.Request.Header, model, shape)
 		}
-		if c.Request.Method == http.MethodPost && isGatewayCompactionRequest(c.Request, path) {
+		if c.Request.Method == http.MethodPost && isGatewayCompactionRequest(inspection, path) {
 			logger.Write(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": compaction.DedicatedModel, "path": path, "purpose": "compaction"})
-			_ = prepareWopalHTTP(c, logger, compaction.DedicatedModel, nativeReplay)
+			_ = prepareWopalHTTP(c, logger, compaction.DedicatedModel, nativeReplay, inspection)
 			return
 		}
 
@@ -92,11 +95,12 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 			logger.Write(withClient(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": model, "path": path}, clientFields))
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Set("native_compaction_bridge", nativeReplay)
+				c.Set(clientContractWatcherContextKey, clientWatcher)
 				c.Abort()
 				serveWopalWebsocketBridge(c, logger, model)
 				return
 			}
-			if c.Request.Method == http.MethodPost && !prepareWopalHTTP(c, logger, model, nativeReplay) {
+			if c.Request.Method == http.MethodPost && !prepareWopalHTTP(c, logger, model, nativeReplay, inspection) {
 				return
 			}
 			c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
@@ -116,6 +120,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 					logger.Write(map[string]any{"event": "official_quota_failover", "requested_model": model, "effective_model": routing.OfficialQuotaFailoverModel, "path": path, "reason": reason})
 					if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 						c.Set("native_compaction_bridge", nativeReplay)
+						c.Set(clientContractWatcherContextKey, clientWatcher)
 						c.Set("quota_failover_requested_model", model)
 						c.Set("quota_failover_guard", quotaGuard)
 						c.Set("quota_failover_account_id", accountID)
@@ -124,11 +129,11 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 						return
 					}
 					if c.Request.Method == http.MethodPost {
-						if err := rewriteRequestModel(c.Request, routing.OfficialQuotaFailoverModel); err != nil {
+						if err := rewriteRequestModel(c.Request, routing.OfficialQuotaFailoverModel, inspection); err != nil {
 							c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "quota_failover_rewrite_failed", "type": "invalid_request_error", "message": err.Error()}})
 							return
 						}
-						if !prepareWopalHTTP(c, logger, routing.OfficialQuotaFailoverModel, nativeReplay) {
+						if !prepareWopalHTTP(c, logger, routing.OfficialQuotaFailoverModel, nativeReplay, inspection) {
 							return
 						}
 						c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
@@ -146,7 +151,7 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 				serveOfficialWebsocketBridge(c, logger, target, quotaGuard, accountID, model, nativeReplay)
 				return
 			}
-			compaction.RewriteOfficialRequestBody(c.Request, logger)
+			sanitizeOfficialInspection(c.Request, inspection, logger)
 			c.Abort()
 			proxy.ServeHTTP(c.Writer, c.Request)
 			return
@@ -160,106 +165,266 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 	}
 }
 
-func rewriteRequestModel(req *http.Request, model string) error {
-	if req == nil || req.Body == nil {
+// selfLoopToken distinguishes a Wopal websocket's loopback HTTP request from
+// an external POST. It is deliberately not authentication: the SDK still
+// checks the local access key. The token only keeps an implementation detail
+// out of the client-contract watcher, whose subject is the original Codex
+// client rather than the gateway's own compactor request.
+type selfLoopContextKey struct{}
+
+const (
+	selfLoopTokenHeader             = "X-Wopal-Internal-Token"
+	clientContractWatcherContextKey = "wopal_client_contract_watcher"
+)
+
+func newSelfLoopToken() string {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		panic(fmt.Sprintf("generate self-loop token: %v", err))
+	}
+	return hex.EncodeToString(raw[:])
+}
+
+func attachSelfLoopToken(req *http.Request, token string) *http.Request {
+	if req == nil || token == "" {
+		return req
+	}
+	return req.WithContext(context.WithValue(req.Context(), selfLoopContextKey{}, token))
+}
+
+func selfLoopTokenFor(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	token, _ := req.Context().Value(selfLoopContextKey{}).(string)
+	return token
+}
+
+func isSelfLoopRequest(req *http.Request, token string) bool {
+	if req == nil || token == "" {
+		return false
+	}
+	return subtleConstantTimeEqual(req.Header.Get(selfLoopTokenHeader), token)
+}
+
+func subtleConstantTimeEqual(left, right string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+}
+
+// copySelfLoopFingerprint carries only non-secret client identity metadata to
+// the gateway's own loopback hop. Authentication and account headers are never
+// copied.
+func copySelfLoopFingerprint(dst *http.Request, src *http.Request) {
+	if dst == nil || src == nil {
+		return
+	}
+	token := selfLoopTokenFor(src)
+	if token == "" {
+		return
+	}
+	dst.Header.Set(selfLoopTokenHeader, token)
+	for _, name := range []string{"version", "originator", "User-Agent", "x-codex-beta-features"} {
+		if value := src.Header.Get(name); value != "" {
+			dst.Header.Set(name, value)
+		}
+	}
+}
+
+// observeWebsocketClientContract observes only the shapes which define a
+// request contract. Incremental frames may omit model; use the model bound to
+// this socket so an omitted field cannot collapse distinct sessions into one
+// watcher key.
+func observeWebsocketClientContract(logger *activity.Logger, watcher *clientfp.Watcher, header http.Header, boundModel, requestType string, shape clientfp.Shape) {
+	if requestType != "response.create" && requestType != "response.append" {
+		return
+	}
+	model := strings.TrimSpace(shape.Model)
+	if model == "" {
+		model = strings.TrimSpace(boundModel)
+	}
+	observeClientContract(logger, watcher, header, model, shape)
+}
+
+// observeClientContract records a transition for the original client request.
+// It is shared by HTTP inspection and the Wopal websocket frame loop; generated
+// loopback requests must not call it.
+func observeClientContract(logger *activity.Logger, watcher *clientfp.Watcher, header http.Header, model string, shape clientfp.Shape) {
+	if watcher == nil || shape.ToolSurface == "" || shape.ToolSurface == "none" {
+		return
+	}
+	fingerprint := clientfp.From(header)
+	if change := watcher.Observed(fingerprint.Version, model, shape, fingerprint.Encoding, fingerprint.BetaFeatures); change != nil {
+		fields := change.Fields()
+		for key, value := range fingerprint.Fields() {
+			if _, ok := fields[key]; !ok {
+				fields[key] = value
+			}
+		}
+		logger.Write(fields)
+	}
+}
+
+func rewriteRequestModel(req *http.Request, model string, inspection *requestInspection) error {
+	if inspection == nil || inspection.payload == nil {
 		return fmt.Errorf("request body is required for quota failover")
 	}
-	raw, err := io.ReadAll(io.LimitReader(req.Body, routing.MaxBodyBytes+1))
-	if err != nil {
-		return fmt.Errorf("read quota failover request: %w", err)
-	}
-	if len(raw) > routing.MaxBodyBytes {
-		return fmt.Errorf("request body exceeds routing limit")
-	}
-	decoded, err := compaction.DecodeBody(raw, req.Header.Get("Content-Encoding"))
+	inspection.payload["model"] = model
+	return writeInspection(req, inspection)
+}
+
+func writeInspection(req *http.Request, inspection *requestInspection) error {
+	body, err := json.Marshal(inspection.payload)
 	if err != nil {
 		return err
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(decoded, &payload); err != nil {
-		return fmt.Errorf("parse quota failover request: %w", err)
-	}
-	payload["model"] = model
-	rewritten, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode quota failover request: %w", err)
-	}
-	req.Body = io.NopCloser(bytes.NewReader(rewritten))
-	req.ContentLength = int64(len(rewritten))
+	inspection.decoded = body
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
 	req.Header.Del("Content-Encoding")
-	req.Header.Set("Content-Length", fmt.Sprint(len(rewritten)))
+	req.Header.Set("Content-Length", fmt.Sprint(len(body)))
 	return nil
 }
 
-func isGatewayCompactionRequest(req *http.Request, path string) bool {
+func isGatewayCompactionRequest(inspection *requestInspection, path string) bool {
 	if path == "/v1/responses/compact" {
 		return true
 	}
-	if req == nil || req.Body == nil || path != "/v1/responses" {
+	if inspection == nil || inspection.payload == nil || path != "/v1/responses" {
 		return false
 	}
-	raw, err := io.ReadAll(io.LimitReader(req.Body, routing.MaxBodyBytes+1))
-	req.Body = io.NopCloser(bytes.NewReader(raw))
-	req.ContentLength = int64(len(raw))
-	if err != nil || len(raw) > routing.MaxBodyBytes {
-		return false
-	}
-	decoded, err := compaction.DecodeBody(raw, req.Header.Get("Content-Encoding"))
-	if err != nil {
-		return false
-	}
-	var payload struct {
-		Input []any `json:"input"`
-	}
-	return json.Unmarshal(decoded, &payload) == nil && routing.InputHasCompactionTrigger(payload.Input)
+	input, _ := inspection.payload["input"].([]any)
+	return routing.InputHasCompactionTrigger(input)
 }
 
-// detectRequestShape resolves the model and, for requests that carry a body,
-// summarizes the part of the request that tells the gateway how this Codex
-// build talks to it. The body is read once and restored, and the decoded copy is
-// reused for the summary so a request is never decoded twice.
-func detectRequestShape(req *http.Request) (string, clientfp.Shape, error) {
+// replayedBody reconstructs a partially read request body without erasing its
+// terminal error. A reader that saw n > 0 plus a non-EOF error must yield those
+// bytes first, then the same error, then EOF. ContentLength is set to -1 so the
+// transport does not reinterpret the restored byte count as a complete body.
+type replayingReadCloser struct {
+	reader io.Reader
+}
+
+func (b *replayingReadCloser) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
+}
+
+func (*replayingReadCloser) Close() error { return nil }
+
+type terminalErrorReader struct {
+	err error
+}
+
+func (r *terminalErrorReader) Read([]byte) (int, error) {
+	err := r.err
+	r.err = io.EOF
+	return 0, err
+}
+
+func replayedBody(raw []byte, terminal error) io.ReadCloser {
+	if terminal == nil {
+		return io.NopCloser(bytes.NewReader(raw))
+	}
+	if len(raw) == 0 {
+		return io.NopCloser(&terminalErrorReader{err: terminal})
+	}
+	return &replayingReadCloser{reader: io.MultiReader(bytes.NewReader(raw), &terminalErrorReader{err: terminal})}
+}
+
+// requestInspection is one request body read and one decoded parse, shared by
+// routing, shape logging, compaction detection, quota rewrite and Wopal HTTP
+// preparation. It is scoped to a single request; never cache it in a context
+// that a new self-loop request will inherit.
+type requestInspection struct {
+	raw     []byte
+	decoded []byte
+	payload map[string]any
+	shape   clientfp.Shape
+	model   string
+}
+
+// inspectRequest parses a POST body once. It preserves the exact original bytes,
+// headers and ContentLength on the request so an untouched official request can
+// pass through byte-for-byte. Parsing is strict (exactly one JSON value) and
+// uses UseNumber so rewrites retain numeric fidelity.
+func inspectRequest(req *http.Request) (*requestInspection, error) {
+	return inspectRequestWithLimit(req, routing.MaxBodyBytes)
+}
+
+func inspectRequestWithLimit(req *http.Request, limit int64) (*requestInspection, error) {
 	hint := routing.ParseRoutingHintModel(req.Header.Get("X-Codex-Routing-Hint"))
 	if req.Method == http.MethodGet || req.Body == nil {
-		return hint, clientfp.Shape{}, nil
+		return &requestInspection{model: hint}, nil
 	}
-	raw, err := io.ReadAll(io.LimitReader(req.Body, routing.MaxBodyBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(req.Body, limit+1))
+	// Restore the bytes already read, then replay the terminal read error before
+	// exposing them. The request context may continue into another handler when
+	// inspection fails, so silently substituting a complete bytes.Reader would
+	// turn a truncated request into successful inference.
 	if err != nil {
-		return "", clientfp.Shape{}, fmt.Errorf("read request body for routing: %w", err)
+		req.Body = replayedBody(raw, err)
+		req.ContentLength = -1
+		return nil, fmt.Errorf("read request body for routing: %w", err)
 	}
 	req.Body = io.NopCloser(bytes.NewReader(raw))
-	req.ContentLength = int64(len(raw))
-	if len(raw) > routing.MaxBodyBytes {
-		return "", clientfp.Shape{}, fmt.Errorf("request body exceeds routing limit")
+	// Inspection must not normalize a chunked/unknown-length request.
+	if int64(len(raw)) > limit {
+		req.ContentLength = int64(len(raw))
+		return nil, fmt.Errorf("request body exceeds routing limit")
 	}
 	decoded, err := compaction.DecodeBody(raw, req.Header.Get("Content-Encoding"))
 	if err != nil {
-		return "", clientfp.Shape{}, err
+		return nil, err
+	}
+	if int64(len(decoded)) > limit {
+		return nil, fmt.Errorf("decoded request exceeds routing limit")
 	}
 	var payload map[string]any
-	if err := json.Unmarshal(decoded, &payload); err != nil {
-		return "", clientfp.Shape{}, fmt.Errorf("parse request body for routing: %w", err)
+	decoder := json.NewDecoder(bytes.NewReader(decoded))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("parse request body for routing: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("unexpected trailing JSON value")
+		}
+		return nil, fmt.Errorf("parse request body for routing: %w", err)
 	}
 	shape := clientfp.ShapeFromBody(payload)
-	if model := shape.Model; model != "" {
-		return model, shape, nil
+	model := shape.Model
+	if model == "" {
+		model = hint
 	}
-	return hint, shape, nil
+	return &requestInspection{raw: raw, decoded: decoded, payload: payload, shape: shape, model: model}, nil
+}
+
+// sanitizeOfficialInspection reuses the parsed payload and rewrites only when
+// the official sanitizer actually changes it. Otherwise the original bytes,
+// headers and compression stay exactly as received.
+func sanitizeOfficialInspection(req *http.Request, inspection *requestInspection, logger *activity.Logger) {
+	if inspection == nil || inspection.payload == nil {
+		return
+	}
+	if !compaction.SanitizeParsedRequest(inspection.payload, logger) {
+		return
+	}
+	if err := writeInspection(req, inspection); err != nil {
+		logger.Write(map[string]any{"event": "official_sanitizer_encode_failed", "error": err.Error()})
+	}
 }
 
 func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activity.Logger, quotaGuard *quota.Guard) *httputil.ReverseProxy {
 	proxy := &httputil.ReverseProxy{
 		FlushInterval: -1,
 		Director: func(req *http.Request) {
-			incomingPath := req.URL.Path
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
-			if chatgpt {
-				req.URL.Path = routing.JoinURLPath(target.Path, stripV1(incomingPath))
-			} else {
-				req.URL.Path = routing.JoinURLPath(target.Path, stripV1(incomingPath))
-			}
+			req.URL.Path = routing.JoinURLPath(target.Path, stripV1(req.URL.Path))
 		},
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			logger.Write(map[string]any{"event": "official_upstream_error", "upstream": target.Host, "error": err.Error()})

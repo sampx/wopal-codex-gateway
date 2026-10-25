@@ -51,7 +51,7 @@ type Logger struct {
 
 // New opens the activity log inside logsDir, creating the directory first.
 func New(logsDir string, cfg config.Logs) (*Logger, error) {
-	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+	if err := os.MkdirAll(logsDir, 0o700); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(logsDir, "gateway.log")

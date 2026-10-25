@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"wopal-codex-gateway/internal/activity"
 	"wopal-codex-gateway/internal/config"
@@ -27,18 +26,22 @@ func runQuotaResetLearning() error {
 	// only to pick the log rotation policy, but an unsupported or unparsable
 	// config must fail every config-reading subcommand, and it must fail before
 	// the state file is rewritten.
-	cfg, err := config.LoadGatewayConfig(config.ConfigPath())
+	root, err := config.ProjectRootDir()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.LoadGatewayConfig(config.ConfigPathFor(root))
 	if err != nil {
 		return err
 	}
 
-	path := filepath.Join(config.StateDir(), "official-quota-state.json")
+	path := config.QuotaStatePathFor(root)
 	cleared, err := quota.ResetLearning(path)
 	if err != nil {
 		return err
 	}
 
-	if logger, logErr := activity.New(config.LogsDir(), cfg.Logs); logErr == nil {
+	if logger, logErr := activity.New(config.LogsDirFor(root), cfg.Logs); logErr == nil {
 		logger.Write(map[string]any{
 			"event": "official_quota_learning_reset", "accounts_cleared": cleared,
 		})

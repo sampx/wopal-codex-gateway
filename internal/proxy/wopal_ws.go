@@ -27,17 +27,18 @@ var wopalWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request)
 const maxWopalSessionStateBytes = 256 << 20
 
 type wopalWebsocketSession struct {
-	conn         *websocket.Conn
-	writeMu      sync.Mutex
-	activeMu     sync.Mutex
-	stateMu      sync.Mutex
-	cancel       context.CancelFunc
-	state        compaction.ConversationState
-	logger       *activity.Logger
-	model        string
-	request      *http.Request
-	nativeReplay *compaction.NativeBridge
-	emit         func([]byte) error
+	conn          *websocket.Conn
+	writeMu       sync.Mutex
+	activeMu      sync.Mutex
+	stateMu       sync.Mutex
+	cancel        context.CancelFunc
+	state         compaction.ConversationState
+	logger        *activity.Logger
+	model         string
+	request       *http.Request
+	nativeReplay  *compaction.NativeBridge
+	clientWatcher *clientfp.Watcher
+	emit          func([]byte) error
 }
 
 func isWebsocketUpgrade(req *http.Request) bool {
@@ -53,6 +54,9 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activity.Logger, model st
 	s := &wopalWebsocketSession{conn: conn, logger: logger, model: model, request: c.Request.Clone(c.Request.Context())}
 	if bridge, ok := c.Get("native_compaction_bridge"); ok {
 		s.nativeReplay, _ = bridge.(*compaction.NativeBridge)
+	}
+	if watcher, ok := c.Get(clientContractWatcherContextKey); ok {
+		s.clientWatcher, _ = watcher.(*clientfp.Watcher)
 	}
 	defer func() {
 		s.cancelActive()
@@ -104,6 +108,9 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activity.Logger, model st
 			s.sendError(http.StatusBadRequest, "gateway_invalid_json", "websocket message is not valid JSON")
 			continue
 		}
+		requestType, _ := message["type"].(string)
+		shape := clientfp.ShapeFromBody(message)
+		observeWebsocketClientContract(s.logger, s.clientWatcher, s.request.Header, s.model, requestType, shape)
 		switch message["type"] {
 		case "response.create", "response.append":
 			if generate, ok := message["generate"].(bool); ok && !generate {
@@ -295,6 +302,7 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 	req.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	copySelfLoopFingerprint(req, s.request)
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -409,6 +417,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	req.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	copySelfLoopFingerprint(req, s.request)
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
 		if ctx.Err() != nil {

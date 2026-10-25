@@ -211,7 +211,7 @@ func uniqueNormalizedModelNames(names []string) []string {
 }
 
 func cloneExternalModel(model config.ExternalModelConfig) config.ExternalModelConfig {
-	clone := config.ExternalModelConfig{Name: model.Name}
+	clone := model.Clone()
 	if model.ContextWindow != nil {
 		contextWindow := *model.ContextWindow
 		clone.ContextWindow = &contextWindow

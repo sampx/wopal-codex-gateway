@@ -62,6 +62,7 @@ Wopal Codex Gateway 是 macOS 上的本地模型路由网关。它让 Codex Desk
 | `internal/keychain` | macOS Keychain 读写 | `internal/keychain/` |
 | `internal/launchd` | plist 渲染、launchctl、健康等待 | `internal/launchd/` |
 | `internal/routing` | 模型命名空间分类与无状态请求工具；只依赖标准库 | `internal/routing/` |
+| `internal/clientfp` | 客户端版本指纹与请求形状变化观测 | `internal/clientfp/` |
 | `internal/proxy` | 路由 middleware、官方直通、Wopal HTTP/WS | `internal/proxy/` |
 | `internal/quota` | 额度窗口、阈值、failover 状态机 | `internal/quota/` |
 | `internal/compaction` | `wgcp1`、native restore、官方边界展开 | `internal/compaction/` |
@@ -296,7 +297,7 @@ turn 都写。观察表有界（64 项），淘汰只会导致重复记录，不
 
 - 差值在容差内：同一窗口，接受并记 `official_quota_window_jitter`。
 - 样本明显更旧：拒绝，避免延迟响应把状态退回已重置的窗口。
-- 样本明显更新：新窗口，接受并重置该窗口的学习值。
+- 样本明显更新：新窗口，接受新读数；账号已观测到的最大单步仍跨窗口保留。
 
 若把 `ResetAt` 当精确身份，一次 2 秒抖动就会让一侧的样本永远被判为旧窗口。存储值单调抬高后再也无法被替换，guard 于是一边保持 `state=open` 一边永久丢弃遥测。
 

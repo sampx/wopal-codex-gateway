@@ -43,7 +43,7 @@ func runServe(args []string) error {
 	}
 	gatewayConfigPath := *configFlag
 	if gatewayConfigPath == "" {
-		gatewayConfigPath = filepath.Join(root, "runtime", "config.json")
+		gatewayConfigPath = config.ConfigPathFor(root)
 	}
 
 	gateway, err := config.LoadGatewayConfig(gatewayConfigPath)
@@ -104,7 +104,7 @@ func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, i
 	if err != nil {
 		return nil, nil, err
 	}
-	logger, err := activity.New(filepath.Join(root, "logs"), gateway.Logs)
+	logger, err := activity.New(config.LogsDirFor(root), gateway.Logs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("initialize activity logger: %w", err)
 	}
@@ -112,7 +112,7 @@ func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, i
 		"event": "gateway_starting", "host": gateway.Listen.Host, "port": gateway.Listen.Port,
 		"wopal_models": len(gateway.WopalAI.Models), "relay_port": nil,
 	})
-	quotaGuard := quota.NewGuardWithStateAndMaxStep(logger, filepath.Join(root, "runtime", "official-quota-state.json"), time.Now(), gateway.Quota.MaxStepCap)
+	quotaGuard := quota.NewGuardWithStateAndMaxStep(logger, config.QuotaStatePathFor(root), time.Now(), gateway.Quota.MaxStepCap)
 	quotaGuard.SetNotifier(notify.NewQuotaNotifier(logger, gateway.Notifications))
 	logger.Write(map[string]any{"event": "quota_notification_configured", "status": quotaGuard.NotificationStatus()})
 
@@ -157,7 +157,7 @@ func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, i
 // handing the file descriptor straight to Dup2 would bypass rotation and keep
 // appending to the renamed file forever.
 func redirectServiceLogs(root string, cfg config.Logs) (func(), error) {
-	logsDirectory := filepath.Join(root, "logs")
+	logsDirectory := config.LogsDirFor(root)
 	if err := os.MkdirAll(logsDirectory, 0o700); err != nil {
 		return nil, fmt.Errorf("create logs directory: %w", err)
 	}

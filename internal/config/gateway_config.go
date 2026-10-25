@@ -38,6 +38,49 @@ type ExternalModelConfig struct {
 	ContextWindow *int   `json:"contextWindow,omitempty"`
 	Vision        *bool  `json:"vision,omitempty"`
 	Reasoning     *bool  `json:"reasoning,omitempty"`
+
+	// extensions holds model fields this binary does not understand, so a
+	// load/edit/save cycle preserves them. Clone reaches it from catalog.
+	extensions extensionFields
+}
+
+func (m *ExternalModelConfig) UnmarshalJSON(data []byte) error {
+	type plain ExternalModelConfig
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "name", "contextWindow", "vision", "reasoning")
+	if err != nil {
+		return err
+	}
+	*m = ExternalModelConfig(decoded)
+	m.extensions = extensions
+	return nil
+}
+
+func (m ExternalModelConfig) MarshalJSON() ([]byte, error) {
+	type plain ExternalModelConfig
+	return marshalWithExtensions(plain(m), m.extensions)
+}
+
+// Clone copies every field, including extensions, without sharing raw values.
+func (m ExternalModelConfig) Clone() ExternalModelConfig {
+	clone := m
+	if m.ContextWindow != nil {
+		contextWindow := *m.ContextWindow
+		clone.ContextWindow = &contextWindow
+	}
+	if m.Vision != nil {
+		vision := *m.Vision
+		clone.Vision = &vision
+	}
+	if m.Reasoning != nil {
+		reasoning := *m.Reasoning
+		clone.Reasoning = &reasoning
+	}
+	clone.extensions = m.extensions.Clone()
+	return clone
 }
 
 func (m ExternalModelConfig) EffectiveContextWindow() int {
@@ -60,6 +103,28 @@ func (m ExternalModelConfig) SupportsReasoning() bool {
 type ListenConfig struct {
 	Host string `json:"host,omitempty"`
 	Port int    `json:"port,omitempty"`
+
+	extensions extensionFields
+}
+
+func (c *ListenConfig) UnmarshalJSON(data []byte) error {
+	type plain ListenConfig
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "host", "port")
+	if err != nil {
+		return err
+	}
+	*c = ListenConfig(decoded)
+	c.extensions = extensions
+	return nil
+}
+
+func (c ListenConfig) MarshalJSON() ([]byte, error) {
+	type plain ListenConfig
+	return marshalWithExtensions(plain(c), c.extensions)
 }
 
 type WopalAIConfig struct {
@@ -67,6 +132,28 @@ type WopalAIConfig struct {
 	BaseURL        string                `json:"baseUrl,omitempty"`
 	Models         []ExternalModelConfig `json:"models,omitempty"`
 	ExcludedModels []string              `json:"excludedModels,omitempty"`
+
+	extensions extensionFields
+}
+
+func (c *WopalAIConfig) UnmarshalJSON(data []byte) error {
+	type plain WopalAIConfig
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "toolMode", "baseUrl", "models", "excludedModels")
+	if err != nil {
+		return err
+	}
+	*c = WopalAIConfig(decoded)
+	c.extensions = extensions
+	return nil
+}
+
+func (c WopalAIConfig) MarshalJSON() ([]byte, error) {
+	type plain WopalAIConfig
+	return marshalWithExtensions(plain(c), c.extensions)
 }
 
 // EffectiveToolMode keeps provider entries on the same default tool surface.
@@ -90,6 +177,28 @@ func (c WopalAIConfig) ValidateToolMode() error {
 type Logs struct {
 	MaxSizeMB  int `json:"maxSizeMb,omitempty"`
 	MaxBackups int `json:"maxBackups,omitempty"`
+
+	extensions extensionFields
+}
+
+func (c *Logs) UnmarshalJSON(data []byte) error {
+	type plain Logs
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "maxSizeMb", "maxBackups")
+	if err != nil {
+		return err
+	}
+	*c = Logs(decoded)
+	c.extensions = extensions
+	return nil
+}
+
+func (c Logs) MarshalJSON() ([]byte, error) {
+	type plain Logs
+	return marshalWithExtensions(plain(c), c.extensions)
 }
 
 // QuotaConfig tunes the learned quota guard. An absent or out-of-range value
@@ -97,6 +206,28 @@ type Logs struct {
 // the protection floor.
 type QuotaConfig struct {
 	MaxStepCap float64 `json:"maxStepCap,omitempty"`
+
+	extensions extensionFields
+}
+
+func (c *QuotaConfig) UnmarshalJSON(data []byte) error {
+	type plain QuotaConfig
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "maxStepCap")
+	if err != nil {
+		return err
+	}
+	*c = QuotaConfig(decoded)
+	c.extensions = extensions
+	return nil
+}
+
+func (c QuotaConfig) MarshalJSON() ([]byte, error) {
+	type plain QuotaConfig
+	return marshalWithExtensions(plain(c), c.extensions)
 }
 
 // GatewayConfig is the single in-memory form of runtime/config.json. The CLI
@@ -109,6 +240,28 @@ type GatewayConfig struct {
 	Notifications NotificationsConfig `json:"notifications,omitempty"`
 	Logs          Logs                `json:"logs,omitempty"`
 	Quota         QuotaConfig         `json:"quota,omitempty"`
+
+	extensions extensionFields
+}
+
+func (c *GatewayConfig) UnmarshalJSON(data []byte) error {
+	type plain GatewayConfig
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "version", "listen", "wopalAi", "notifications", "logs", "quota")
+	if err != nil {
+		return err
+	}
+	*c = GatewayConfig(decoded)
+	c.extensions = extensions
+	return nil
+}
+
+func (c GatewayConfig) MarshalJSON() ([]byte, error) {
+	type plain GatewayConfig
+	return marshalWithExtensions(plain(c), c.extensions)
 }
 
 // NotificationsConfig is one notifications block in runtime/config.json. It
@@ -118,6 +271,28 @@ type NotificationsConfig struct {
 	Enabled *bool  `json:"enabled"`
 	Sound   string `json:"sound"`
 	Tool    string `json:"tool"`
+
+	extensions extensionFields
+}
+
+func (c *NotificationsConfig) UnmarshalJSON(data []byte) error {
+	type plain NotificationsConfig
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "enabled", "sound", "tool")
+	if err != nil {
+		return err
+	}
+	*c = NotificationsConfig(decoded)
+	c.extensions = extensions
+	return nil
+}
+
+func (c NotificationsConfig) MarshalJSON() ([]byte, error) {
+	type plain NotificationsConfig
+	return marshalWithExtensions(plain(c), c.extensions)
 }
 
 func (c NotificationsConfig) NotificationsEnabled() bool {
@@ -272,10 +447,16 @@ func SaveGatewayConfig(cfg *GatewayConfig) error {
 	if err := cfg.WopalAI.ValidateToolMode(); err != nil {
 		return err
 	}
+	// Resolve the root before any side effect: an unresolved root must fail the
+	// save instead of writing a runtime directory relative to cwd.
+	root, err := ProjectRootDir()
+	if err != nil {
+		return fmt.Errorf("resolve gateway config path: %w", err)
+	}
 	// Every write stamps the current schema version, so a file this binary
 	// produced can never be rejected by the next run.
 	cfg.Version = gatewayConfigVersion
-	path := ConfigPath()
+	path := ConfigPathFor(root)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create runtime directory: %w", err)
 	}
@@ -284,14 +465,8 @@ func SaveGatewayConfig(cfg *GatewayConfig) error {
 	if err != nil {
 		return fmt.Errorf("encode gateway config: %w", err)
 	}
-
-	temp := fmt.Sprintf("%s.tmp-%d", path, os.Getpid())
-	if err := os.WriteFile(temp, append(payload, '\n'), 0o600); err != nil {
+	if err := WriteFileAtomic(path, append(payload, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write gateway config: %w", err)
-	}
-	if err := os.Rename(temp, path); err != nil {
-		_ = os.Remove(temp)
-		return fmt.Errorf("replace gateway config: %w", err)
 	}
 	return nil
 }
