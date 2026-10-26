@@ -381,6 +381,9 @@ func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 			return nil, err
 		}
 		for _, model := range providerCfg.Models {
+			if providerCfg.IsModelExcluded(model.Name) {
+				continue
+			}
 			resolved, _ := ResolveProviderModel(model, providerCfg, providerSnapshot)
 			if strings.TrimSpace(resolved.Protocol) == "" {
 				continue
@@ -392,7 +395,7 @@ func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 			if _, collides := officialSlugs[clientName]; collides {
 				return nil, fmt.Errorf("client-visible model name %q collides with official model", clientName)
 			}
-			external = append(external, externalCatalogModel{ProviderID: providerID, Model: resolved, ToolMode: config.DefaultToolMode})
+			external = append(external, externalCatalogModel{ProviderID: providerID, Model: resolved, ToolMode: providerCfg.EffectiveToolMode()})
 		}
 	}
 	catalog := buildCatalogWithExternal(native, wopalModels, cfg.WopalAI.EffectiveToolMode(), external)

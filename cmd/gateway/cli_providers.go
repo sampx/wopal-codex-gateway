@@ -159,6 +159,11 @@ func applyProviderSetOptions(dst *config.ProviderConfig, args []string) error {
 				return fmt.Errorf("--protocol requires a protocol")
 			}
 			dst.Protocol = value
+		case "--tool-mode":
+			dst.ToolMode = strings.TrimSpace(value)
+			if err := dst.ValidateToolMode(); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("unknown providers set option: %s", flag)
 		}

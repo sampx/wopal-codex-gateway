@@ -200,10 +200,13 @@ func TestProviderModelsSyncKeepsPreviousMetadataOnModelsDevFailure(t *testing.T)
 
 func TestProviderModelsAddSetClearAliasAndRemove(t *testing.T) {
 	providerID := "p"
-	fixture := newProviderModelsFixture(providerID, config.ProviderConfig{BaseURL: "https://api.example.test/v1"})
+	fixture := newProviderModelsFixture(providerID, config.ProviderConfig{BaseURL: "https://api.example.test/v1", ExcludedModels: []string{"m", "keep"}})
 	runner := fixture.runner()
 	if err := runner.run("add", []string{"m", "--provider", providerID, "--alias", "short", "--protocol", "gemini"}); err != nil {
 		t.Fatal(err)
+	}
+	if got := fixture.cfg.Providers[providerID].ExcludedModels; !reflect.DeepEqual(got, []string{"keep"}) {
+		t.Fatalf("add did not unexclude model: %#v", got)
 	}
 	model := fixture.cfg.Providers[providerID].Models[0]
 	if model.Name != "m" || model.Alias != "short" || model.Protocol != config.ProtocolGemini {
@@ -221,6 +224,31 @@ func TestProviderModelsAddSetClearAliasAndRemove(t *testing.T) {
 	}
 	if len(fixture.cfg.Providers[providerID].Models) != 0 {
 		t.Fatalf("models=%#v", fixture.cfg.Providers[providerID].Models)
+	}
+	if got := fixture.cfg.Providers[providerID].ExcludedModels; !reflect.DeepEqual(got, []string{"keep", "m"}) {
+		t.Fatalf("remove did not exclude model: %#v", got)
+	}
+}
+
+func TestProviderModelsSyncSkipsExcludedModels(t *testing.T) {
+	providerID := "p"
+	fixture := newProviderModelsFixture(providerID, config.ProviderConfig{
+		BaseURL:        "https://api.example.test/v1",
+		ExcludedModels: []string{"skip"},
+	})
+	fixture.available = []string{"keep", "skip"}
+	fixture.modelsDev = &catalog.ModelsDevProvider{
+		Provider: providerID,
+		Models: map[string]catalog.ModelsDevModel{
+			"keep": {Name: "keep"},
+			"skip": {Name: "skip"},
+		},
+	}
+	if err := fixture.runner().run("sync", []string{"--provider", providerID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.savedMetadata) != 1 || len(fixture.savedMetadata[0].Models) != 1 || fixture.savedMetadata[0].Models[0].Name != "keep" {
+		t.Fatalf("excluded model entered sync metadata: %#v", fixture.savedMetadata)
 	}
 }
 

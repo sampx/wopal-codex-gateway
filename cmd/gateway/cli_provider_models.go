@@ -150,6 +150,7 @@ func (runner wopalModelsRunner) runProviderSync(providerID string) error {
 	if err != nil {
 		return err
 	}
+	targetNames = filterProviderExcludedModels(providerCfg, targetNames)
 	var previous *catalog.ProviderModelMetadataSnapshot
 	if runner.loadProviderMetadata != nil {
 		previous, err = runner.loadProviderMetadata(providerID)
@@ -283,6 +284,20 @@ func (runner wopalModelsRunner) runProviderAdd(providerID string, args []string)
 	}
 	added := catalog.AddProviderModelConfigs(providerCfg.Models, names, patch)
 	providerCfg.Models = added.Models
+	unexcluded := make(map[string]struct{}, len(added.Added)+len(added.Existing))
+	for _, name := range added.Added {
+		unexcluded[name] = struct{}{}
+	}
+	for _, name := range added.Existing {
+		unexcluded[name] = struct{}{}
+	}
+	excluded := make([]string, 0, len(providerCfg.ExcludedModels))
+	for _, name := range providerCfg.ExcludedModels {
+		if _, ok := unexcluded[strings.TrimSpace(name)]; !ok {
+			excluded = append(excluded, name)
+		}
+	}
+	providerCfg.ExcludedModels = excluded
 	cfg.Providers[providerID] = providerCfg
 	if _, err := providerreg.Build(cfg); err != nil {
 		return err
@@ -362,6 +377,7 @@ func (runner wopalModelsRunner) runProviderRemove(providerID string, args []stri
 	}
 	removed := catalog.RemoveProviderModelConfigs(providerCfg.Models, names)
 	providerCfg.Models = removed.Models
+	providerCfg.ExcludedModels = appendUniqueModelExclusions(providerCfg.ExcludedModels, removed.Removed, removed.Missing)
 	cfg.Providers[providerID] = providerCfg
 	if err := runner.saveConfig(cfg); err != nil {
 		return err
@@ -378,6 +394,17 @@ func (runner wopalModelsRunner) runProviderRemove(providerID string, args []stri
 	}
 	runner.printModelCatalog(result)
 	return nil
+}
+
+func filterProviderExcludedModels(providerCfg config.ProviderConfig, names []string) []string {
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		if providerCfg.IsModelExcluded(name) {
+			continue
+		}
+		filtered = append(filtered, name)
+	}
+	return filtered
 }
 
 func (runner wopalModelsRunner) runProviderInspect(providerID string, args []string) error {

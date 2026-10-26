@@ -21,6 +21,7 @@ func TestProvidersSetCreatesAndUpdatesWithoutClearingOmittedFields(t *testing.T)
 			"--models-auth", "none",
 			"--header", "x-opencode-session=$CPA-SESSION-ID",
 			"--protocol", "openai-responses",
+			"--tool-mode", "direct",
 		})
 	})
 	if err != nil {
@@ -48,7 +49,7 @@ func TestProvidersSetCreatesAndUpdatesWithoutClearingOmittedFields(t *testing.T)
 	if p.BaseURL != "https://opencode.example/openai/v1" || p.BaseURLs["gemini"] != "https://opencode.example/google" {
 		t.Fatalf("update cleared URLs: %+v", p)
 	}
-	if p.ModelsURL != "https://opencode.example/models" || p.ModelsAuth != "provider-key" || p.Protocol != config.ProtocolOpenAIResponses {
+	if p.ModelsURL != "https://opencode.example/models" || p.ModelsAuth != "provider-key" || p.Protocol != config.ProtocolOpenAIResponses || p.ToolMode != "direct" {
 		t.Fatalf("provider = %+v", p)
 	}
 	if p.Headers["x-opencode-session"] != "$CPA-SESSION-ID" {
@@ -67,6 +68,7 @@ func TestProvidersSetRequiresBaseURLForCreateAndRejectsInvalidProtocol(t *testin
 		{name: "reserved id", args: []string{"official", "--base-url", "https://example.test"}, want: "reserved"},
 		{name: "uppercase id", args: []string{"OpenCode", "--base-url", "https://example.test"}, want: "provider id"},
 		{name: "invalid protocol", args: []string{"opencode", "--base-url", "https://example.test", "--protocol", "bogus"}, want: "protocol"},
+		{name: "invalid tool mode", args: []string{"opencode", "--base-url", "https://example.test", "--tool-mode", "bogus"}, want: "tool"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			err := runProvidersCommand("set", testCase.args)

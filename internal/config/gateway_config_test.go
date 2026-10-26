@@ -86,6 +86,23 @@ func TestGatewayConfigRejectsWrongFieldType(t *testing.T) {
 	}
 }
 
+func TestProviderToolModeDefaultsAndValidates(t *testing.T) {
+	provider := ProviderConfig{}
+	if got := provider.EffectiveToolMode(); got != DefaultToolMode {
+		t.Fatalf("default tool mode = %q, want %q", got, DefaultToolMode)
+	}
+	for _, mode := range []string{"direct", "code_mode", "code_mode_only"} {
+		provider.ToolMode = mode
+		if err := provider.ValidateToolMode(); err != nil {
+			t.Fatalf("valid tool mode %q rejected: %v", mode, err)
+		}
+	}
+	provider.ToolMode = "bogus"
+	if err := provider.ValidateToolMode(); err == nil {
+		t.Fatal("invalid provider tool mode was accepted")
+	}
+}
+
 func TestGatewayConfigDefaultsAndLogs(t *testing.T) {
 	path := writeGatewayConfigFile(t, `{"version":1,"wopalAi":{"baseUrl":"https://example.test/v1"},"logs":{"maxSizeMb":20}}`)
 	cfg, err := LoadGatewayConfig(path)

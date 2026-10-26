@@ -184,6 +184,32 @@ func (c ProviderConfig) Clone() ProviderConfig {
 	return clone
 }
 
+func (c ProviderConfig) EffectiveToolMode() string {
+	if strings.TrimSpace(c.ToolMode) == "" {
+		return DefaultToolMode
+	}
+	return c.ToolMode
+}
+
+func (c ProviderConfig) ValidateToolMode() error {
+	switch c.EffectiveToolMode() {
+	case "direct", "code_mode", "code_mode_only":
+		return nil
+	default:
+		return fmt.Errorf("provider toolMode must be direct, code_mode or code_mode_only; got %q", c.ToolMode)
+	}
+}
+
+func (c ProviderConfig) IsModelExcluded(name string) bool {
+	name = strings.TrimSpace(name)
+	for _, excluded := range c.ExcludedModels {
+		if strings.TrimSpace(excluded) == name {
+			return true
+		}
+	}
+	return false
+}
+
 // DiscoveryEnabled reports whether this provider uses the OpenAI-style
 // models endpoint. An explicit modelsUrl always opts in. Without one, native
 // Gemini/Anthropic providers are discovery-disabled and rely on models add;
@@ -656,6 +682,9 @@ func (c *GatewayConfig) ValidateProviders() error {
 		}
 		if err := ValidateProtocol(provider.Protocol); err != nil {
 			return fmt.Errorf("provider %q %w", id, err)
+		}
+		if err := provider.ValidateToolMode(); err != nil {
+			return fmt.Errorf("provider %q: %w", id, err)
 		}
 		for protocol, baseURL := range provider.BaseURLs {
 			if err := ValidateProtocol(protocol); err != nil || protocol == "" {

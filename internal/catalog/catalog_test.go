@@ -544,10 +544,13 @@ func TestRefreshCatalogMergesProtocolReadyExternalModelsAndWritesBaseline(t *tes
 	cfg.WopalAI.BaseURL = "https://wopal.example/v1"
 	cfg.WopalAI.Models = []config.ExternalModelConfig{{Name: "wopal"}}
 	cfg.Providers["p"] = config.ProviderConfig{
-		BaseURL: "https://p.example/v1",
+		BaseURL:        "https://p.example/v1",
+		ToolMode:       "direct",
+		ExcludedModels: []string{"excluded"},
 		Models: []config.ExternalModelConfig{
 			{Name: "ready", Protocol: config.ProtocolOpenAIResponses},
 			{Name: "alias-upstream", Alias: "friendly", Protocol: config.ProtocolGemini},
+			{Name: "excluded", Protocol: config.ProtocolOpenAIChat},
 			{Name: "needs-protocol"},
 		},
 	}
@@ -584,6 +587,17 @@ func TestRefreshCatalogMergesProtocolReadyExternalModelsAndWritesBaseline(t *tes
 	wantSlugs := []string{"wopal-ai/wopal", "p/ready", "friendly", "official-a", "official-hidden"}
 	if !reflect.DeepEqual(slugs, wantSlugs) {
 		t.Fatalf("catalog slugs=%#v want=%#v", slugs, wantSlugs)
+	}
+	for _, model := range payload.Models {
+		slug, _ := model["slug"].(string)
+		if slug == "p/ready" || slug == "friendly" {
+			if got, _ := model["tool_mode"].(string); got != "direct" {
+				t.Fatalf("external model %q tool_mode=%q, want direct", slug, got)
+			}
+		}
+		if slug == "p/excluded" {
+			t.Fatal("excluded provider model entered catalog")
+		}
 	}
 	baseline, err := LoadOfficialModelsBaseline()
 	if err != nil {
