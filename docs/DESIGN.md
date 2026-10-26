@@ -1,336 +1,487 @@
 # Wopal Codex Gateway
 
 > **Status**: Active
-> **Updated**: 2026-10-25
+> **Updated**: 2026-10-26
 > **Parent Architecture**: N/A
 > **Parent Product**: N/A
-> **Sub-DESIGNs**:
-> - `./DESIGN-model-catalog.md` — 模型目录与能力来源
 
 ## Project Role
 
-Wopal Codex Gateway 是 macOS 上的本地模型路由网关。它让 Codex Desktop 和 Codex CLI 在同一个模型选择器、同一个会话里使用官方模型与 `wopal-ai/*` 模型。
+Wopal Codex Gateway 是 macOS 上的本地模型网关。
+它让 Codex Desktop 和 Codex CLI 在同一个模型选择器、同一个会话里使用官方模型和多个外部 provider。
 
-它拥有四类职责：
+系统负责四件事：
 
-- 协议路由：官方 HTTP/WebSocket 直通，Wopal AI 的 HTTP/WebSocket 适配。
-- 会话连续性：跨 provider 的会话历史、compaction 与重放。
-- 额度保护：官方额度进入保护区后自动 failover，reset 后 failback。
-- 本地控制面：Codex 配置接管与恢复、模型目录、Keychain、LaunchAgent、服务生命周期。
+- 路由模型请求到官方链路或指定外部 provider。
+- 维护跨 provider 的会话重放与 compaction。
+- 在官方额度进入保护区时自动切到备用模型。
+- 管理 Codex 配置、模型目录、Keychain、LaunchAgent 和本地状态。
 
 边界：
 
-- 只服务本机单用户，不暴露公网多租户 API。
-- 模型命名空间只有 official 和 `wopal-ai/*`。
-- 不记录 prompt、完整请求正文、凭证或原始账号标识。
-- 不实现模型训练、通用 provider 协议或 Ollama 运行时。
+- 只服务本机单用户。
+- 官方模型保持 bare model name。
+- 外部模型默认使用 `<provider-id>/<upstream-model>`。
+- 用户可以给单个外部模型设置 alias。
+- 外部 provider 的每条模型按自己的上游协议路由：OpenAI Chat、OpenAI Responses、Anthropic Messages 或 Gemini。
+- prompt、请求正文、凭证和原始账号标识不写入磁盘。
+
+两个模型用途由用户通过 CLI 指定，不写死在代码里：官方额度保护触发时使用的备用模型（`officialFallback`），以及会话压缩与 Codex memories 使用的模型（`compaction`）。
 
 ## Capability Scope
 
-| 能力 | 目标状态 |
+| 能力 | 设计 |
 | --- | --- |
-| 官方模型 | 无命名空间；HTTP/WebSocket native pass-through |
-| Wopal AI | `wopal-ai/<model>`；HTTP/SSE 与 Codex WebSocket 桥接 |
-| 模型目录 | 合并 Codex bundled catalog 与配置中的 Wopal 模型 |
-| 额度保护 | 5 小时 97%、每周 99%；按观测最大单步提前停；failover/failback |
-| 会话压缩 | 新的 compaction 由 `wopal-ai/deepseek-v4.1-flash` 生成 `wgcp1` capsule |
-| Native compaction 恢复 | 官方 capsule 在切到 Wopal 前 materialize；超时即失败 |
-| 安装与恢复 | 接管 Codex 指定配置，记录原值，可逆恢复 |
-| 服务管理 | 单二进制 `serve/install/restore/service`；LaunchAgent 自启动 |
+| 官方模型 | 原生 HTTP / WebSocket 直通 |
+| 外部 provider | `wopal-ai` + 用户配置的 provider |
+| 上游协议 | `openai-chat`、`openai-responses`、`anthropic-messages`、`gemini`；协议转换由 CLIProxyAPI 承担 |
+| Provider Registry | 统一保存 provider、模型归属和运行时能力 |
+| 路由 | 只路由已注册的 client-visible model；官方 bare model 走官方链路 |
+| 模型目录 | 官方 bundled catalog + 所有已配置外部模型 |
+| 模型属性 | models.dev 元数据；用户显式设置优先，非协议属性缺失时用 Gateway 默认值（protocol 无默认值） |
+| 额度保护 | 5 小时 97%、每周 99%；只有额度保护触发自动回退 |
+| Compaction | 统一使用 `compaction` role |
+| Codex memories | 与 Gateway compaction 共用 `compaction` role |
+| 安装与恢复 | 接管指定 Codex 配置并可完整恢复 |
 | 可观测性 | `/_health`、`/_status`、metadata-only 日志 |
 
 ## Key Decisions
 
 | Decision | Rationale |
 | --- | --- |
-| 单 Go 二进制同时拥有控制面和数据面 | 一套工具链、一套配置、一套测试；运行时不依赖 Node |
-| 内嵌 CLIProxyAPI v8 SDK | 复用 Responses 与 OpenAI-compatible provider 适配，保持单进程 |
-| 5 小时 97%、每周 99%，叠加观测最大单步 | 在整数百分比 telemetry 下仍保留最后 1% 额度 |
-| 日志只记录 metadata | 本地隐私边界；prompt 和请求正文不进入持久文件 |
-| `model` 仅在 Gateway 提供的模型上恢复 | 保留用户安装后新选的官方模型 |
-| 配置带版本号并由单一 Go 包读写 | CLI 与 daemon 共享同一契约，非法配置在启动前失败 |
-| 可执行、状态、日志分三个目录 | 三类内容的生命周期、权限与备份策略不同；分开后清理与恢复都有明确边界 |
+| 单 Go 二进制 | 控制面和数据面共用配置、测试与生命周期 |
+| 外部 provider 复用 CLIProxyAPI | chat、responses、messages、gemini 四种转换都由现有转换器承担 |
+| 上游协议是模型属性 | Codex 只接受 Responses；同一个 provider 下模型可能分属四种协议，协议跟着模型走 |
+| 协议转换不自己写 | CLIProxyAPI 已注册 Responses 到 chat / messages / gemini 的转换器，网关只负责选路与凭据注入 |
+| 模型属性默认取 models.dev | 社区维护、多 harness 采信；比自建属性库更现实。它只做默认值，用户显式设置永远优先 |
+| 官方链路不进转换 | `official` 仍走原生 WebSocket，协议转换只发生在外部 provider |
+| `official` 是内建 provider | 官方 quota、native WebSocket、native compaction 和客户端凭据转发仍走专用链路 |
+| Provider Registry 是运行时真相源 | daemon、目录生成和 CLI 使用同一套 provider / model 解析结果 |
+| Route Table 只保存 exact route | namespace 不做运行时通配，减少隐式路由 |
+| provider id 同时作为名字空间 | 一个 provider 只有一套命名配置，默认名字由 id 加 upstream model 组成 |
+| 特殊模型用途保存 provider + upstream model | alias 改名不改变 role 的后端归属 |
+| 只保留两个 role | `officialFallback` 负责额度回退；`compaction` 同时服务 Gateway compaction 与 Codex memories，因此 memories 永不占用官方额度 |
+| `runtime/config.json` 保持 version 1 | `wopalAi` 与 `wopal-ai/*` 保持稳定；新增字段继续使用 version 1 |
 
 ## Module Architecture
 
-| Module | Responsibility | Carrier |
-| --- | --- | --- |
-| `cmd/gateway` | 子命令解析、依赖装配、进程入口 | `cmd/gateway/` |
-| `internal/config` | 版本化配置的读取、写入、校验 | `internal/config/` |
-| `internal/codex` | `config.toml` 的接管、恢复、managed-key 规则 | `internal/codex/` |
-| `internal/catalog` | bundled catalog 读取与 Wopal 模型合并 | `internal/catalog/` |
-| `internal/keychain` | macOS Keychain 读写 | `internal/keychain/` |
-| `internal/launchd` | plist 渲染、launchctl、健康等待 | `internal/launchd/` |
-| `internal/routing` | 模型命名空间分类与无状态请求工具；只依赖标准库 | `internal/routing/` |
-| `internal/clientfp` | 客户端版本指纹与请求形状变化观测 | `internal/clientfp/` |
-| `internal/proxy` | 路由 middleware、官方直通、Wopal HTTP/WS | `internal/proxy/` |
-| `internal/quota` | 额度窗口、阈值、failover 状态机 | `internal/quota/` |
-| `internal/compaction` | `wgcp1`、native restore、官方边界展开 | `internal/compaction/` |
-| `internal/notify` | 用户通知 | `internal/notify/` |
-| `internal/activity` | JSONL metadata 日志 | `internal/activity/` |
+| Module | Responsibility |
+| --- | --- |
+| `cmd/gateway` | CLI、daemon 入口和依赖装配 |
+| `internal/config` | 配置 schema、路径和持久化 |
+| `internal/provider` | Provider Registry、ModelRef、模型解析 |
+| `internal/routing` | exact Route Table 与请求路由规则 |
+| `internal/proxy` | official executor 与 external executor |
+| `internal/catalog` | 模型同步、能力解析、Codex catalog 生成 |
+| `internal/codex` | Codex 配置接管与恢复 |
+| `internal/quota` | 官方额度保护状态机 |
+| `internal/compaction` | Gateway compaction、`wgcp1` 与 native restore |
+| `internal/keychain` | provider API key 与 Gateway compaction key |
+| `internal/launchd` | LaunchAgent 生命周期 |
+| `internal/activity` / `internal/clientfp` | metadata 日志与客户端兼容观测 |
 
-`cmd/gateway` 只做装配。业务规则、协议处理、状态机各自拥有独立包和测试入口。
+`cmd/gateway` 只做装配。
+业务规则放在对应的 `internal/` 包中。
 
 ## Project Layout
 
-| Directory | Owns | Rules |
-| --- | --- | --- |
-| `bin/` | 唯一可执行入口 | 只由构建写入，只放发布用二进制，`0755` |
-| `cmd/gateway/` | 进程入口与子命令装配 | 只做装配，规则下沉到 `internal/` |
-| `internal/` | 配置、路由、额度、压缩等领域包 | 每个包持有自己的规则与测试 |
-| `launchd/` | LaunchAgent plist 模板 | 只被渲染读取，不被执行 |
-| `scripts/` | 面向操作者的薄入口 | 只转发到 `bin/`，并给出适用范围 |
-| `docs/` | 目标态设计文档 | 与代码同步演进 |
-| `runtime/` | 用户配置与跨重启状态 | 程序独占写入，`0600` |
-| `logs/` | 网关与服务的日志 | 只写 metadata，正文不落盘 |
-| `recovery/` | 回滚入口：上一版可执行文件、启动脚本与 LaunchAgent 回滚模板 | 只在当前版本不可用时使用 |
+| Directory | Owns |
+| --- | --- |
+| `internal/` | 网关业务逻辑 |
+| `cmd/gateway/`、`bin/`、`launchd/`、`scripts/` | 进程与 CLI 入口、发布用单一可执行文件、LaunchAgent 模板、面向操作者的薄入口 |
+| `docs/`、`runtime/`、`logs/`、`recovery/` | 设计文档、用户配置与跨重启状态、metadata 日志、回滚材料 |
 
-三条边界把上面九块分开：
-
-- **可执行、状态、日志各有其家。** `bin/` 是构建输出，`runtime/` 是程序状态，`logs/` 是给人读的诊断输出。三者的生命周期、权限和备份策略都不同，混放会让清理与恢复无法界定。
-- **`runtime/` 只放必须跨重启存活的内容。** 用户配置、生成配置、额度状态、安装恢复记录都在这里；临时文件与缓存不进来。
-- **`recovery/` 不参与运行。** 正常启动路径从不读取它，它只回答一个问题：当前版本不可用时，怎么回到可用状态。
-
-`bin/`、`runtime/`、`logs/`、`recovery/` 都是本机内容，不进入 Git。
-
-回滚契约：`recovery/start-gateway.sh` 不依赖当前版本，按三条独立路径依次尝试——用 `recovery/rollback-launchd.plist` 重新注册 launchd、直接后台运行上一版 daemon、再失败则报告需人工处理。每次发布新版本前，必须将当前可执行文件留一份到 `recovery/`，否则回滚就没有可用的目标。
+`runtime/` 中的文件权限为 `0600`，目录为 `0700`。
+正常运行路径不读取 `recovery/`。
 
 ## Technical Stack Choices
 
-| Domain | Choice | Rationale | Boundary |
-| --- | --- | --- | --- |
-| Language | Go 1.26 | 单二进制、并发、已有 daemon | 运行时不包含 Node |
-| Provider adapter | CLIProxyAPI v8.0.29 | 复用 Responses/OpenAI-compatible 适配 | 编译期内嵌，版本固定 |
-| HTTP server | Gin via SDK | 与 provider adapter 共用监听 | 只有一个 listener |
-| Gateway config | JSON `runtime/config.json` version 1 | CLI 与 daemon 共享 | 只有一套 parser |
-| Codex config | 行级 TOML 编辑器 | 保留注释与无关配置 | 只改 managed keys |
-| Secret | macOS Keychain | 密钥不落盘 | 仅 macOS |
-| Service | LaunchAgent | 用户级自启动 | 单一 label |
-| Logs | JSONL metadata | 本地可观测 | 不记录 prompt/正文 |
-| Tests | `go test` | 单一工具链 | 不包含 Node 测试 |
+运行时使用 Go 1.26 单二进制，内嵌 CLIProxyAPI v8.0.29 与 Gin；配置是 JSON version 1，Codex 配置用行级 TOML 编辑，密钥放在 macOS Keychain，服务由 LaunchAgent 管理。
 
 ## Interfaces and Contracts
 
 ### CLI
 
+命令组：`config`、`auth`、`models`、`catalog`、`codex`、`service`、`quota`。
+
+多 provider 新增 provider 管理与 role 管理命令：
+
 ```text
-wopal-codex-gateway serve
-wopal-codex-gateway config show
-wopal-codex-gateway config migrate --from <existing.json> --to <new.json>
-wopal-codex-gateway config wopal --base-url <url> --model <name>...
-wopal-codex-gateway auth set
-wopal-codex-gateway auth test
-wopal-codex-gateway auth status
-wopal-codex-gateway models list
-wopal-codex-gateway models inspect [model...]
-wopal-codex-gateway models sync
-wopal-codex-gateway models add <name>...
-wopal-codex-gateway models set <name>...
-wopal-codex-gateway models remove <name>...
-wopal-codex-gateway catalog refresh
-wopal-codex-gateway codex install
-wopal-codex-gateway codex restore
-wopal-codex-gateway service install
-wopal-codex-gateway service start
-wopal-codex-gateway service stop
-wopal-codex-gateway service restart
-wopal-codex-gateway service status
-wopal-codex-gateway service uninstall
-wopal-codex-gateway quota reset-learning
+wopal-codex-gateway providers set <provider> --base-url <url> [--base-url-for <protocol>=<url>]... [--models-url <url>] [--models-auth <none|provider-key>] [--header <name>=<value>]... [--protocol <default>] [--tool-mode <mode>]
+wopal-codex-gateway providers remove <provider>
+wopal-codex-gateway config role
+wopal-codex-gateway config role set <official-fallback|compaction> --provider <id> --model <upstream-name>
+wopal-codex-gateway config role reset <official-fallback|compaction>
 ```
 
-`serve` 是唯一 daemon 入口。`quota reset-learning` 清除已观测最大单步，并写一条 metadata 日志；状态文件尚不存在时按“已无学习值”成功返回。`config`、`auth`、`models`、`catalog`、`codex`、`service`、`quota` 都是同一个二进制上的子命令组。`service install` 与 `codex install` 在报告成功前都必须先确认配置端口已释放，再通过 `/_health`。
+`providers set` 是 upsert，输出 `created` 或 `updated`，让用户看清这次是新建还是修改；创建时必须提供 `--base-url`；修改时省略即保持原值。`--base-url-for` 可以重复，用来写某个协议的专用地址，例如 OpenCode Go 的 messages 和 gemini。`--protocol` 是这个 provider 的最后兜底协议，不是必填项；不填时不猜协议，模型必须由单模型配置或同步元数据确定协议。`--models-url` 指定模型清单地址，省略时默认 `baseUrl + /models`。`--header` 可以重复，写入 provider 的非密钥 header 模板，用于向上游注入必需的常量头或 `$CPA-SESSION-ID`；允许的写法见配置规则。`providers remove` 在 role 仍引用它时拒绝执行。
+
+`config role` 不带参数时打印两个 role 的解析结果：provider、upstream model、client model、默认还是显式、ready/unavailable/invalid。它只读配置，不需要 daemon 运行——role 配错导致 `serve` 拒绝启动时，这正是要看的东西。
+
+静态配置也可以直接看 `config show`；运行中的解析状态看 `/_status`。
+
+`auth` 和 `models` 命令接受 `--provider <id>`；省略时作用于 `wopal-ai`。
+`models add/set` 支持 `--alias` 与 `--protocol`，`models set` 支持清除 alias；`models list` 输出每个模型的 `protocol` 和来源（`explicit`、`metadata`、`provider-default`、`needs_protocol`）；`config wopal` 继续管理 `wopalAi`。
+
+命名只有两条规则：provider id 决定默认名字空间和显示名，单个模型的 alias 决定短名。需要短名字时配 alias 即可，配置里没有第二套命名维度。
 
 ### HTTP
 
-| 端点 | 用途 |
+| Endpoint | Purpose |
 | --- | --- |
-| `POST /v1/responses` | Responses 推理与 HTTP failover |
+| `POST /v1/responses` | Responses 推理与额度保护回退 |
 | `GET /v1/responses` + WebSocket Upgrade | Codex WebSocket 推理 |
-| `POST /v1/responses/compact` | compaction 兼容端点 |
-| `GET /v1/models` | 模型目录 API |
-| `GET /_health` | 进程健康检查 |
-| `GET /_status` | 脱敏后的运行时与额度状态 |
+| `POST /v1/responses/compact` | Gateway compaction |
+| `GET /v1/models` | 合并后的模型目录 |
+| `GET /_health` | 健康检查 |
+| `GET /_status` | 脱敏运行状态 |
 
-### Gateway config
+### Gateway Config
 
-`runtime/config.json` 的 schema：
+`runtime/config.json` 保持 version 1。下面只展示本次设计涉及的字段；`listen`、`notifications`、`logs`、`quota` 等字段的语义不变。
 
 ```json
 {
   "version": 1,
-  "listen": { "host": "127.0.0.1", "port": 11435 },
   "wopalAi": {
-    "baseUrl": "https://example.com/v1",
-    "toolMode": "code_mode_only",
-    "models": [
-      { "name": "deepseek-v4.1-flash" }
-    ],
-    "excludedModels": []
+    "baseUrl": "https://aiapi.wopal.cn/v1",
+    "models": [{ "name": "deepseek-v4.1-flash" }]
   },
-  "notifications": { "enabled": true, "sound": "default", "tool": "" },
-  "logs": { "maxSizeMb": 10, "maxBackups": 5 },
-  "quota": { "maxStepCap": 5 }
-}
-```
-
-规则：
-
-- `version` 必须是 `1`；不支持的版本在启动前失败。`config migrate` 从无版本号或版本 1 的配置生成单独候选文件，保留现有模型覆盖并移除 `ollama` 段；源文件保持原样，目标文件已存在时拒绝覆盖。
-- `listen.host` 默认 `127.0.0.1`，`listen.port` 默认 `11435`。
-- `wopalAi.models` 是外部模型配置来源；`excludedModels` 只影响 `models sync`。
-- 模型能力按用户覆盖、provider 明确返回值、网关默认值的顺序解析；默认上下文为 1,000,000 tokens，支持图片和推理。来源、同步与覆盖规则见模型目录子设计。
-- `wopalAi.toolMode` 统一设置外部模型的工具调用方式，默认 `code_mode_only`；允许 `code_mode` 和 `direct`，其他值在读写配置或刷新目录前报错。
-- `logs.maxSizeMb` 与 `logs.maxBackups` 控制日志轮转。
-- `quota.maxStepCap` 是已观测最大单步的上限，默认 `5`，允许范围 `1–10`；缺省、`<= 0` 或超出范围时按默认 `5`。
-- `maxStepCap` 只约束学习值，不改变基础阈值（5 小时 `97`、每周 `99`）与最小余量（`2`、`1`）的语义。
-- 写入使用临时文件加 rename，权限 `0600`。
-
-### Logs config
-
-`runtime/config.json` 的 `logs` 段：
-
-```json
-{
-  "logs": {
-    "maxSizeMb": 10,
-    "maxBackups": 5
+  "providers": {
+    "opencode-go": {
+      "baseUrl": "https://opencode.ai/inference/go/openai/v1",
+      "baseUrls": {
+        "anthropic-messages": "https://opencode.ai/inference/go/anthropic",
+        "gemini": "https://opencode.ai/inference/go/google"
+      },
+      "modelsUrl": "https://opencode.ai/inference/v1/models",
+      "headers": {
+        "x-opencode-session": "$CPA-SESSION-ID"
+      },
+      "models": [
+        { "name": "kimi-k3", "protocol": "openai-chat" },
+        { "name": "gpt-6-luna", "protocol": "openai-responses" },
+        { "name": "claude-haiku-5-5", "protocol": "anthropic-messages" },
+        { "name": "gemini-4-argon", "protocol": "gemini" },
+        { "name": "omen-alpha", "protocol": "openai-chat" }
+      ]
+    }
+  },
+  "modelRoles": {
+    "officialFallback": { "provider": "opencode-go", "model": "gpt-6-luna" },
+    "compaction": { "provider": "wopal-ai", "model": "deepseek-v4.1-flash" }
   }
 }
 ```
 
-- `maxSizeMb` 是单个日志文件的轮转阈值，默认 10。
-- `maxBackups` 是保留的旧文件份数，默认 5。
-- 三个主日志共用这组参数。
+配置规则：
 
-### Codex managed keys
+- `wopalAi` 固定表示 provider `wopal-ai`。
+- `providers` 只保存其他外部 provider；`official` 与 `wopal-ai` 是保留 id。
+- 协议只有四个值：`openai-chat`、`openai-responses`、`anthropic-messages`、`gemini`。其他值直接报错。
+- 单条模型的协议按“显式 `models set --protocol` → models.dev `provider.shape` → models.dev `provider.npm` → provider `protocol`”解析；都没有时标记 `needs_protocol`，不进入路由表，也不出现在 Codex 选择器里。`wopal-ai` 是兼容例外：省略协议时按 `openai-chat`。
+- `baseUrl` 是 provider 的默认上游地址。某个协议的地址不同时，用 `baseUrls[protocol]` 单独指定，CLI 写法是 `--base-url-for <protocol>=<url>`。OpenCode Go 就是这种：chat 与 responses 在 `/go/openai/v1`，messages 在 `/go/anthropic`，gemini 在 `/go/google`。
+- `baseUrl` / `baseUrls` 写的是 CLIProxyAPI executor 拼接协议路径之前的根地址，不是最终 endpoint。拼接规则：chat 加 `/chat/completions`；responses 加 `/responses`；messages 加 `/v1/messages?beta=true`；gemini 加 `/v1beta/models/<model>:generateContent`。把最终路径写进 base 会产生重复段，例如 messages 写成 `/go/anthropic/v1` 就会请求到 `/go/anthropic/v1/v1/messages`。
+- `modelsUrl` 是模型清单地址，省略时按 `baseUrl + /models`。清单端点和推理端点可以在不同路径：OpenCode 的清单在 `https://opencode.ai/inference/v1/models`，推理分散在 `/go/*` 下。模型发现鉴权由 `modelsAuth` 唯一表达，取值 `none` 或 `provider-key`；默认同 origin 为 `provider-key`（Wopal 即如此），跨 origin 为 `none`。
+- 自动发现只覆盖 OpenAI 风格清单：`GET <modelsUrl>`，`provider-key` 发 `Authorization: Bearer <Keychain key>`，响应按 `data[].id` 解析。native Gemini（`/v1beta/models`、`x-goog-api-key`、`models[].name`）和 native Anthropic（`/v1/models`、`anthropic-version`）不参与自动发现，用 `models add` 显式登记。secret 不允许借 `headers` 传递。
+- `headers` 只允许两种值：普通字符串字面量，或精确的 `$CPA-SESSION-ID`。其他 `$...` 一律拒绝：CLIProxyAPI 原生支持 `$<任意 client header>`，会把客户端官方凭据送去第三方。
+- `headers` 拒绝凭据类与账号路由保留 header 名（大小写不敏感）：`Authorization`、`Proxy-Authorization`、`Cookie`、`x-api-key`、`x-goog-api-key`、`ChatGPT-Account-ID`。密钥只能来自 Keychain。
+- provider id 使用小写稳定标识，并生成默认 client-visible name：`<provider-id>/<upstream-model>`。
+- `alias` 省略或空字符串都表示没有 alias。
+- 非空 alias 是完整 client-visible name，可以不包含 provider id。
+- client-visible name 必须全局唯一。手工编辑配置造成重名时，`serve` 直接拒绝启动，不猜测该用哪一个。
+- alias 与官方 bundled slug 的冲突在写入 alias 和 `catalog refresh` 时检查。
+- 每个外部 provider 可配置 `toolMode` 和 `excludedModels`；tool mode 支持 `code_mode_only`、`code_mode`、`direct`，默认 `code_mode_only`。
+- `modelRoles` 只保存 provider + upstream model，不保存 alias。
+- 两个 role 的默认值都指向 `wopal-ai/deepseek-v4.1-flash`。
+- 未识别的 version 1 字段继续原样保留。
+- 配置写入使用原子 rename，文件权限 `0600`。
 
-安装只修改以下配置：
+## Provider Registry and Routing
+
+运行时把 `wopalAi`、`providers` 和内建 `official` 统一成 Provider Registry。
+
+`official` 使用专用 native executor。
+
+每条模型按自己的 `protocol` 选上游，对 Codex 暴露的接口完全相同：
+
+| protocol | 上游 | CLIProxyAPI 承担 |
+| --- | --- | --- |
+| `openai-chat` | `POST <base>/chat/completions` | Responses 到 chat 的转换 |
+| `openai-responses` | `POST <base>/responses` | 兼容模式：改写请求后走 SSE 聚合 |
+| `anthropic-messages` | `POST <base>/v1/messages?beta=true` | Responses 到 Messages 的转换 |
+| `gemini` | `POST <base>/v1beta/models/<model>:generateContent` | Responses 到 Gemini 的转换 |
+
+四种都是实际需求：wopal-ai 是 chat，DeepSeek 官方是 responses，OpenCode 一个 provider 里四种同时存在（四种协议已用 OpenCode Go 真实 key 端到端验证通过，见 `research/opencode-multi-protocol-spike.md`）。
+
+协议不是 provider 级单值。编译时同一 provider 的模型按协议分桶，生成最多四个 CLIProxyAPI 上游组，共用同一把 Keychain 密钥。用户眼里仍然是一个 provider、一套模型命名。
+
+外部 `openai-responses` 桶固定编译为兼容模式：model 条目 `is-compat: true`，key 条目 `disable-codex-cloaking: true`。前者保证第三方 Responses 端点收到 portable 形状（不要求 native `agent_message`、不要求空 signature thinking），后者避免把 Codex 内部 cloaking 发给外部上游。两项都是实现细节，不需要用户配置；若将来某个上游明确要求原生 Codex 形状，再单独开例外并补验证。
+
+自己写转换层不在范围内。CLIProxyAPI 已经注册了 Responses 到 chat / messages / gemini 的双向转换、工具与 reasoning 的配对处理、以及 Codex WebSocket 到上游 SSE 的桥接；重复实现会复制它最容易出错的那部分。
+
+外部上游不做 header 全量透传：认证头由 CLIProxyAPI executor 用 Keychain 凭据生成，客户端发来的 `Authorization`、账号标识、Cookie 一律不转发。Gateway 自己不复制任何 client header；受控转发沿用各 executor 已定义集合。CLIProxyAPI 的 custom header 允许 `$<任意 client header>` 且能覆盖认证头，这个能力 Gateway 不使用，只编译受限的 `headers` 模板。
+
+OpenCode 依赖 `x-opencode-session` 做路由与 prompt 缓存，但 Codex 客户端不会带这个头。所以在这类 provider 的 `headers` 里配置 `x-opencode-session: $CPA-SESSION-ID`，由 CLIProxyAPI 按会话生成值，而不是写死常量。
+
+注入落点因 provider 类型而异：`openai-compatibility` 挂 provider 顶层，`codex`/`claude`/`gemini` 挂 per-key。实测挂错位置会静默丢头并导致上游 400，见 `research/opencode-multi-protocol-spike.md`。
+
+协议枚举固定为这四种。新增第五种协议必须同时具备 CLIProxyAPI 转换器、真实上游验证和回归测试，不能靠字符串透传。
+
+Route Table 只保存已经配置的 client-visible model。模型状态分两层，不混用：discovery-enabled provider 的 `/models` 返回的是 **available models**，只用于清单展示与元数据；`providers.<id>.models` 是 **configured models**，只有它进入 Provider Registry、Route Table 和 Codex catalog。外部 provider 的 `models sync` 不自动注册新模型，用户需要 `models add` 才会可路由。
+
+路由顺序：
+
+1. 已注册 external client-visible model → 对应 provider。
+2. 其余 bare name 命中已验证的 official slug baseline → official。
+3. 其他一律 route error；未知 bare name 不回落到 official。
+
+CLI 变更（provider / model / alias / `catalog refresh`）先原子写配置与 baseline，再向运行中的 daemon 发 SIGHUP。daemon 重建整个 Registry + Route Table + baseline snapshot，构建成功才一次性替换；构建失败保留旧快照，把错误写进 `/_status`。新配置对之后到达的请求立即生效，进行中的请求不受影响，不需要重启进程。daemon 不监听配置文件；直接编辑 `runtime/config.json` 后执行 `service restart` 让改动生效。
+
+provider id 只负责生成默认名字，不是运行时 wildcard。
+例如 `openrouter/foo` 只有在 `foo` 已配置时才可路由。
+
+`serve` 只根据本地配置构建 Registry 和 Route Table，不执行 `codex debug models --bundled`。为了仍能兑现 bare alias 与官方 slug 的校验，`catalog refresh` 在写 catalog 的同时把 bundled 官方 slug 集合和 Codex catalog artifact 的 identity 写入 `runtime/official-models.json`。
+
+catalog artifact 指真正编入 bundled models 的 native 可执行文件，不是 npm 启动器。解析只读文件系统，不执行 Node 或 Codex。规则：`codex` 入口是 `codex-cli/bin/codex.js` 这类启动器时，按其 platform package 解析到 `vendor/<target-triple>/bin/codex`；入口本身是 native 二进制时直接使用。identity = canonical path + SHA-256；size、mtime、inode 只做快速比较，不作判据。
+
+校验规则：`serve` 启动时必算 SHA-256，baseline 缺失或哈希不一致时拒绝启动（fail closed），提示先运行 `catalog refresh`：official bare 路由依赖这份 baseline。运行期每次走 bare alias 的 external exact route 前先从当前 `codex` 入口重新解析 authoritative native artifact：canonical path 与 baseline 不同立即 fail closed；路径相同才把 stat tuple 当作已验证哈希的缓存键，stat 变化即重算 SHA-256 并以哈希为准；不一致时所有 bare name 路由立即 fail closed（返回 route error），含 `/` 的 external 路由不受影响，直到重新 `catalog refresh` 并完成一次 reload。这样 Codex 升级新增同名 official slug 时，不会在运行中被 external exact route 静默抢走。
+
+## Model Roles
+
+系统只保留两个 role：
+
+| Role | Used by | Default | Validation |
+| --- | --- | --- | --- |
+| `officialFallback` | 官方额度保护触发后的执行目标 | `wopal-ai:deepseek-v4.1-flash` | 必须是外部 provider 的模型；四种已注册协议均可，因为对 Codex 暴露的都是 Responses |
+| `compaction` | Gateway compaction、Codex memories extract / consolidation | `wopal-ai:deepseek-v4.1-flash` | 必须是外部 provider 的模型；四种已注册协议均可 |
+
+Codex memories 不单独配置：Codex install 把 `compaction` role 解析得到的 client-visible model 写入两个 memories model 字段。
+
+这样 memories 永远走外部模型，不占官方额度。官方额度耗尽时，compaction 与 memories 照常工作。
+
+代价是 memories 不能单独选模型。当前没有这个需求，而单独的 memories role 会多出一套配置、校验和恢复分支。
+
+role 规则：
+
+- `config role set` 在写入前验证 provider 和 model 存在。
+- 显式 `officialFallback` 或 `compaction` 悬空时，`serve` 拒绝启动。
+- compatibility default 悬空时，普通推理仍可启动；实际使用该 role 时返回 `model_role_unavailable`。
+- role 自身执行失败后直接返回错误，不继续套用另一个 role。
+
+### Official Fallback
+
+自动回退只有一个触发来源：官方额度保护。
+
+| Situation | Fallback |
+| --- | --- |
+| 5 小时或每周额度进入保护区 | 是 |
+| 429 | 否 |
+| 5xx | 否 |
+| 连接失败 | 否 |
+| WebSocket 握手失败 | 否 |
+| 鉴权失败 | 否 |
+| 已经产生输出 | 否 |
+
+除额度保护外，官方链路按原生错误语义返回。
+
+## Model Catalog
+
+`catalog refresh` 先解析 authoritative native artifact 并算 H1，用这一个 native 二进制执行 `debug models --bundled`，输出后再算 H2；只有 H1 = H2 才同时提交 slug 集合、identity 与 catalog。然后用这份 slug 集合合并所有外部模型，生成：
+
+```text
+~/.codex/wopal-codex-gateway-models.json
+```
+
+模型命名：
+
+- 官方模型保持 bundled bare slug。
+- Wopal 保持 `wopal-ai/<model>`。
+- 其他 provider 默认是 `<provider-id>/<upstream-model>`。
+- 非空 alias 直接成为该模型的 client-visible name。
+
+目录刷新前检查所有 client-visible name 与官方 slug 的碰撞。
+冲突时保留现有生成目录并返回错误。
+
+### Model Attributes
+
+模型清单和模型属性来自两个不同的来源。
+
+| 事实 | 来源 | 理由 |
+| --- | --- | --- |
+| 有哪些模型（available） | discovery-enabled provider 的 `/models` | 只有它知道当前在服务什么；discovery-disabled provider 没有 remote available set |
+| 模型是什么 | models.dev | provider 的 `/models` 只回名字 |
+
+`models.dev/catalog.json` 一次给出全部 provider 与其模型属性，带 `ETag`，日常刷新用 `If-None-Match` 取 304。拉取失败时保留上一份，不阻断其他 provider 同步。
+
+只保存 join 之后的切片，不落全量 6 MB。
+
+### Protocol Resolution
+
+`/v1/models` 不返回协议。models.dev 的模型条目可以带 `provider.shape`（`responses` / `completions`）和 `provider.npm`，都优先于 provider 级 `npm`。
+
+| 来源（按序） | 协议 |
+| --- | --- |
+| 模型 `provider.shape = responses` | `openai-responses` |
+| 模型 `provider.shape = completions` | `openai-chat` |
+| `@ai-sdk/openai` | `openai-responses` |
+| `@ai-sdk/openai-compatible` | `openai-chat` |
+| `@ai-sdk/anthropic` | `anthropic-messages` |
+| `@ai-sdk/google` | `gemini` |
+
+`shape` 必须最先看：`@ai-sdk/openai-compatible` 的 provider 里已经有模型用 `shape = responses` 提供 Responses（models.dev 的 `sakana/fugu`）。npm 先看模型级 `provider.npm`，再看 provider 级 `npm`。
+
+未映射的 npm（例如 `@ai-sdk/mistral`、`@ai-sdk/xai`）标记 `needs_protocol`，等待显式设置。
+
+### Multi-API Providers
+
+同一个 provider 经常同时提供多种 API。DeepSeek 官方既接受 `POST /responses` 也接受 `POST /chat/completions`，两类请求都返回 401 而不是 404，说明两个端点都真实存在。
+
+models.dev 每个模型只记一种协议，它选的是自己认为最合适的那条。这个选择会过时，也会判错。
+
+因此网关按单协议路由：一条模型同一时刻只走一条上游路径，但用户可以随时改用另一条。DeepSeek 官方文档给 Codex 的接入配置就是 `wire_api = "responses"`、`base_url = "https://api.deepseek.com/"`，网关按同样的方式走 Responses：
+
+```bash
+wopal-codex-gateway providers set deepseek --base-url https://api.deepseek.com
+wopal-codex-gateway models set deepseek-v4-pro --provider deepseek --protocol openai-responses
+```
+
+要改走 chat completions，把 `--protocol` 换成 `openai-chat`。
+
+网关不因为请求失败自动换协议。4xx 可能是鉴权、限流、参数或模型下线；自动切换会制造重复计费和不可解释的路由变化。
+
+### Attribute Precedence
+
+context、vision、reasoning 这类能力属性单独解析：
+
+| 顺序 | 来源 | 标记 |
+| --- | --- | --- |
+| 1 | 用户显式设置 | `explicit` |
+| 2 | models.dev | `metadata` |
+| 3 | Gateway 默认值 | `default` |
+
+协议不走这张表，也没有默认值：`explicit` → models.dev（先 `shape` 再 `npm`）→ provider `protocol` → `needs_protocol`。落到 `needs_protocol` 的模型不进路由表，也不出现在 Codex 选择器。
+
+`wopal-ai` 在 models.dev 没有对应条目，不参与 models.dev 合成。它使用独立 metadata source，优先级：用户显式设置 > Wopal 服务端 `/models` 的明确属性 > Gateway 默认值；协议省略时按 `openai-chat`。它的元数据读写 `runtime/model-metadata.json`，并遵守用户显式设置优先于服务端返回属性。两个 store 的边界写死为：`wopal-ai` 只读写 `runtime/model-metadata.json`，不写 `runtime/provider-model-metadata.json`；后者只保存其他外部 provider。两个 store 各自只有一个拥有者，不存在同一 provider 两份快照需要按 `fetchedAt` 仲裁的情况。
+
+### Capability Defaults
+
+能力字段的默认值：100 万 tokens 上下文、支持图片、支持推理。
+
+models.dev 有明确值时用它的值（如 `limit.context`、`modalities.input`），并在 metadata snapshot 里带版本锚点。provider 只回模型名时，不回落到猜测；模型名、`owned_by`、创建时间和名称后缀都不是能力证据。
+
+### Sync Rules
+
+- 用户显式设置永不自动覆盖。models.dev 与显式值冲突时打印 warning，保留用户值。
+- models.dev 来源的值在同步时更新，并打印 `protocol changed: old -> new`。
+- `models sync` 对 `providers` 里的外部 provider 只写元数据 store，不改写配置里的显式字段。对 discovery-disabled provider（native Gemini / native Anthropic），它只刷新已 configured models 的 models.dev 元数据，不调用模型清单端点，也不新增模型；登记始终靠 `models add`。省略 `--provider` 时作用于 `wopal-ai`：拉取 Wopal `/models` → 保留用户显式 override → 更新 `wopalAi.models` → 写 `runtime/model-metadata.json` → refresh catalog。这是兼容例外，不受外部 provider 规则约束。
+- 拉取失败或解析失败保留上一次成功结果；没有上一次结果就只用用户设置和默认值。
+- discovery-enabled provider：models.dev 有而 `/models` 没有的模型不进入清单；`/models` 有而 models.dev 没有的模型进入清单并标 `needs_protocol`。discovery-disabled provider 的清单只来自 configured models。
+
+### Metadata Staleness
+
+models.dev 是社区维护的 MIT 项目，不是权威 API 文档：DeepSeek 被标成纯 chat，官方却同时提供 Responses 和 chat completions；OpenCode 的 `mistral-large-4` 标成 `@ai-sdk/mistral`，实际走 `/openai/v1`。所以它只是默认来源，用户显式设置永远能盖掉它。
+
+## Credentials
+
+- `official` 使用 Codex 请求携带的官方凭据。
+- `wopal-ai` 使用固定 Keychain service，account 为 `wopal-ai`。
+- 其他 provider 使用统一 service + provider id account。一个 provider 一把密钥，多种协议共用。
+- 凭据呈现完全由对应 CLIProxyAPI executor 决定，Gateway 只提供 Keychain key，不在设计层重新概括 header。参考行为：OpenAI-compatible / Codex 用 `Authorization: Bearer`；Claude 在官方 Anthropic API-key 端点用 `x-api-key`，在第三方 / custom base 上用 `Authorization: Bearer`；Gemini 用 `x-goog-api-key`。Spike 已证明 OpenCode Go 的 Gemini 路径在 `x-goog-api-key` 下可用。`headers` 只做非密钥增值头；若上游要求非标准 secret header，必须单独设计 Keychain-backed binding，禁止把 secret 写进 `headers`。
+- `wgcp1` 使用 Gateway 自己的 compaction key。
+- provider API key 不进入 JSON、SDK runtime config 或日志。
+
+## Codex Integration and Restore
+
+Gateway 只管理四个 Codex 配置项：
 
 - `model_catalog_json`
 - `openai_base_url`
 - `[memories] extract_model`
 - `[memories] consolidation_model`
 
-`model` 不属于安装接管范围。恢复时，仅当当前 `model` 以 `wopal-ai/` 开头，才恢复安装前的值；当前是官方模型时保持用户选择。
+`model` 不是安装时固定写入的 managed key。
 
-### Codex model catalog
+恢复状态记录 Gateway 接管期间暴露过的 external client-visible model。
+每次成功 `catalog refresh` 都把本次外部模型名称并入集合，集合只增不减。
 
-`catalog refresh` 从 `codex debug models --bundled` 读取官方 baseline，合并 `wopalAi.models`，写入：
+`codex restore` 时：
 
-```text
-~/.codex/wopal-codex-gateway-models.json
-```
+- 当前 model 在该集合中 → 恢复安装前 model。
+- 当前 model 是官方模型 → 保留用户当前选择。
 
-官方模型的 `visibility` 原样保留。Wopal 模型使用 `wopal-ai/<model>` slug。
+这样可以覆盖安装之后新增、删除或改名 alias 的场景。
 
-`runtime/config.json` 是用户配置；`wopal-codex-gateway-models.json` 是 Codex
-读取的生成目录。用户调整能力后刷新目录，生成文件可重建。
+## Rollback
 
-`config wopal --tool-mode <mode>` 选择整个 Wopal provider 的工具模式；
-`catalog refresh` 把选择写进目录。默认 `code_mode_only` 提供 `exec`/`wait`，
-`code_mode` 同时提供编排工具与直接工具，`direct` 只提供直接工具。
-官方模型保留自身模式。改为 `direct` 时，已有 `exec` 历史的会话需要新建对话。
-选择模式本身不构成任意模型切换成功的保证。
+回滚必须同时恢复 daemon 和 Codex-facing 状态。
 
-生成器省略外部条目的空值、Codex 已有的等价默认值和未识别字段。
-官方 `base_instructions` 与 `model_messages.instructions_template` 完全相同时只保留
-后一份；不同值均保留。每个模型至少保留一份有效的基础指令。
-外部模型使用网关的简短编码助手指令，官方模型的有效指令保持原样。
-能力来源和同步优化目标见子设计。
+固定顺序：
 
-### Client compatibility logging
+1. 当前版本执行 `codex restore`。
+2. 启动 recovery 中的上一版，直到 `/_health` 通过。
+3. 上一版执行 `codex install`，重新生成它能理解的 catalog 和 memories model。
 
-Codex 每周发布多次，新版本可能在不破坏构建的情况下改变请求契约：压缩算法、
-工具面形状、beta 特性集合、请求字段。为了让升级后的问题可归因，`gateway.log`
-的每条路由与 turn 记录都带上客户端指纹：
+任何一步失败都停止后续步骤。
+成功回滚后，第三方 bare alias 不得继续出现在 Codex catalog 或当前 model 中。
 
-| 字段 | 来源 | 用途 |
-| --- | --- | --- |
-| `client_version` | `version` 头，缺失时从 `User-Agent` 解析 | 把请求绑定到具体 Codex 构建 |
-| `client_originator` | `originator` 头 | 区分 Desktop / `codex_exec` / SDK |
-| `client_user_agent` | `User-Agent`（折叠控制字符、截断） | 兜底身份 |
-| `client_encoding` | `Content-Encoding` | 新压缩算法会让网关无法解码 |
-| `client_features` | `x-codex-beta-features` | 契约变化的最早信号 |
+## Client Compatibility Logging
 
-请求体只做形状摘要，不留内容：
+日志只记录诊断所需的 metadata。
 
-| 字段 | 含义 |
-| --- | --- |
-| `request_tool_surface` | `code_mode`（`additional_tools` namespace）或 `direct`（顶层 `tools`） |
-| `request_tool_count` | 工具总数 |
-| `request_tool_digest` | 排序后工具名的 8 字节摘要；集合变化即变化 |
-| `request_functions` | `functions` namespace 内的工具名，例如 `[exec wait]` |
-| `request_input_types` | 历史条目类型计数，例如 `message=12` |
-| `request_keys` | 顶层请求字段 |
+- 记录 Codex 版本、originator、User-Agent、Content-Encoding、beta feature 标识；请求体只提取字段名、工具数量、工具名称摘要和输入类型计数。
+- 同一客户端版本的请求形状变化记录一次 contract-change 事件。
+- prompt、工具参数、工具输出、完整请求正文和凭证永不写盘。
 
-同一 `client_version` + model 的形状发生变化时，额外写一条
-`client_request_contract_changed`，记录 `tool_surface_from/to`、
-`tool_count_from/to`、`functions_from/to`、`keys_added/removed`、
-`encoding_from/to`、`features_from/to`。变化只在发生的那次记录一次，不是每个
-turn 都写。观察表有界（64 项），淘汰只会导致重复记录，不会漏掉请求。
+SDK request logger 保持关闭。
+`/_status.request_body_logging` 固定报告 `disabled`。
 
-这些字段全部是 header 值或计数，仍然满足 metadata-only 边界：不记录 prompt、
-正文、工具参数或工具输出。
+## Quota Protection
 
-### Status
+官方额度保护合同：
 
-`/_status` 至少包含：
+- 5 小时基础停止点：97%。
+- 每周基础停止点：99%。
+- 学习到的最大单步只会让实际停止点更早。
+- 额度窗口 reset time 允许小幅抖动，不因秒级差异丢弃整段 telemetry。
+- `/_status` 同时暴露基础状态、实际停止点、学习值和 telemetry 新鲜度。
 
-- `official_quota.state`
-- `official_quota.five_hour`、`official_quota.weekly`
-- `official_quota.effective_five_hour_stop_percent`
-- `official_quota.effective_weekly_stop_percent`
-- `official_quota.observed_five_hour_max_step`
-- `official_quota.observed_weekly_max_step`
-- `official_quota.failover`
-- `official_quota.quota_telemetry`
-- `notifications`
+额度进入保护区后使用 `officialFallback`。
+额度恢复后回到用户原本请求的官方模型。
 
-`effective_*` 是按观测最大单步计算后的实际停止点。基础阈值与实际阈值同时存在，操作者能解释提前停的原因。
+## Status
 
-`quota_telemetry` 回答“这个读数还活着吗”：`stale`、`last_accepted_seconds_ago`、`rejected_in_a_row`。没有它，一个已停止接收样本的 guard 与一个“额度充足”的 guard 在 `/_status` 上完全一样，2026-10-25 的事故正是这样隐藏了三小时。
-
-### Quota window identity
-
-`ResetAt` 标识窗口代号，但上游并不逐秒稳定：同一个 5 小时窗口被观测为 `11:14:57Z`、`11:14:59Z` 和 `11:15:01Z`。因此窗口比较必须带容差（`officialResetAtJitterTolerance`，5 秒）：
-
-- 差值在容差内：同一窗口，接受并记 `official_quota_window_jitter`。
-- 样本明显更旧：拒绝，避免延迟响应把状态退回已重置的窗口。
-- 样本明显更新：新窗口，接受新读数；账号已观测到的最大单步仍跨窗口保留。
-
-若把 `ResetAt` 当精确身份，一次 2 秒抖动就会让一侧的样本永远被判为旧窗口。存储值单调抬高后再也无法被替换，guard 于是一边保持 `state=open` 一边永久丢弃遥测。
-
-首次接受的样本与首个被拒样本都必须写日志（`official_quota_observed`、`official_quota_sample_rejected`），否则“从未学到任何东西”和“一切正常”在日志里无法区分。
+`/_status` 报告 provider、两个 role、官方 quota/failover、credential 是否配置以及服务状态。
+状态输出不包含 API key、prompt 或原始账号标识。
 
 ## Data and State Model
 
-| State | Location | Owner | Rules |
-| --- | --- | --- | --- |
-| Gateway config | `runtime/config.json` | CLI + daemon | version 1，`0600`，原子写入 |
-| SDK runtime config | `runtime/cliproxy-runtime.json` | daemon | 每次启动重新生成，`0600`，不含密钥 |
-| SDK auth directory | `runtime/cliproxy-auth/` | daemon | SDK 要求的认证目录，`0700` |
-| Model metadata | `runtime/model-metadata.json` | CLI | provider 声明的能力，按 provider URL 绑定，`0600` |
-| Codex restore | `runtime/codex-restore.json` | CLI | 安装前记录，恢复后删除，`0600` |
-| Quota state | `runtime/official-quota-state.json` | daemon | account key 使用 SHA-256；跨重启保留；最大单步跨窗口保留 |
-| Quota state lock | `runtime/official-quota-state.json.lock` | daemon | 保证同一时刻只有一个进程写额度状态 |
-| Model catalog | `~/.codex/wopal-codex-gateway-models.json` | CLI | 生成文件，`0600` |
-| Logs | `logs/gateway.log`、`logs/service.log`、`logs/service-error.log` | daemon | JSONL metadata；不记录 prompt/正文 |
-| Binary | `bin/wopal-codex-gateway` | build | 单一可执行文件，`0755` |
-| Rollback binaries | `recovery/` | operator | 上一版可执行文件与启动脚本；运行路径不读取 |
+| State | Location | Owner |
+| --- | --- | --- |
+| Gateway config | `runtime/config.json` | CLI + daemon |
+| SDK runtime config | `runtime/cliproxy-runtime.json` | daemon |
+| SDK auth directory | `runtime/cliproxy-auth/` | daemon |
+| Provider metadata（除 wopal-ai 外的外部 provider） | `runtime/provider-model-metadata.json` | CLI |
+| Wopal metadata（仅 wopal-ai） | `runtime/model-metadata.json` | CLI |
+| Official slug baseline + catalog artifact identity（serve 校验用） | `runtime/official-models.json` | CLI（catalog refresh 写） |
+| Codex restore state | `runtime/codex-restore.json` | CLI |
+| Official quota state | `runtime/official-quota-state.json` | daemon |
+| Model catalog | `~/.codex/wopal-codex-gateway-models.json` | CLI |
+| Logs | `logs/*.log` | daemon |
+| Rollback material | `recovery/` | operator |
 
-日志与临时文件规则：
+所有用户配置和跨重启状态都使用原子写入。
+密钥只存在 Keychain。
 
-- `serve` 通过 `sdkapi.WithRequestLoggerFactory` 返回 nil request logger。SDK 只在工厂返回非 nil 日志器时才安装 request-logging middleware；正文捕获能力只存在于该中间件中，因此成功与出错路径都不会把正文写入磁盘。
-- 不实现 no-op logger：`sdk/logging.RequestLogger` 的方法签名引用 SDK 内部类型，外部模块无法实现；返回 nil 是 SDK 支持的退出方式。
-- `/_status` 的 `request_body_logging` 固定报告 `"disabled"`，与实际安装的机制一致。
-- 请求正文只在内存中处理，不写入 `logs/`、`runtime/` 或其他目录。
-- 错误诊断只记录状态码、模型、错误码、request id 和耗时。
-- 升级前提：升级 CLIProxyAPI 后必须重新确认三件事，缺一不可：
-  1. factory 返回 nil 时仍不安装 request-logging middleware；
-  2. 配置 reload 不会在 logger 为 nil 时重新创建 logger；
-  3. 新版本没有在 request-logging middleware 之外新增 request/response body 的文件写入路径。
-- 回归保障：`TestServedGatewayNeverWritesPromptBodies` 通过真实嵌入式服务跑「成功请求 + 上游 5xx + 畸形请求」，随后扫描整个 runtime 树，断言没有任何 `request-log*`／`request-body*`／`response-body*`／`error-*` 文件且正文标记零命中。去掉 nil factory 后该测试必须失败，这是它有效的判据。
+## Compatibility Contract
+
+- `runtime/config.json` 保持 `version: 1`。
+- `wopalAi` 字段语义保持不变，它下面的模型全部是 `openai-chat`，升级时不需要补 `protocol`。
+- `wopalAi` 省略 `protocol` 时按 `openai-chat` 处理；`providers` 缺少协议且没有模型元数据时标记 `needs_protocol`，不猜。
+- Wopal client model 保持 `wopal-ai/<model>`。
+- `auth` 与 `models` 省略 `--provider` 时继续操作 `wopal-ai`。
+- 官方模型保持 bare slug 和原生链路。
+- 回滚后的上一版只暴露它自己能路由的官方 + Wopal 模型。
 
 ## Reference Documents
 
@@ -338,3 +489,4 @@ turn 都写。观察表有界（64 项），淘汰只会导致重复记录，不
 | --- | --- |
 | `../README.zh-CN.md` | 中文使用说明 |
 | `../README.md` | English user guide |
+| `research/opencode-multi-protocol-spike.md` | OpenCode 四协议接入的实测记录与配置差异证据 |

@@ -10,7 +10,6 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 以下文档是规范，不是参考资料：
 
 - DESIGN: `docs/DESIGN.md`
-- 模型目录子设计: `docs/DESIGN-model-catalog.md`
 
 `docs/DESIGN.md` 的 `## Project Layout` 定义目录职责，`## Data and State Model` 定义每个状态文件的所有者与权限。改动目录结构或新增状态文件前先读这两节。
 
@@ -64,7 +63,7 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 - **密钥只经 Keychain 写入。** 真实 API Key 不进入 `config.json`、`cliproxy-runtime.json`、日志或测试夹具。生成的 SDK 配置用 `__KEYCHAIN__` 占位。
 - **配置改动保持向后兼容。** `runtime/config.json` 的 `version` 是硬门：不支持的版本在启动前失败。新增字段给默认值；移除字段时明确报错而不是静默忽略。
 - **额度阈值语义固定。** 基础阈值 5 小时 `97`、每周 `99`，最小余量 `2`、`1`；`quota.maxStepCap` 只约束学习值，不改变基础阈值。修改停止点逻辑必须同时更新 `/_status` 的 `effective_*` 字段含义。
-- **Codex 配置只改 managed keys。** 安装只触碰 `model_catalog_json`、`openai_base_url`、`[memories] extract_model`、`[memories] consolidation_model`；恢复时 `model` 仅在当前值以 `wopal-ai/` 开头时回退。不要整份重写 `~/.codex/config.toml`，保留用户注释与无关配置。
+- **Codex 配置只改 managed keys。** 安装只触碰 `model_catalog_json`、`openai_base_url`、`[memories] extract_model`、`[memories] consolidation_model`；恢复时 `model` 仅在当前值是本 Gateway 记录曾暴露过的 client-visible name 时回退；官方 bare slug 保留用户当前选择。不要整份重写 `~/.codex/config.toml`，保留用户注释与无关配置。
 - **写入都要原子。** 配置与状态文件使用临时文件加 rename，权限 `0600`；目录 `0700`。
 
 ## 测试

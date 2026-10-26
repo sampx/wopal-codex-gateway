@@ -10,7 +10,6 @@ description: Agent rules for this Go gateway repo: path contract, privacy bounda
 Canonical references:
 
 - DESIGN: `docs/DESIGN.md`
-- Model catalog sub-design: `docs/DESIGN-model-catalog.md`
 
 `## Project Layout` in `docs/DESIGN.md` owns directory responsibility. `## Data and State Model` owns every state file's owner and permissions. Read both before changing directory structure or adding a state file.
 
@@ -64,7 +63,7 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 - **Secrets only through Keychain.** A real API key never enters `config.json`, `cliproxy-runtime.json`, logs, or test fixtures. The generated SDK config carries a `__KEYCHAIN__` placeholder.
 - **Configuration changes stay backward compatible.** `runtime/config.json` `version` is a hard gate: an unsupported version fails before startup. New fields get defaults; removing a field fails loudly instead of being silently ignored.
 - **Quota threshold semantics are fixed.** Base thresholds are 5-hour `97` and weekly `99`, with minimum margins `2` and `1`. `quota.maxStepCap` only bounds the learned step size and never changes the base thresholds. Changing stop-point logic requires updating what the `effective_*` fields in `/_status` mean.
-- **Codex configuration edits stay inside the managed keys.** Installation touches only `model_catalog_json`, `openai_base_url`, `[memories] extract_model`, and `[memories] consolidation_model`. Restore rewinds `model` only when the current value starts with `wopal-ai/`. Never rewrite `~/.codex/config.toml` wholesale; keep user comments and unrelated settings.
+- **Codex configuration edits stay inside the managed keys.** Installation touches only `model_catalog_json`, `openai_base_url`, `[memories] extract_model`, and `[memories] consolidation_model`. Restore rewinds `model` only when the current value is a client-visible name recorded as exposed by this Gateway; a bare official slug is left alone. Never rewrite `~/.codex/config.toml` wholesale; keep user comments and unrelated settings.
 - **Every write is atomic.** Configuration and state files use a temp file plus rename with mode `0600`; directories are `0700`.
 
 ## Testing
