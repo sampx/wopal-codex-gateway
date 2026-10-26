@@ -132,7 +132,7 @@ wopal-codex-gateway config role reset <official-fallback|compaction>
 | `POST /v1/responses` | Responses 推理与额度保护回退 |
 | `GET /v1/responses` + WebSocket Upgrade | Codex WebSocket 推理 |
 | `POST /v1/responses/compact` | Gateway compaction |
-| `GET /v1/models` | 合并后的模型目录 |
+| `GET /v1/models` | 已配置 provider 的模型清单；Codex 选择器使用 `catalog refresh` 生成的合并 catalog |
 | `GET /_health` | 健康检查 |
 | `GET /_status` | 脱敏运行状态 |
 
@@ -191,7 +191,7 @@ wopal-codex-gateway config role reset <official-fallback|compaction>
 - 非空 alias 是完整 client-visible name，可以不包含 provider id。
 - client-visible name 必须全局唯一。手工编辑配置造成重名时，`serve` 直接拒绝启动，不猜测该用哪一个。
 - alias 与官方 bundled slug 的冲突在写入 alias 和 `catalog refresh` 时检查。
-- 每个外部 provider 可配置 `toolMode` 和 `excludedModels`；tool mode 支持 `code_mode_only`、`code_mode`、`direct`，默认 `code_mode_only`。
+- 每个外部 provider 可配置 `toolMode` 和 `excludedModels`；tool mode 支持 `code_mode_only`、`code_mode`、`direct`，默认 `code_mode_only`。`excludedModels` 与 `wopal-ai` 同义：列在其中的 upstream model 不进入 `models sync` 结果，也不进入 catalog。
 - `modelRoles` 只保存 provider + upstream model，不保存 alias。
 - 两个 role 的默认值都指向 `wopal-ai/deepseek-v4.1-flash`。
 - 未识别的 version 1 字段继续原样保留。
@@ -387,6 +387,7 @@ models.dev 是社区维护的 MIT 项目，不是权威 API 文档：DeepSeek �
 - `official` 使用 Codex 请求携带的官方凭据。
 - `wopal-ai` 使用固定 Keychain service，account 为 `wopal-ai`。
 - 其他 provider 使用统一 service + provider id account。一个 provider 一把密钥，多种协议共用。
+- `auth test --provider` 对 discovery-enabled provider 请求其 `modelsUrl`；discovery-disabled provider 只报告 Keychain 中是否已配置凭据，不发起网络请求。
 - 凭据呈现完全由对应 CLIProxyAPI executor 决定，Gateway 只提供 Keychain key，不在设计层重新概括 header。参考行为：OpenAI-compatible / Codex 用 `Authorization: Bearer`；Claude 在官方 Anthropic API-key 端点用 `x-api-key`，在第三方 / custom base 上用 `Authorization: Bearer`；Gemini 用 `x-goog-api-key`。Spike 已证明 OpenCode Go 的 Gemini 路径在 `x-goog-api-key` 下可用。`headers` 只做非密钥增值头；若上游要求非标准 secret header，必须单独设计 Keychain-backed binding，禁止把 secret 写进 `headers`。
 - `wgcp1` 使用 Gateway 自己的 compaction key。
 - provider API key 不进入 JSON、SDK runtime config 或日志。

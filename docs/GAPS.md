@@ -21,6 +21,8 @@
 - [ ] `providers set` 可以创建和更新 provider，并明确输出 `created` 或 `updated`
 - [ ] `providers remove` 可以删除未被引用的 provider，`config show` 不再显示它
 - [ ] 非法 provider id、重复 client-visible name 和非法协议会在写入前被拒绝
+- [ ] 新建 provider 缺少 `--base-url` 时拒绝；更新时省略的字段保持原值
+- [ ] 手工编辑配置造成 client-visible name 重复时，`serve` 拒绝启动
 - [ ] 现有 `wopalAi` 配置和未知 version 1 字段在 provider 配置读写后保持不变
 
 ### WPX-G2: provider 级 Keychain 凭据管理尚未落地 (P0)
@@ -58,6 +60,12 @@
 - [ ] protocol 解析遵守 `explicit → model provider.shape → model provider.npm → provider npm → provider protocol → needs_protocol`，`needs_protocol` 模型不进入 Codex catalog
 - [ ] Wopal 元数据继续只使用 `runtime/model-metadata.json`，其他 provider 使用独立元数据 store
 - [ ] models.dev 拉取失败或返回 304 时沿用上一份成功快照，不阻断其他 provider 同步
+- [ ] `models list` 为每个模型输出 `protocol` 与来源（`explicit`、`metadata`、`provider-default`、`needs_protocol`）
+- [ ] `modelsAuth` 按 `none` / `provider-key` 解释；省略时同 origin 用 `provider-key`，跨 origin 用 `none`，密钥只来自 Keychain
+- [ ] models.dev 与用户显式值冲突时打印 warning 并保留用户值
+- [ ] 外部 provider 的 `models sync` 只更新 metadata store，不改写显式配置字段；discovery-disabled provider 只刷新已 configured models 的元数据
+- [ ] discovery 两个方向的集合差都按设计处理：models.dev 有而 `/models` 没有的不入清单，`/models` 有而 models.dev 没有的标 `needs_protocol`
+- [ ] `models set` 能清除 alias
 
 ### WPX-G4: 四协议外部 provider 执行链尚未落地 (P0)
 
@@ -91,6 +99,7 @@
 - [ ] `catalog refresh` 用同一个 native Codex binary 完成 H1、bundled catalog 读取和 H2，只有 H1=H2 才提交结果
 - [ ] `runtime/official-models.json` 保存官方 slug 与 native artifact identity，文件使用原子写入和 `0600` 权限
 - [ ] external client-visible name 与 official slug 冲突时刷新失败，并保留刷新前的 catalog 与 baseline
+- [ ] 写入 alias 时检查与官方 bundled slug 冲突，命中即拒绝
 
 ## External Execution and Routing
 
@@ -125,7 +134,8 @@
 **Design**: `./DESIGN.md`（Interfaces and Contracts；Model Roles；Official Fallback）。
 
 **Exit**:
-- [ ] `config role` 能显示两个 role 的 provider、upstream model、client model、来源和 ready/unavailable/invalid 状态
+- [ ] `config role` 能显示两个 role 的 provider、upstream model、client model、来源和 ready/unavailable/invalid 状态；只读配置文件，不需要 daemon 运行
+- [ ] 显式 role 悬空时 `serve` 拒绝启动；兼容默认悬空时普通推理可启动，使用该 role 返回 `model_role_unavailable`
 - [ ] `config role set/reset` 能设置或恢复默认 role，并拒绝不存在的 provider/model
 - [ ] `providers remove` 在任一 role 仍引用该 provider 时拒绝删除
 - [ ] 官方额度进入保护区时只使用当前 `officialFallback`；429、5xx、连接失败、WebSocket 失败和普通鉴权错误不会触发自动回退
@@ -179,6 +189,20 @@
 - [ ] `/_status` 保留官方 quota/failover、服务状态和 `request_body_logging=disabled`
 - [ ] SIGHUP reload 失败后状态能显示失败原因，同时明确当前仍在使用上一份成功快照
 - [ ] 状态响应不包含 API key、prompt、工具参数、工具输出或原始账号标识
+
+### WPX-G11: 外部 provider 的 toolMode 与 excludedModels 尚未接入 (P1)
+
+**Current**: 只有 `wopal-ai` 有 `toolMode` 和 `excludedModels`。用户给其他 provider 配了这两个字段也不会影响该 provider 的模型清单或 Codex catalog，模型仍按 Wopal 的全局 tool mode 暴露。
+
+**Target**: 每个外部 provider 的模型按自己的 `toolMode` 写入 Codex catalog；未配置时用 `code_mode_only`。`excludedModels` 与 `wopal-ai` 同义：列在其中的 upstream model 不进入 sync 结果与 catalog。
+
+**Design**: `./DESIGN.md`（Gateway Config；Model Catalog；Sync Rules）。
+
+**Exit**:
+- [ ] `providers set --tool-mode` 按 provider 保存，非法值在写入前拒绝
+- [ ] 外部模型的 catalog 条目使用所属 provider 的 tool mode，未配置时为 `code_mode_only`
+- [ ] 列在 provider `excludedModels` 中的模型不出现在 sync 结果和 catalog 中
+- [ ] 现有 `wopalAi` 的 tool mode 与 excluded models 行为保持不变
 
 ## Reference Documents
 
