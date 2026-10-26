@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"wopal-codex-gateway/internal/catalog"
+	"wopal-codex-gateway/internal/codex"
 	"wopal-codex-gateway/internal/config"
 	"wopal-codex-gateway/internal/keychain"
 )
@@ -26,6 +27,7 @@ type wopalModelsRunner struct {
 	getProviderAPIKey      func(string) (string, error)
 	validateOfficialNames  func(*config.GatewayConfig) error
 	refreshCatalog         func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error)
+	recordExposedModels    func([]string) error
 	signalReload           func() error
 	out                    io.Writer
 }
@@ -50,6 +52,7 @@ func newWopalModelsRunner() wopalModelsRunner {
 		getProviderAPIKey:     keychain.GetProviderAPIKey,
 		validateOfficialNames: catalog.ValidateExternalNamesAgainstOfficial,
 		refreshCatalog:        catalog.RefreshCatalog,
+		recordExposedModels:   codex.RecordExposedExternalModels,
 		signalReload:          signalGatewayReloadAfterCommit,
 		out:                   os.Stdout,
 	}
@@ -337,6 +340,11 @@ func (runner wopalModelsRunner) refreshModelCatalog(cfg *config.GatewayConfig) (
 	}
 	if result == nil {
 		return nil, fmt.Errorf("catalog refresh returned no result")
+	}
+	if runner.recordExposedModels != nil {
+		if err := runner.recordExposedModels(result.ExternalNames); err != nil {
+			return nil, fmt.Errorf("record exposed external models: %w", err)
+		}
 	}
 	if runner.signalReload != nil {
 		if err := runner.signalReload(); err != nil {

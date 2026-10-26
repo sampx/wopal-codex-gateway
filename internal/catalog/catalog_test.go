@@ -568,6 +568,9 @@ func TestRefreshCatalogMergesProtocolReadyExternalModelsAndWritesBaseline(t *tes
 	if result.Native != 2 || result.WopalAI != 1 || result.External != 2 {
 		t.Fatalf("result=%+v", result)
 	}
+	if got, want := strings.Join(result.ExternalNames, ","), "wopal-ai/wopal,p/ready,friendly"; got != want {
+		t.Fatalf("external names=%q want=%q", got, want)
+	}
 	data, err := os.ReadFile(config.CodexGatewayCatalogPath())
 	if err != nil {
 		t.Fatal(err)

@@ -52,6 +52,7 @@ func InstallIntoCodex(cfg *config.GatewayConfig, compactionModel string) (*catal
 	}
 	gatewayBaseURL := fmt.Sprintf("http://%s:%d/v1", cfg.Listen.Host, cfg.Listen.Port)
 	currentState := captureRestoreState(currentText)
+	currentState.ExposedExternalModels = mergeExposedExternalModels(currentState.ExposedExternalModels, refresh.ExternalNames)
 	alreadyManaged := currentState.OpenAIBaseURL.Value == gatewayBaseURL &&
 		currentState.ModelCatalogJSON.Value == config.CodexGatewayCatalogPath()
 
@@ -140,6 +141,34 @@ func writeCodexRestoreState(state CodexRestoreState) error {
 		return fmt.Errorf("encode codex restore state: %w", err)
 	}
 	return writeCodexFileAtomic(config.RestoreStatePath(), string(append(data, '\n')))
+}
+
+// RecordExposedExternalModels accumulates client-visible external model names
+// only while Codex is actively managed by the Gateway. A pre-install catalog
+// refresh must not create restore state on its own.
+func RecordExposedExternalModels(names []string) error {
+	state, found, err := readCodexRestoreState()
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	merged := mergeExposedExternalModels(state.ExposedExternalModels, names)
+	if len(merged) == len(state.ExposedExternalModels) {
+		same := true
+		for index := range merged {
+			if merged[index] != state.ExposedExternalModels[index] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return nil
+		}
+	}
+	state.ExposedExternalModels = merged
+	return writeCodexRestoreState(state)
 }
 
 func readCodexFile(path string) (string, error) {

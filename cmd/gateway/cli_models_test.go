@@ -20,6 +20,7 @@ type modelsCommandFixture struct {
 	fetchedKey    string
 	fetchCalls    int
 	refreshCalls  int
+	recordedNames []string
 }
 
 func newModelsCommandFixture(config *config.GatewayConfig) *modelsCommandFixture {
@@ -57,7 +58,25 @@ func (fixture *modelsCommandFixture) runner() wopalModelsRunner {
 			result := fixture.refreshResult
 			return &result, nil
 		},
+		recordExposedModels: func(names []string) error {
+			fixture.recordedNames = append(fixture.recordedNames, names...)
+			return nil
+		},
 		out: &fixture.output,
+	}
+}
+
+func TestModelsRefreshRecordsExposedExternalNames(t *testing.T) {
+	gatewayCfg := config.DefaultGatewayConfig()
+	gatewayCfg.WopalAI.BaseURL = "https://wopal.example/v1"
+	fixture := newModelsCommandFixture(gatewayCfg)
+	fixture.refreshResult.ExternalNames = []string{"wopal-ai/model", "friendly"}
+
+	if _, err := fixture.runner().refreshModelCatalog(gatewayCfg); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(fixture.recordedNames, ","), "wopal-ai/model,friendly"; got != want {
+		t.Fatalf("recorded names = %q, want %q", got, want)
 	}
 }
 

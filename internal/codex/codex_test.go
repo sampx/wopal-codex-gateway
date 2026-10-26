@@ -199,3 +199,33 @@ func TestRestoreReturnsToPreInstallModelWhenStillOnWopal(t *testing.T) {
 		t.Fatalf("restore did not return to the pre-install model:\n%s", restored)
 	}
 }
+
+func TestRecordExposedExternalModelsAccumulatesOnlyForInstalledGateway(t *testing.T) {
+	root := t.TempDir()
+	restoreRoot := config.SetProjectRootForTest(root)
+	t.Cleanup(restoreRoot)
+	if err := os.MkdirAll(config.StateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RecordExposedExternalModels([]string{"ignored"}); err != nil {
+		t.Fatalf("record without install: %v", err)
+	}
+	if _, err := os.Stat(config.RestoreStatePath()); !os.IsNotExist(err) {
+		t.Fatalf("record without install created restore state: %v", err)
+	}
+
+	if err := writeCodexRestoreState(CodexRestoreState{ExposedExternalModels: []string{"old-alias"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordExposedExternalModels([]string{"new-alias", "old-alias", "vendor/model"}); err != nil {
+		t.Fatal(err)
+	}
+	state, found, err := readCodexRestoreState()
+	if err != nil || !found {
+		t.Fatalf("read state found=%t err=%v", found, err)
+	}
+	if got, want := strings.Join(state.ExposedExternalModels, ","), "old-alias,new-alias,vendor/model"; got != want {
+		t.Fatalf("exposed external models = %q, want %q", got, want)
+	}
+}

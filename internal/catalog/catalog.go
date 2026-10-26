@@ -21,6 +21,7 @@ type CatalogRefreshResult struct {
 	NativeHidden  int
 	WopalAI       int
 	External      int
+	ExternalNames []string
 }
 
 // CatalogCommandOutput is the captured result of `codex debug models`.
@@ -359,6 +360,7 @@ func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 		return nil, err
 	}
 	wopalModels := make([]config.ExternalModelConfig, 0, len(cfg.WopalAI.Models))
+	externalNames := make([]string, 0, len(cfg.WopalAI.Models))
 	for _, model := range cfg.WopalAI.Models {
 		resolved, _ := ResolveModel(model, snapshot)
 		clientName := "wopal-ai/" + resolved.Name
@@ -366,6 +368,7 @@ func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 			return nil, fmt.Errorf("client-visible model name %q collides with official model", clientName)
 		}
 		wopalModels = append(wopalModels, resolved)
+		externalNames = append(externalNames, clientName)
 	}
 
 	providerIDs := make([]string, 0, len(cfg.Providers))
@@ -396,6 +399,7 @@ func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 				return nil, fmt.Errorf("client-visible model name %q collides with official model", clientName)
 			}
 			external = append(external, externalCatalogModel{ProviderID: providerID, Model: resolved, ToolMode: providerCfg.EffectiveToolMode()})
+			externalNames = append(externalNames, clientName)
 		}
 	}
 	catalog := buildCatalogWithExternal(native, wopalModels, cfg.WopalAI.EffectiveToolMode(), external)
@@ -432,5 +436,6 @@ func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 		NativeHidden:  nativeHidden,
 		WopalAI:       len(cfg.WopalAI.Models),
 		External:      len(external),
+		ExternalNames: append([]string(nil), externalNames...),
 	}, nil
 }

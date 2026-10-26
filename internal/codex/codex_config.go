@@ -18,6 +18,7 @@ type CodexRestoreState struct {
 	Model                    RestoreValue  `json:"model"`
 	ModelCatalogJSON         RestoreValue  `json:"modelCatalogJson"`
 	OpenAIBaseURL            RestoreValue  `json:"openaiBaseUrl"`
+	ExposedExternalModels    []string      `json:"exposedExternalModels,omitempty"`
 	MemoriesSectionExisted   *bool         `json:"memoriesSectionExisted,omitempty"`
 	MemoryExtractModel       *RestoreValue `json:"memoryExtractModel,omitempty"`
 	MemoryConsolidationModel *RestoreValue `json:"memoryConsolidationModel,omitempty"`
@@ -265,6 +266,7 @@ func captureRestoreState(text string) CodexRestoreState {
 
 func mergeGatewayRestoreState(saved, current CodexRestoreState) CodexRestoreState {
 	merged := saved
+	merged.ExposedExternalModels = mergeExposedExternalModels(saved.ExposedExternalModels, current.ExposedExternalModels)
 	if merged.MemoriesSectionExisted == nil {
 		merged.MemoriesSectionExisted = current.MemoriesSectionExisted
 	}
@@ -275,6 +277,44 @@ func mergeGatewayRestoreState(saved, current CodexRestoreState) CodexRestoreStat
 		merged.MemoryConsolidationModel = current.MemoryConsolidationModel
 	}
 	return merged
+}
+
+func mergeExposedExternalModels(existing []string, groups ...[]string) []string {
+	seen := make(map[string]struct{}, len(existing))
+	result := make([]string, 0, len(existing))
+	appendGroup := func(values []string) {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+	}
+	appendGroup(existing)
+	for _, group := range groups {
+		appendGroup(group)
+	}
+	return result
+}
+
+func restoreStateOwnsModel(state CodexRestoreState, model string) bool {
+	model = strings.TrimSpace(model)
+	if len(state.ExposedExternalModels) == 0 {
+		// Compatibility with restore state written before exposed names were
+		// recorded explicitly.
+		return strings.HasPrefix(model, "wopal-ai/")
+	}
+	for _, exposed := range state.ExposedExternalModels {
+		if strings.TrimSpace(exposed) == model {
+			return true
+		}
+	}
+	return false
 }
 
 func applyGatewayConfig(text, modelCatalogPath, gatewayBaseURL string) string {
@@ -306,7 +346,7 @@ func restoreSectionValue(text, section, key string, state RestoreValue) string {
 func restoreGatewayConfig(text string, state CodexRestoreState) string {
 	next := text
 	currentModel := getRootString(text, codexManagedModelKey)
-	if currentModel.HadValue && strings.HasPrefix(currentModel.Value, "wopal-ai/") {
+	if currentModel.HadValue && restoreStateOwnsModel(state, currentModel.Value) {
 		next = restoreValue(next, codexManagedModelKey, state.Model)
 	}
 	next = restoreValue(next, codexManagedModelCatalogJSONKey, state.ModelCatalogJSON)
