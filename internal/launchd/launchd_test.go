@@ -486,3 +486,35 @@ func TestWaitForInstanceRejectsLegacyHealthWithoutInstance(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestSignalReloadIfRunningOnlySignalsLoadedJob(t *testing.T) {
+	original := RunLaunchctl
+	t.Cleanup(func() { RunLaunchctl = original })
+
+	var calls [][]string
+	RunLaunchctl = func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) > 0 && args[0] == "print" {
+			return fmt.Errorf("not loaded")
+		}
+		return nil
+	}
+	if err := SignalReloadIfRunning(); err != nil {
+		t.Fatalf("not-running reload: %v", err)
+	}
+	if len(calls) != 1 || len(calls[0]) < 2 || calls[0][0] != "print" || calls[0][1] != LaunchAgentTarget() {
+		t.Fatalf("not-running calls = %#v", calls)
+	}
+
+	calls = nil
+	RunLaunchctl = func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		return nil
+	}
+	if err := SignalReloadIfRunning(); err != nil {
+		t.Fatalf("running reload: %v", err)
+	}
+	if len(calls) != 2 || calls[0][0] != "print" || calls[1][0] != "kill" || calls[1][1] != "SIGHUP" || calls[1][2] != LaunchAgentTarget() {
+		t.Fatalf("running calls = %#v", calls)
+	}
+}

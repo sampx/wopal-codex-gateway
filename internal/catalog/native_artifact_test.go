@@ -95,3 +95,69 @@ func TestCodexPlatformTargetMatchesRuntime(t *testing.T) {
 		t.Fatalf("incomplete target: %q %q %q", target, platformPackage, binaryName)
 	}
 }
+
+func TestOfficialArtifactVerifierUsesStatAsCacheHintButHashAsAuthority(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "codex")
+	if err := os.WriteFile(binary, []byte("version-one"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := ComputeNativeArtifactIdentity(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := &OfficialModelsBaseline{Artifact: identity, Slugs: []string{"gpt-official"}}
+
+	oldResolve := catalogResolveCodex
+	oldNative := catalogResolveNativeArtifact
+	catalogResolveCodex = func() (string, error) { return binary, nil }
+	catalogResolveNativeArtifact = func(path string) (string, error) { return path, nil }
+	t.Cleanup(func() {
+		catalogResolveCodex = oldResolve
+		catalogResolveNativeArtifact = oldNative
+	})
+
+	verifier, err := NewOfficialArtifactVerifier(baseline)
+	if err != nil {
+		t.Fatalf("NewOfficialArtifactVerifier: %v", err)
+	}
+	if err := verifier.Verify(); err != nil {
+		t.Fatalf("Verify unchanged: %v", err)
+	}
+
+	if err := os.WriteFile(binary, []byte("version-two-different"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.Verify(); err == nil {
+		t.Fatal("Verify changed artifact = nil, want fail closed")
+	}
+}
+
+func TestOfficialArtifactVerifierRejectsCanonicalPathChange(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "codex-first")
+	second := filepath.Join(dir, "codex-second")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("same-bytes"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity, err := ComputeNativeArtifactIdentity(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := &OfficialModelsBaseline{Artifact: identity, Slugs: []string{"gpt-official"}}
+
+	oldResolve := catalogResolveCodex
+	oldNative := catalogResolveNativeArtifact
+	catalogResolveCodex = func() (string, error) { return second, nil }
+	catalogResolveNativeArtifact = func(path string) (string, error) { return path, nil }
+	t.Cleanup(func() {
+		catalogResolveCodex = oldResolve
+		catalogResolveNativeArtifact = oldNative
+	})
+
+	if _, err := NewOfficialArtifactVerifier(baseline); err == nil {
+		t.Fatal("NewOfficialArtifactVerifier path drift = nil, want fail closed")
+	}
+}

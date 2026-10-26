@@ -51,6 +51,9 @@ func runProvidersSet(args []string) error {
 	if err := config.SaveGatewayConfig(cfg); err != nil {
 		return err
 	}
+	if err := signalGatewayReloadAfterCommit(); err != nil {
+		return fmt.Errorf("provider configuration saved but gateway reload failed: %w", err)
+	}
 	if exists {
 		fmt.Println("updated")
 	} else {
@@ -80,6 +83,9 @@ func runProvidersRemove(args []string) error {
 	}
 	if err := config.SaveGatewayConfig(cfg); err != nil {
 		return err
+	}
+	if err := signalGatewayReloadAfterCommit(); err != nil {
+		return fmt.Errorf("provider configuration saved but gateway reload failed: %w", err)
 	}
 	fmt.Println("removed")
 	return nil

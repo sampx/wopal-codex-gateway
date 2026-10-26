@@ -26,6 +26,7 @@ type wopalModelsRunner struct {
 	getProviderAPIKey      func(string) (string, error)
 	validateOfficialNames  func(*config.GatewayConfig) error
 	refreshCatalog         func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error)
+	signalReload           func() error
 	out                    io.Writer
 }
 
@@ -49,6 +50,7 @@ func newWopalModelsRunner() wopalModelsRunner {
 		getProviderAPIKey:     keychain.GetProviderAPIKey,
 		validateOfficialNames: catalog.ValidateExternalNamesAgainstOfficial,
 		refreshCatalog:        catalog.RefreshCatalog,
+		signalReload:          signalGatewayReloadAfterCommit,
 		out:                   os.Stdout,
 	}
 }
@@ -335,6 +337,11 @@ func (runner wopalModelsRunner) refreshModelCatalog(cfg *config.GatewayConfig) (
 	}
 	if result == nil {
 		return nil, fmt.Errorf("catalog refresh returned no result")
+	}
+	if runner.signalReload != nil {
+		if err := runner.signalReload(); err != nil {
+			return nil, fmt.Errorf("model changes saved but gateway reload failed: %w", err)
+		}
 	}
 	return result, nil
 }

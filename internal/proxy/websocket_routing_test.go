@@ -147,3 +147,57 @@ func TestWebsocketModelSwitchReconnectsBeforeForwarding(t *testing.T) {
 		}
 	}
 }
+
+func TestWebsocketExternalProviderSwitchReconnectsByProviderIdentity(t *testing.T) {
+	table := routing.NewTable(map[string]routing.Route{
+		"one/model-a":  {Kind: routing.External, ProviderID: "one"},
+		"one/model-a2": {Kind: routing.External, ProviderID: "one"},
+		"two/model-b":  {Kind: routing.External, ProviderID: "two"},
+	}, nil, nil)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if reconnectForWebsocketRouteChange(conn, "one", payload, nil, table.Resolve) {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"kept"}`))
+	}))
+	defer server.Close()
+
+	dial := func() *websocket.Conn {
+		t.Helper()
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return conn
+	}
+
+	same := dial()
+	if err := same.WriteJSON(map[string]any{"type": "response.create", "model": "one/model-a2"}); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := same.ReadMessage()
+	_ = same.Close()
+	if err != nil || !strings.Contains(string(payload), "kept") {
+		t.Fatalf("same-provider message payload=%s err=%v", payload, err)
+	}
+
+	switched := dial()
+	if err := switched.WriteJSON(map[string]any{"type": "response.create", "model": "two/model-b"}); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err = switched.ReadMessage()
+	_ = switched.Close()
+	if !websocket.IsCloseError(err, websocket.CloseServiceRestart) {
+		t.Fatalf("cross-provider switch payload=%s err=%v, want reconnect close", payload, err)
+	}
+}

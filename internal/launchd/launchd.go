@@ -114,6 +114,20 @@ func LaunchAgentTarget() string {
 	return LaunchdDomain() + "/" + config.LaunchAgentLabel
 }
 
+// SignalReloadIfRunning asks a loaded LaunchAgent daemon to rebuild its runtime
+// snapshot. A missing/unloaded job is not an error: control-plane commands are
+// valid before the service has been installed or while it is stopped.
+func SignalReloadIfRunning() error {
+	target := LaunchAgentTarget()
+	if err := RunLaunchctl("print", target); err != nil {
+		return nil
+	}
+	if err := RunLaunchctl("kill", "SIGHUP", target); err != nil {
+		return fmt.Errorf("signal gateway reload: %w", err)
+	}
+	return nil
+}
+
 // RequireGatewayBinary makes an install refuse to register a job that launchd
 // could never start. Without it `service install` would report a launchd
 // success while the daemon is missing.

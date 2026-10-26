@@ -18,6 +18,9 @@ func runCatalogCommand(subcommand string, args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := signalGatewayReloadAfterCommit(); err != nil {
+			return fmt.Errorf("catalog refreshed but gateway reload failed: %w", err)
+		}
 		fmt.Printf(
 			"Model catalog: official-visible=%d, official-internal=%d, wopal-ai=%d\n",
 			result.NativeVisible,

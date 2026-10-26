@@ -25,11 +25,22 @@ import (
 )
 
 func RoutingMiddleware(logger *activity.Logger, quotaGuard *quota.Guard) gin.HandlerFunc {
-	return routingMiddlewareWithTargetsAndQuotaGuard(
+	return routingMiddlewareWithResolverAndTargetsAndQuotaGuard(
 		logger,
 		mustURL("https://chatgpt.com/backend-api/codex"),
 		mustURL("https://api.openai.com/v1"),
 		quotaGuard,
+		legacyRouteResolver,
+	)
+}
+
+func RoutingMiddlewareWithResolver(logger *activity.Logger, quotaGuard *quota.Guard, resolve RouteResolver) gin.HandlerFunc {
+	return routingMiddlewareWithResolverAndTargetsAndQuotaGuard(
+		logger,
+		mustURL("https://chatgpt.com/backend-api/codex"),
+		mustURL("https://api.openai.com/v1"),
+		quotaGuard,
+		resolve,
 	)
 }
 
@@ -38,6 +49,10 @@ func routingMiddlewareWithTargets(logger *activity.Logger, chatgptTarget, openai
 }
 
 func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptTarget, openaiTarget *url.URL, quotaGuard *quota.Guard) gin.HandlerFunc {
+	return routingMiddlewareWithResolverAndTargetsAndQuotaGuard(logger, chatgptTarget, openaiTarget, quotaGuard, legacyRouteResolver)
+}
+
+func routingMiddlewareWithResolverAndTargetsAndQuotaGuard(logger *activity.Logger, chatgptTarget, openaiTarget *url.URL, quotaGuard *quota.Guard, resolve RouteResolver) gin.HandlerFunc {
 	chatgptProxy := newOfficialReverseProxy(chatgptTarget, true, logger, quotaGuard)
 	openaiProxy := newOfficialReverseProxy(openaiTarget, false, logger, quotaGuard)
 	nativeReplay := compaction.NewNativeBridge(chatgptTarget, openaiTarget, logger, quotaGuard)
@@ -90,17 +105,36 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 			return
 		}
 
-		switch routing.Classify(model) {
+		route, routeErr := resolve(model)
+		if routeErr != nil {
+			logger.Write(withClient(map[string]any{"event": "route_rejected", "model": model, "path": path, "reason": "not_registered", "error": routeErr.Error()}, clientFields))
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"message": routeErr.Error(), "type": "invalid_request_error", "code": "model_route_unavailable"}})
+			return
+		}
+		switch route.Kind {
 		case routing.Wopal:
 			logger.Write(withClient(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": model, "path": path}, clientFields))
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Set("native_compaction_bridge", nativeReplay)
 				c.Set(clientContractWatcherContextKey, clientWatcher)
 				c.Abort()
-				serveWopalWebsocketBridge(c, logger, model)
+				serveExternalWebsocketBridge(c, logger, model, route.ProviderID, resolve)
 				return
 			}
 			if c.Request.Method == http.MethodPost && !prepareWopalHTTP(c, logger, model, nativeReplay, inspection) {
+				return
+			}
+			c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
+			c.Request.Header.Del("ChatGPT-Account-ID")
+			c.Next()
+			return
+		case routing.External:
+			logger.Write(withClient(map[string]any{"event": "route_selected", "provider": route.ProviderID, "model": model, "path": path}, clientFields))
+			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
+				c.Set("native_compaction_bridge", nativeReplay)
+				c.Set(clientContractWatcherContextKey, clientWatcher)
+				c.Abort()
+				serveExternalWebsocketBridge(c, logger, model, route.ProviderID, resolve)
 				return
 			}
 			c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
@@ -148,19 +182,16 @@ func routingMiddlewareWithTargetsAndQuotaGuard(logger *activity.Logger, chatgptT
 			logger.Write(withClient(map[string]any{"event": "route_selected", "provider": provider, "model": model, "path": path}, clientFields))
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Abort()
-				serveOfficialWebsocketBridge(c, logger, target, quotaGuard, accountID, model, nativeReplay)
+				serveOfficialWebsocketBridgeWithResolver(c, logger, target, quotaGuard, accountID, model, nativeReplay, resolve)
 				return
 			}
 			sanitizeOfficialInspection(c.Request, inspection, logger)
 			c.Abort()
 			proxy.ServeHTTP(c.Writer, c.Request)
 			return
-		case routing.Disabled:
-			logger.Write(withClient(map[string]any{"event": "route_rejected", "model": model, "path": path, "reason": "unsupported_namespace"}, clientFields))
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "model namespace is disabled", "type": "invalid_request_error"}})
-			return
 		default:
-			c.Next()
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "model route is unavailable", "type": "invalid_request_error", "code": "model_route_unavailable"}})
+			return
 		}
 	}
 }

@@ -15,6 +15,9 @@ func setupConfigAuthTestRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	t.Cleanup(config.SetProjectRootForTest(root))
+	originalSignal := signalGatewayReload
+	signalGatewayReload = func() error { return nil }
+	t.Cleanup(func() { signalGatewayReload = originalSignal })
 	if err := os.MkdirAll(filepath.Join(root, "runtime"), 0o700); err != nil {
 		t.Fatalf("create runtime directory: %v", err)
 	}

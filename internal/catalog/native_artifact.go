@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // NativeArtifactIdentity identifies the executable that actually carries the
@@ -141,4 +142,61 @@ func ComputeNativeArtifactIdentity(path string) (NativeArtifactIdentity, error) 
 
 func sameNativeArtifactIdentity(left, right NativeArtifactIdentity) bool {
 	return left.CanonicalPath == right.CanonicalPath && left.SHA256 != "" && left.SHA256 == right.SHA256
+}
+
+type OfficialArtifactVerifier struct {
+	mu       sync.Mutex
+	baseline NativeArtifactIdentity
+	lastInfo os.FileInfo
+}
+
+func NewOfficialArtifactVerifier(baseline *OfficialModelsBaseline) (*OfficialArtifactVerifier, error) {
+	if baseline == nil || strings.TrimSpace(baseline.Artifact.CanonicalPath) == "" || strings.TrimSpace(baseline.Artifact.SHA256) == "" {
+		return nil, fmt.Errorf("official model baseline is unavailable; run catalog refresh")
+	}
+	verifier := &OfficialArtifactVerifier{baseline: baseline.Artifact}
+	if err := verifier.Verify(); err != nil {
+		return nil, err
+	}
+	return verifier, nil
+}
+
+func (v *OfficialArtifactVerifier) Verify() error {
+	if v == nil {
+		return fmt.Errorf("official model verifier is unavailable")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	command, err := catalogResolveCodex()
+	if err != nil {
+		return err
+	}
+	artifactPath, err := catalogResolveNativeArtifact(command)
+	if err != nil {
+		return fmt.Errorf("resolve authoritative native Codex artifact: %w", err)
+	}
+	canonical, err := filepath.EvalSymlinks(artifactPath)
+	if err != nil {
+		return fmt.Errorf("resolve native Codex artifact %s: %w", artifactPath, err)
+	}
+	if canonical != v.baseline.CanonicalPath {
+		return fmt.Errorf("native Codex artifact path changed: baseline=%s current=%s; run catalog refresh", v.baseline.CanonicalPath, canonical)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return fmt.Errorf("stat native Codex artifact %s: %w", canonical, err)
+	}
+	if v.lastInfo != nil && os.SameFile(v.lastInfo, info) && v.lastInfo.Size() == info.Size() && v.lastInfo.ModTime().Equal(info.ModTime()) {
+		return nil
+	}
+	identity, err := catalogComputeNativeIdentity(canonical)
+	if err != nil {
+		return err
+	}
+	if !sameNativeArtifactIdentity(v.baseline, identity) {
+		return fmt.Errorf("native Codex artifact hash changed; run catalog refresh")
+	}
+	v.lastInfo = info
+	return nil
 }

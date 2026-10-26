@@ -35,6 +35,8 @@ type wopalWebsocketSession struct {
 	state         compaction.ConversationState
 	logger        *activity.Logger
 	model         string
+	providerID    string
+	resolveRoute  RouteResolver
 	request       *http.Request
 	nativeReplay  *compaction.NativeBridge
 	clientWatcher *clientfp.Watcher
@@ -46,12 +48,16 @@ func isWebsocketUpgrade(req *http.Request) bool {
 }
 
 func serveWopalWebsocketBridge(c *gin.Context, logger *activity.Logger, model string) {
+	serveExternalWebsocketBridge(c, logger, model, "wopal-ai", legacyRouteResolver)
+}
+
+func serveExternalWebsocketBridge(c *gin.Context, logger *activity.Logger, model, providerID string, resolve RouteResolver) {
 	conn, err := wopalWebsocketUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		logger.Write(map[string]any{"event": "wopal_ws_upgrade_failed", "model": model, "error": err.Error()})
 		return
 	}
-	s := &wopalWebsocketSession{conn: conn, logger: logger, model: model, request: c.Request.Clone(c.Request.Context())}
+	s := &wopalWebsocketSession{conn: conn, logger: logger, model: model, providerID: providerID, resolveRoute: resolve, request: c.Request.Clone(c.Request.Context())}
 	if bridge, ok := c.Get("native_compaction_bridge"); ok {
 		s.nativeReplay, _ = bridge.(*compaction.NativeBridge)
 	}
@@ -100,7 +106,7 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activity.Logger, model st
 				payload = rewritten
 			}
 		}
-		if reconnectForWebsocketRouteChange(conn, routing.Wopal, payload, logger) {
+		if reconnectForWebsocketRouteChange(conn, s.providerID, payload, logger, s.resolveRoute) {
 			return
 		}
 		var message map[string]any

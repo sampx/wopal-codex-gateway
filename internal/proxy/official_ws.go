@@ -32,6 +32,10 @@ const (
 var officialWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
 func serveOfficialWebsocketBridge(c *gin.Context, logger *activity.Logger, target *url.URL, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge) {
+	serveOfficialWebsocketBridgeWithResolver(c, logger, target, quotaGuard, accountID, boundModel, nativeReplay, legacyRouteResolver)
+}
+
+func serveOfficialWebsocketBridgeWithResolver(c *gin.Context, logger *activity.Logger, target *url.URL, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge, resolve RouteResolver) {
 	// Dial upstream before upgrading the client so a failed dial still returns
 	// a clean HTTP error instead of a half-open websocket.
 	upstreamConn, upstreamResponse, err := dialOfficialWebsocketUpstream(c, target)
@@ -74,7 +78,7 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activity.Logger, targe
 	clientRequest := c.Request.Clone(c.Request.Context())
 	var clientWriteMu sync.Mutex
 	var upstreamWriteMu sync.Mutex
-	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger, quotaGuard, accountID, boundModel, nativeReplay, clientRequest, &clientWriteMu, &upstreamWriteMu)
+	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger, quotaGuard, accountID, boundModel, nativeReplay, clientRequest, &clientWriteMu, &upstreamWriteMu, resolve)
 	go pumpOfficialWebsocket(upstreamConn, clientConn, done, false, logger, quotaGuard, accountID, boundModel, nil, nil, &upstreamWriteMu, &clientWriteMu)
 
 	<-done
@@ -88,7 +92,7 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activity.Logger, targe
 
 // pumpOfficialWebsocket copies frames one direction. Each connection has exactly
 // one reader and one writer goroutine, which websocket.Conn requires.
-func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activity.Logger, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge, clientRequest *http.Request, sourceWriteMu, targetWriteMu *sync.Mutex) {
+func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activity.Logger, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge, clientRequest *http.Request, sourceWriteMu, targetWriteMu *sync.Mutex, resolvers ...RouteResolver) {
 	defer func() { done <- struct{}{} }()
 	for {
 		messageType, payload, err := source.ReadMessage()
@@ -107,7 +111,11 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 			return
 		}
 		isDataFrame := messageType == websocket.TextMessage || messageType == websocket.BinaryMessage
-		if rewriteClientFrames && isDataFrame && reconnectForWebsocketRouteChange(source, routing.Official, payload, logger) {
+		resolve := legacyRouteResolver
+		if len(resolvers) > 0 && resolvers[0] != nil {
+			resolve = resolvers[0]
+		}
+		if rewriteClientFrames && isDataFrame && reconnectForWebsocketRouteChange(source, "official", payload, logger, resolve) {
 			return
 		}
 		if rewriteClientFrames && isDataFrame {
