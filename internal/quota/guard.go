@@ -110,6 +110,7 @@ type Guard struct {
 	failoverActive bool
 	failoverSince  time.Time
 	failoverModel  string
+	failoverTarget string
 	recoveryKey    string
 	// The generation tuple the current recoveryKey was minted for. A timer may only
 	// be reused when all three still match the incoming failover.
@@ -396,6 +397,10 @@ func internalMeteredOfficialModel(model string) bool {
 }
 
 func (g *Guard) BlockedModel(accountID, model string, now time.Time) (bool, string) {
+	return g.BlockedModelWithTarget(accountID, model, routing.OfficialQuotaFailoverModel, now)
+}
+
+func (g *Guard) BlockedModelWithTarget(accountID, model, effectiveModel string, now time.Time) (bool, string) {
 	if quotaExemptOfficialModel(model) {
 		return false, ""
 	}
@@ -406,7 +411,9 @@ func (g *Guard) BlockedModel(accountID, model string, now time.Time) (bool, stri
 	if internalMeteredOfficialModel(model) {
 		return true, reason
 	}
-	g.enterFailover(model, reason, accountID, now)
+	if strings.TrimSpace(effectiveModel) != "" {
+		g.enterFailover(model, effectiveModel, reason, accountID, now)
+	}
 	return true, reason
 }
 
@@ -414,7 +421,7 @@ func (g *Guard) BlockedModel(accountID, model string, now time.Time) (bool, stri
 // recovery notification for the moment the protected window resets. It is called
 // only from the model-scoped guard used by the routing paths, so it sees exactly
 // the requests that were replaced instead of failing.
-func (g *Guard) enterFailover(requestedModel, reason, accountID string, now time.Time) {
+func (g *Guard) enterFailover(requestedModel, effectiveModel, reason, accountID string, now time.Time) {
 	if g == nil {
 		return
 	}
@@ -425,6 +432,7 @@ func (g *Guard) enterFailover(requestedModel, reason, accountID string, now time
 	g.failoverActive = true
 	g.failoverSince = now
 	g.failoverModel = requestedModel
+	g.failoverTarget = effectiveModel
 	// Reuse the armed timer only when this really is the same failover generation:
 	// a different reason (five-hour -> weekly), a different window or a different
 	// model needs its own key, or the old timer would later clear protection that
@@ -452,12 +460,12 @@ func (g *Guard) enterFailover(requestedModel, reason, accountID string, now time
 	if firstEntry {
 		g.logger.Write(map[string]any{
 			"event": "official_quota_failover_entered", "requested_model": requestedModel,
-			"effective_model": routing.OfficialQuotaFailoverModel, "reason": reason,
+			"effective_model": effectiveModel, "reason": reason,
 			"reset_at": resetAt.UTC().Format(time.RFC3339),
 		})
 	}
 
-	notified := g.notifyFailover(requestedModel, routing.OfficialQuotaFailoverModel, reason, resetAt, now)
+	notified := g.notifyFailover(requestedModel, effectiveModel, reason, resetAt, now)
 	if firstEntry {
 		g.logger.Write(map[string]any{
 			"event": "official_quota_failover_notified", "requested_model": requestedModel,
@@ -509,6 +517,7 @@ func (g *Guard) notifyRecovered(requestedModel, reason string, resetAt time.Time
 	g.failoverActive = false
 	g.failoverSince = time.Time{}
 	g.failoverModel = ""
+	g.failoverTarget = ""
 	g.recoveryKey = ""
 	g.failoverMu.Unlock()
 	if g.notifier == nil {
@@ -529,7 +538,7 @@ func (g *Guard) FailoverStatus() map[string]any {
 	if g.failoverActive {
 		status["since"] = g.failoverSince.UTC().Format(time.RFC3339)
 		status["requested_model"] = g.failoverModel
-		status["effective_model"] = routing.OfficialQuotaFailoverModel
+		status["effective_model"] = g.failoverTarget
 	}
 	return status
 }

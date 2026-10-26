@@ -16,10 +16,12 @@ import (
 )
 
 type gatewaySnapshot struct {
-	gateway  *config.GatewayConfig
-	registry *provider.Registry
-	routes   *routing.Table
-	baseline *catalog.OfficialModelsBaseline
+	gateway          *config.GatewayConfig
+	registry         *provider.Registry
+	routes           *routing.Table
+	baseline         *catalog.OfficialModelsBaseline
+	officialFallback provider.ResolvedRole
+	compaction       provider.ResolvedRole
 }
 
 func loadGatewaySnapshot(root, gatewayConfigPath string) (*gatewaySnapshot, error) {
@@ -41,6 +43,11 @@ func loadGatewaySnapshot(root, gatewayConfigPath string) (*gatewaySnapshot, erro
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", gatewayConfigPath, err)
 	}
+	if err := provider.ValidateExplicitRoles(resolved, registry); err != nil {
+		return nil, fmt.Errorf("%s: %w", gatewayConfigPath, err)
+	}
+	officialFallback := provider.ResolveRole(resolved, registry, provider.RoleOfficialFallback)
+	compactionRole := provider.ResolveRole(resolved, registry, provider.RoleCompaction)
 	baseline, err := catalog.LoadOfficialModelsBaseline()
 	if err != nil {
 		return nil, err
@@ -69,7 +76,14 @@ func loadGatewaySnapshot(root, gatewayConfigPath string) (*gatewaySnapshot, erro
 		external[model.ClientModel] = routing.Route{Kind: kind, ProviderID: model.ProviderID}
 	}
 	routes := routing.NewTable(external, baseline.Slugs, verifier.Verify)
-	return &gatewaySnapshot{gateway: resolved, registry: registry, routes: routes, baseline: baseline}, nil
+	return &gatewaySnapshot{
+		gateway:          resolved,
+		registry:         registry,
+		routes:           routes,
+		baseline:         baseline,
+		officialFallback: officialFallback,
+		compaction:       compactionRole,
+	}, nil
 }
 
 type runtimeBackend struct {

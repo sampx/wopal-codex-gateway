@@ -144,7 +144,7 @@ func buildGatewayServiceWithRuntime(root string, gateway *config.GatewayConfig, 
 	return buildGatewayServiceWithRuntimeLogger(root, gateway, wopalKey, providerKeys, instance, resolve, freezeSnapshot, nil)
 }
 
-func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayConfig, wopalKey string, providerKeys map[string]string, instance string, resolve proxy.RouteResolver, freezeSnapshot bool, sharedLogger *activity.Logger) (*cliproxy.Service, *activity.Logger, error) {
+func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayConfig, wopalKey string, providerKeys map[string]string, instance string, resolve proxy.RouteResolver, freezeSnapshot bool, sharedLogger *activity.Logger, roleSets ...proxy.RuntimeRoles) (*cliproxy.Service, *activity.Logger, error) {
 	// The SDK request logger is disabled at construction time (see
 	// disableSDKRequestLogging): no request-logging middleware is installed, so
 	// no request or response body can be written to disk.
@@ -174,7 +174,11 @@ func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayCo
 
 	middleware := proxy.RoutingMiddleware(logger, quotaGuard)
 	if resolve != nil {
-		middleware = proxy.RoutingMiddlewareWithResolver(logger, quotaGuard, resolve)
+		roles := proxy.RuntimeRoles{}
+		if len(roleSets) > 0 {
+			roles = roleSets[0]
+		}
+		middleware = proxy.RoutingMiddlewareWithResolverAndRoles(logger, quotaGuard, resolve, roles)
 	}
 	builder := cliproxy.NewBuilder().
 		WithConfig(cliConfig).

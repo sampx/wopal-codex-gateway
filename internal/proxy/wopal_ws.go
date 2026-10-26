@@ -27,20 +27,21 @@ var wopalWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request)
 const maxWopalSessionStateBytes = 256 << 20
 
 type wopalWebsocketSession struct {
-	conn          *websocket.Conn
-	writeMu       sync.Mutex
-	activeMu      sync.Mutex
-	stateMu       sync.Mutex
-	cancel        context.CancelFunc
-	state         compaction.ConversationState
-	logger        *activity.Logger
-	model         string
-	providerID    string
-	resolveRoute  RouteResolver
-	request       *http.Request
-	nativeReplay  *compaction.NativeBridge
-	clientWatcher *clientfp.Watcher
-	emit          func([]byte) error
+	conn            *websocket.Conn
+	writeMu         sync.Mutex
+	activeMu        sync.Mutex
+	stateMu         sync.Mutex
+	cancel          context.CancelFunc
+	state           compaction.ConversationState
+	logger          *activity.Logger
+	model           string
+	providerID      string
+	resolveRoute    RouteResolver
+	compactionModel string
+	request         *http.Request
+	nativeReplay    *compaction.NativeBridge
+	clientWatcher   *clientfp.Watcher
+	emit            func([]byte) error
 }
 
 func isWebsocketUpgrade(req *http.Request) bool {
@@ -52,12 +53,16 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activity.Logger, model st
 }
 
 func serveExternalWebsocketBridge(c *gin.Context, logger *activity.Logger, model, providerID string, resolve RouteResolver) {
+	serveExternalWebsocketBridgeWithCompaction(c, logger, model, providerID, resolve, compaction.DedicatedModel)
+}
+
+func serveExternalWebsocketBridgeWithCompaction(c *gin.Context, logger *activity.Logger, model, providerID string, resolve RouteResolver, compactionModel string) {
 	conn, err := wopalWebsocketUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		logger.Write(map[string]any{"event": "wopal_ws_upgrade_failed", "model": model, "error": err.Error()})
 		return
 	}
-	s := &wopalWebsocketSession{conn: conn, logger: logger, model: model, providerID: providerID, resolveRoute: resolve, request: c.Request.Clone(c.Request.Context())}
+	s := &wopalWebsocketSession{conn: conn, logger: logger, model: model, providerID: providerID, resolveRoute: resolve, compactionModel: compactionModel, request: c.Request.Clone(c.Request.Context())}
 	if bridge, ok := c.Get("native_compaction_bridge"); ok {
 		s.nativeReplay, _ = bridge.(*compaction.NativeBridge)
 	}
@@ -152,12 +157,16 @@ func (s *wopalWebsocketSession) prepareTurn(ctx context.Context, message map[str
 }
 
 func (s *wopalWebsocketSession) prepareCompactionTurn(ctx context.Context, message map[string]any) (compaction.PreparedTurn, error) {
+	compactionModel := strings.TrimSpace(s.compactionModel)
+	if compactionModel == "" {
+		return compaction.PreparedTurn{}, fmt.Errorf("model_role_unavailable: compaction role is unavailable")
+	}
 	if err := s.nativeReplay.Expand(ctx, s.request, message); err != nil {
 		return compaction.PreparedTurn{}, err
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	return compaction.PrepareSummaryTurn(message, compaction.DedicatedModel, s.state)
+	return compaction.PrepareSummaryTurn(message, compactionModel, s.state)
 }
 
 func validateWopalSessionStateSize(requestBytes, outputBytes int) error {
@@ -388,7 +397,12 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 }
 
 func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnID string, started time.Time, message map[string]any) {
-	compactionModel := compaction.DedicatedModel
+	compactionModel := strings.TrimSpace(s.compactionModel)
+	if compactionModel == "" {
+		s.clearActive()
+		s.sendError(http.StatusServiceUnavailable, "model_role_unavailable", "compaction model role is unavailable")
+		return
+	}
 	prepared, err := s.prepareCompactionTurn(ctx, message)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -410,7 +424,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 		return
 	}
 	s.logger.Write(map[string]any{
-		"event": "compaction_started", "turn_id": turnID, "provider": "wopal-ai", "client_model": compactionModel,
+		"event": "compaction_started", "turn_id": turnID, "provider": s.providerID, "client_model": compactionModel,
 	})
 
 	target := "http://" + s.request.Host + "/v1/responses"

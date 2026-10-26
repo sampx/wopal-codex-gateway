@@ -420,6 +420,96 @@ func (c QuotaConfig) MarshalJSON() ([]byte, error) {
 	return marshalWithExtensions(plain(c), c.extensions)
 }
 
+const (
+	DefaultModelRoleProvider = "wopal-ai"
+	DefaultModelRoleModel    = "deepseek-v4.1-flash"
+)
+
+type ModelRoleRef struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+
+	extensions extensionFields
+}
+
+func (r *ModelRoleRef) UnmarshalJSON(data []byte) error {
+	type plain ModelRoleRef
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "provider", "model")
+	if err != nil {
+		return err
+	}
+	*r = ModelRoleRef(decoded)
+	r.extensions = extensions
+	return nil
+}
+
+func (r ModelRoleRef) MarshalJSON() ([]byte, error) {
+	type plain ModelRoleRef
+	return marshalWithExtensions(plain(r), r.extensions)
+}
+
+func (r ModelRoleRef) Clone() ModelRoleRef {
+	clone := r
+	clone.extensions = r.extensions.Clone()
+	return clone
+}
+
+type ModelRolesConfig struct {
+	OfficialFallback *ModelRoleRef `json:"officialFallback,omitempty"`
+	Compaction       *ModelRoleRef `json:"compaction,omitempty"`
+
+	extensions extensionFields
+}
+
+func (c *ModelRolesConfig) UnmarshalJSON(data []byte) error {
+	type plain ModelRolesConfig
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "officialFallback", "compaction")
+	if err != nil {
+		return err
+	}
+	*c = ModelRolesConfig(decoded)
+	c.extensions = extensions
+	return nil
+}
+
+func (c ModelRolesConfig) MarshalJSON() ([]byte, error) {
+	type plain ModelRolesConfig
+	return marshalWithExtensions(plain(c), c.extensions)
+}
+
+func (c ModelRolesConfig) Clone() ModelRolesConfig {
+	clone := c
+	if c.OfficialFallback != nil {
+		value := c.OfficialFallback.Clone()
+		clone.OfficialFallback = &value
+	}
+	if c.Compaction != nil {
+		value := c.Compaction.Clone()
+		clone.Compaction = &value
+	}
+	clone.extensions = c.extensions.Clone()
+	return clone
+}
+
+func (c ModelRolesConfig) ReferencedRole(providerID string) string {
+	providerID = strings.TrimSpace(providerID)
+	if c.OfficialFallback != nil && strings.TrimSpace(c.OfficialFallback.Provider) == providerID {
+		return "officialFallback"
+	}
+	if c.Compaction != nil && strings.TrimSpace(c.Compaction.Provider) == providerID {
+		return "compaction"
+	}
+	return ""
+}
+
 // GatewayConfig is the single in-memory form of runtime/config.json. The CLI
 // and the daemon read and write it through the same parser so a value can never
 // mean one thing in `config show` and another in `serve`.
@@ -428,6 +518,7 @@ type GatewayConfig struct {
 	Listen        ListenConfig              `json:"listen"`
 	WopalAI       WopalAIConfig             `json:"wopalAi"`
 	Providers     map[string]ProviderConfig `json:"providers,omitempty"`
+	ModelRoles    ModelRolesConfig          `json:"modelRoles,omitempty"`
 	Notifications NotificationsConfig       `json:"notifications,omitempty"`
 	Logs          Logs                      `json:"logs,omitempty"`
 	Quota         QuotaConfig               `json:"quota,omitempty"`
@@ -441,7 +532,7 @@ func (c *GatewayConfig) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	extensions, err := decodeExtensionFields(data, "version", "listen", "wopalAi", "providers", "notifications", "logs", "quota")
+	extensions, err := decodeExtensionFields(data, "version", "listen", "wopalAi", "providers", "modelRoles", "notifications", "logs", "quota")
 	if err != nil {
 		return err
 	}

@@ -52,7 +52,7 @@ func prepareWopalHTTP(c *gin.Context, logger *activity.Logger, model string, nat
 		if compactEndpoint {
 			message["input"] = append(input, map[string]any{"type": "compaction_trigger"})
 		}
-		s := &wopalWebsocketSession{request: c.Request, model: model, logger: logger, nativeReplay: nativeReplay}
+		s := &wopalWebsocketSession{request: c.Request, model: model, compactionModel: model, logger: logger, nativeReplay: nativeReplay}
 		s.emit = func(payload []byte) error {
 			if !compactEndpoint {
 				c.Header("Content-Type", "text/event-stream")

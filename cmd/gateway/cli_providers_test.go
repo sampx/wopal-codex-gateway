@@ -103,6 +103,21 @@ func TestProvidersRemoveDeletesProvider(t *testing.T) {
 	}
 }
 
+func TestProvidersRemoveRejectsProviderReferencedByRole(t *testing.T) {
+	setupConfigAuthTestRoot(t)
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.Providers["p"] = config.ProviderConfig{BaseURL: "https://example.test", Models: []config.ExternalModelConfig{{Name: "m", Protocol: config.ProtocolOpenAIChat}}}
+	cfg.ModelRoles.Compaction = &config.ModelRoleRef{Provider: "p", Model: "m"}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	err := runProvidersCommand("remove", []string{"p"})
+	if err == nil || !strings.Contains(err.Error(), "compaction") {
+		t.Fatalf("remove error = %v, want role reference", err)
+	}
+}
+
 func TestProvidersSetRejectsExistingDuplicateClientNamesBeforeWrite(t *testing.T) {
 	root := setupConfigAuthTestRoot(t)
 	path := filepath.Join(root, "runtime", "config.json")

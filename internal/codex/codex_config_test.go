@@ -109,6 +109,26 @@ func TestApplyGatewayDoesNotWriteModel(t *testing.T) {
 	}
 }
 
+func TestApplyGatewayUsesConfiguredCompactionModel(t *testing.T) {
+	text := `[memories]
+extract_model = "old-extract"
+consolidation_model = "old-consolidation"
+`
+	applied := applyGatewayConfigWithMemoryModel(
+		text,
+		"/tmp/wopal-models.json",
+		"http://127.0.0.1:11435/v1",
+		"vendor/friendly",
+	)
+
+	if !strings.Contains(applied, `extract_model = "vendor/friendly"`) {
+		t.Fatalf("apply did not use compaction role for extract_model:\n%s", applied)
+	}
+	if !strings.Contains(applied, `consolidation_model = "vendor/friendly"`) {
+		t.Fatalf("apply did not use compaction role for consolidation_model:\n%s", applied)
+	}
+}
+
 func TestApplyGatewayQuotesStringsAsJSON(t *testing.T) {
 	applied := applyGatewayConfig("", "/tmp/models.json", `http://127.0.0.1:11435/v1?name="quoted"`)
 	state := captureRestoreState(applied)

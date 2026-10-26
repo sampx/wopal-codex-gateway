@@ -278,10 +278,14 @@ func mergeGatewayRestoreState(saved, current CodexRestoreState) CodexRestoreStat
 }
 
 func applyGatewayConfig(text, modelCatalogPath, gatewayBaseURL string) string {
+	return applyGatewayConfigWithMemoryModel(text, modelCatalogPath, gatewayBaseURL, codexManagedMemoryModel)
+}
+
+func applyGatewayConfigWithMemoryModel(text, modelCatalogPath, gatewayBaseURL, memoryModel string) string {
 	next := setRootString(text, codexManagedModelCatalogJSONKey, modelCatalogPath)
 	next = setRootString(next, codexManagedOpenAIBaseURLKey, gatewayBaseURL)
-	next = setSectionString(next, codexManagedMemoriesSection, codexManagedMemoryExtractModelKey, codexManagedMemoryModel)
-	next = setSectionString(next, codexManagedMemoriesSection, codexManagedMemoryConsolidationKey, codexManagedMemoryModel)
+	next = setSectionString(next, codexManagedMemoriesSection, codexManagedMemoryExtractModelKey, memoryModel)
+	next = setSectionString(next, codexManagedMemoriesSection, codexManagedMemoryConsolidationKey, memoryModel)
 	return next
 }
 

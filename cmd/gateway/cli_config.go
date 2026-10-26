@@ -8,6 +8,7 @@ import (
 
 	"wopal-codex-gateway/internal/catalog"
 	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/provider"
 )
 
 func runConfigCommand(subcommand string, args []string) error {
@@ -18,8 +19,119 @@ func runConfigCommand(subcommand string, args []string) error {
 		return runConfigShow()
 	case "wopal":
 		return runConfigWopal(args)
+	case "role":
+		return runConfigRole(args)
 	default:
 		return fmt.Errorf("unknown config subcommand: %s", subcommand)
+	}
+}
+
+func runConfigRole(args []string) error {
+	cfg, err := config.LoadGatewayConfig(config.ConfigPath())
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		resolvedCfg, err := resolveRuntimeModels(cfg)
+		if err != nil {
+			return err
+		}
+		registry, err := provider.Build(resolvedCfg)
+		if err != nil {
+			return err
+		}
+		for _, name := range []provider.RoleName{provider.RoleOfficialFallback, provider.RoleCompaction} {
+			role := provider.ResolveRole(resolvedCfg, registry, name)
+			fmt.Printf("%s provider=%s upstream=%s", role.Name, role.ProviderID, role.UpstreamModel)
+			if role.ClientModel != "" {
+				fmt.Printf(" client=%s", role.ClientModel)
+			}
+			fmt.Printf(" source=%s status=%s", role.Source, role.Status)
+			if role.Reason != "" {
+				fmt.Printf(" reason=%s", role.Reason)
+			}
+			fmt.Println()
+		}
+		return nil
+	}
+
+	switch args[0] {
+	case "set":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: %s config role set <official-fallback|compaction> --provider <id> --model <upstream-name>", binaryName)
+		}
+		name, err := parseConfigRoleName(args[1])
+		if err != nil {
+			return err
+		}
+		providerID, ok := option(args[2:], "--provider")
+		if !ok || strings.TrimSpace(providerID) == "" {
+			return fmt.Errorf("config role set requires --provider")
+		}
+		model, ok := option(args[2:], "--model")
+		if !ok || strings.TrimSpace(model) == "" {
+			return fmt.Errorf("config role set requires --model")
+		}
+		ref := &config.ModelRoleRef{Provider: strings.TrimSpace(providerID), Model: strings.TrimSpace(model)}
+		switch name {
+		case provider.RoleOfficialFallback:
+			cfg.ModelRoles.OfficialFallback = ref
+		case provider.RoleCompaction:
+			cfg.ModelRoles.Compaction = ref
+		}
+		resolvedCfg, err := resolveRuntimeModels(cfg)
+		if err != nil {
+			return err
+		}
+		registry, err := provider.Build(resolvedCfg)
+		if err != nil {
+			return err
+		}
+		resolved := provider.ResolveRole(resolvedCfg, registry, name)
+		if resolved.Status != provider.RoleReady {
+			return fmt.Errorf("model role %s is invalid: %s", name, resolved.Reason)
+		}
+		if err := config.SaveGatewayConfig(cfg); err != nil {
+			return err
+		}
+		if err := signalGatewayReloadAfterCommit(); err != nil {
+			return fmt.Errorf("model role saved but gateway reload failed: %w", err)
+		}
+		return nil
+	case "reset":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: %s config role reset <official-fallback|compaction>", binaryName)
+		}
+		name, err := parseConfigRoleName(args[1])
+		if err != nil {
+			return err
+		}
+		switch name {
+		case provider.RoleOfficialFallback:
+			cfg.ModelRoles.OfficialFallback = nil
+		case provider.RoleCompaction:
+			cfg.ModelRoles.Compaction = nil
+		}
+		if err := config.SaveGatewayConfig(cfg); err != nil {
+			return err
+		}
+		if err := signalGatewayReloadAfterCommit(); err != nil {
+			return fmt.Errorf("model role reset but gateway reload failed: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown config role command %q", args[0])
+	}
+}
+
+func parseConfigRoleName(value string) (provider.RoleName, error) {
+	switch strings.TrimSpace(value) {
+	case "official-fallback":
+		return provider.RoleOfficialFallback, nil
+	case "compaction":
+		return provider.RoleCompaction, nil
+	default:
+		return "", fmt.Errorf("model role must be official-fallback or compaction")
 	}
 }
 

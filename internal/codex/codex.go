@@ -16,9 +16,13 @@ import (
 )
 
 // InstallIntoCodex points Codex at the gateway and records the pre-install state.
-func InstallIntoCodex(cfg *config.GatewayConfig) (*catalog.CatalogRefreshResult, error) {
+func InstallIntoCodex(cfg *config.GatewayConfig, compactionModel string) (*catalog.CatalogRefreshResult, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("gateway configuration is missing")
+	}
+	compactionModel = strings.TrimSpace(compactionModel)
+	if compactionModel == "" {
+		return nil, fmt.Errorf("model_role_unavailable: compaction role is unavailable")
 	}
 	if strings.TrimSpace(cfg.WopalAI.BaseURL) == "" {
 		return nil, fmt.Errorf("Wopal AI base URL is not configured. Run: wopal-codex-gateway config wopal --base-url <url>")
@@ -78,7 +82,7 @@ func InstallIntoCodex(cfg *config.GatewayConfig) (*catalog.CatalogRefreshResult,
 		}
 	}
 
-	nextText := applyGatewayConfig(currentText, config.CodexGatewayCatalogPath(), gatewayBaseURL)
+	nextText := applyGatewayConfigWithMemoryModel(currentText, config.CodexGatewayCatalogPath(), gatewayBaseURL, compactionModel)
 	if err := writeCodexFileAtomic(configFile, nextText); err != nil {
 		return nil, err
 	}

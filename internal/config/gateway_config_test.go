@@ -19,6 +19,38 @@ func writeGatewayConfigFile(t *testing.T, body string) string {
 	return path
 }
 
+func TestGatewayConfigRoundTripPreservesModelRolesAndUnknownRoleFields(t *testing.T) {
+	root := t.TempDir()
+	restore := SetProjectRootForTest(root)
+	defer restore()
+	if err := os.MkdirAll(StateDirFor(root), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"version":1,"wopalAi":{"baseUrl":"https://wopal.test/v1"},"modelRoles":{"officialFallback":{"provider":"vendor","model":"x","future":"keep"},"futureRole":{"x":1}}}`
+	if err := os.WriteFile(ConfigPathFor(root), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGatewayConfig(ConfigPathFor(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ModelRoles.OfficialFallback == nil || cfg.ModelRoles.OfficialFallback.Provider != "vendor" || cfg.ModelRoles.OfficialFallback.Model != "x" {
+		t.Fatalf("role = %+v", cfg.ModelRoles.OfficialFallback)
+	}
+	if err := SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(ConfigPathFor(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"future": "keep"`, `"futureRole"`} {
+		if !strings.Contains(string(saved), want) {
+			t.Fatalf("saved config lost %s: %s", want, saved)
+		}
+	}
+}
+
 func TestGatewayConfigRejectsMissingVersion(t *testing.T) {
 	path := writeGatewayConfigFile(t, `{"listen":{"host":"127.0.0.1","port":11435},"wopalAi":{"baseUrl":"https://example.test/v1"}}`)
 	_, err := LoadGatewayConfig(path)

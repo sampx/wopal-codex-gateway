@@ -15,6 +15,8 @@ import (
 	"wopal-codex-gateway/internal/activity"
 	"wopal-codex-gateway/internal/config"
 	"wopal-codex-gateway/internal/keychain"
+	"wopal-codex-gateway/internal/provider"
+	"wopal-codex-gateway/internal/proxy"
 )
 
 var (
@@ -82,7 +84,8 @@ func startGatewayBackendWithLogger(root, gatewayConfigPath, instance string, sha
 	internal := *snapshot.gateway
 	internal.Listen.Host = "127.0.0.1"
 	internal.Listen.Port = port
-	service, logger, err := buildGatewayServiceWithRuntimeLogger(root, &internal, wopalKey, providerKeys, instance, snapshot.routes.Resolve, true, sharedLogger)
+	roles := runtimeRolesForSnapshot(snapshot)
+	service, logger, err := buildGatewayServiceWithRuntimeLogger(root, &internal, wopalKey, providerKeys, instance, snapshot.routes.Resolve, true, sharedLogger, roles)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -123,6 +126,23 @@ func startGatewayBackendWithLogger(root, gatewayConfigPath, instance string, sha
 	backend.logger = logger
 	backend.target = target
 	return backend, snapshot, nil
+}
+
+func runtimeRolesForSnapshot(snapshot *gatewaySnapshot) proxy.RuntimeRoles {
+	if snapshot == nil {
+		return proxy.RuntimeRoles{}
+	}
+	toTarget := func(role provider.ResolvedRole) proxy.RoleTarget {
+		return proxy.RoleTarget{
+			ProviderID:  role.ProviderID,
+			ClientModel: role.ClientModel,
+			Ready:       role.Status == provider.RoleReady,
+		}
+	}
+	return proxy.RuntimeRoles{
+		OfficialFallback: toTarget(snapshot.officialFallback),
+		Compaction:       toTarget(snapshot.compaction),
+	}
 }
 
 func reloadGatewayBackend(root, gatewayConfigPath, instance string, listen config.ListenConfig, sharedLogger *activity.Logger) (*runtimeBackend, error) {

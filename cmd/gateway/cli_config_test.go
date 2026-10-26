@@ -221,3 +221,76 @@ func TestConfigToolModeFlagPersistsAndRejectsInvalidValue(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigRoleSetListAndReset(t *testing.T) {
+	setupConfigAuthTestRoot(t)
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.Providers["vendor"] = config.ProviderConfig{
+		BaseURL: "https://vendor.test",
+		Models:  []config.ExternalModelConfig{{Name: "upstream", Alias: "friendly", Protocol: config.ProtocolOpenAIResponses}},
+	}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runConfigCommand("role", []string{"set", "official-fallback", "--provider", "vendor", "--model", "upstream"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureConfigAuthTestStdout(t, func() error { return runConfigCommand("role", nil) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"officialFallback provider=vendor upstream=upstream client=friendly source=explicit status=ready",
+		"compaction provider=wopal-ai upstream=deepseek-v4.1-flash source=default status=unavailable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("role output missing %q:\n%s", want, out)
+		}
+	}
+
+	if err := runConfigCommand("role", []string{"reset", "official-fallback"}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.LoadGatewayConfig(config.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.ModelRoles.OfficialFallback != nil {
+		t.Fatalf("role reset left explicit config: %+v", saved.ModelRoles.OfficialFallback)
+	}
+}
+
+func TestConfigRoleSetRejectsMissingOrUnreadyTargetBeforeWrite(t *testing.T) {
+	root := setupConfigAuthTestRoot(t)
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.Providers["vendor"] = config.ProviderConfig{
+		BaseURL: "https://vendor.test",
+		Models:  []config.ExternalModelConfig{{Name: "needs-protocol"}},
+	}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(root, "runtime", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"set", "official-fallback", "--provider", "missing", "--model", "x"},
+		{"set", "compaction", "--provider", "vendor", "--model", "needs-protocol"},
+		{"set", "compaction", "--provider", "official", "--model", "gpt"},
+	} {
+		if err := runConfigCommand("role", args); err == nil {
+			t.Fatalf("role set %v unexpectedly succeeded", args)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(root, "runtime", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("invalid role set changed config")
+	}
+}

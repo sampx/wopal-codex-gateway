@@ -77,6 +77,9 @@ func runProvidersRemove(args []string) error {
 	if _, exists := cfg.Providers[id]; !exists {
 		return fmt.Errorf("provider %q is not configured", id)
 	}
+	if role := cfg.ModelRoles.ReferencedRole(id); role != "" {
+		return fmt.Errorf("provider %q is referenced by model role %s", id, role)
+	}
 	delete(cfg.Providers, id)
 	if _, err := provider.Build(cfg); err != nil {
 		return err

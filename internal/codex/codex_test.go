@@ -86,7 +86,7 @@ func installForTest(t *testing.T, cfg *config.GatewayConfig) error {
 		return &catalog.CatalogRefreshResult{Native: 2, NativeVisible: 1, NativeHidden: 1}, nil
 	}
 
-	_, err := InstallIntoCodex(cfg)
+	_, err := InstallIntoCodex(cfg, "wopal-ai/deepseek-v4.1-flash")
 	return err
 }
 
