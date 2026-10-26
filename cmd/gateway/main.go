@@ -43,7 +43,7 @@ func run(args []string) error {
 		return nil
 	case "serve":
 		return runServe(rest)
-	case "config", "auth", "models", "catalog", "codex", "service", "quota":
+	case "config", "providers", "auth", "models", "catalog", "codex", "service", "quota":
 		return runCommandGroup(command, rest)
 	}
 
@@ -59,6 +59,8 @@ func runCommandGroup(group string, args []string) error {
 	switch group {
 	case "config":
 		return runConfigCommand(subcommand, rest)
+	case "providers":
+		return runProvidersCommand(subcommand, rest)
 	case "auth":
 		return runAuthCommand(subcommand, rest)
 	case "models":
@@ -108,6 +110,8 @@ Commands:
   config migrate --from <existing.json> --to <new.json>                         Prepare a separate version-1 config
   config show                                                                 Print the gateway configuration
   config wopal [--base-url <url>] [--tool-mode code_mode_only|code_mode|direct] [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
+  providers set <provider> --base-url <url> [--base-url-for <protocol>=<url>]... [--models-url <url>] [--models-auth none|provider-key] [--header <name>=<value>]... [--protocol <default>]
+  providers remove <provider>                                                   Remove an unreferenced external provider
   auth set                                                                    Store and validate the Wopal AI API key
   auth test                                                                   Validate the stored Wopal AI API key
   auth status                                                                 Show whether a key is configured

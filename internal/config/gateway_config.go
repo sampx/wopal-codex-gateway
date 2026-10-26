@@ -3,8 +3,10 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -28,13 +30,22 @@ const (
 	DefaultQuotaMaxStepCap = 5
 	minQuotaMaxStepCap     = 1
 	maxQuotaMaxStepCap     = 10
+
+	ProtocolOpenAIChat        = "openai-chat"
+	ProtocolOpenAIResponses   = "openai-responses"
+	ProtocolAnthropicMessages = "anthropic-messages"
+	ProtocolGemini            = "gemini"
 )
+
+var providerIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 
 // ExternalModelConfig is one Wopal AI model entry in runtime/config.json. The
 // optional fields stay pointers to distinguish user overrides (including false)
 // from capabilities that should resolve through provider metadata and defaults.
 type ExternalModelConfig struct {
 	Name          string `json:"name"`
+	Alias         string `json:"alias,omitempty"`
+	Protocol      string `json:"protocol,omitempty"`
 	ContextWindow *int   `json:"contextWindow,omitempty"`
 	Vision        *bool  `json:"vision,omitempty"`
 	Reasoning     *bool  `json:"reasoning,omitempty"`
@@ -50,7 +61,7 @@ func (m *ExternalModelConfig) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	extensions, err := decodeExtensionFields(data, "name", "contextWindow", "vision", "reasoning")
+	extensions, err := decodeExtensionFields(data, "name", "alias", "protocol", "contextWindow", "vision", "reasoning")
 	if err != nil {
 		return err
 	}
@@ -98,6 +109,102 @@ func (m ExternalModelConfig) SupportsVision() bool {
 // offering the reasoning levels Codex expects.
 func (m ExternalModelConfig) SupportsReasoning() bool {
 	return m.Reasoning == nil || *m.Reasoning
+}
+
+// ProviderConfig is one user-configured external provider. `official` and
+// `wopal-ai` are built-ins and never live in this map.
+type ProviderConfig struct {
+	BaseURL        string                `json:"baseUrl"`
+	BaseURLs       map[string]string     `json:"baseUrls,omitempty"`
+	ModelsURL      string                `json:"modelsUrl,omitempty"`
+	ModelsAuth     string                `json:"modelsAuth,omitempty"`
+	Headers        map[string]string     `json:"headers,omitempty"`
+	Protocol       string                `json:"protocol,omitempty"`
+	ToolMode       string                `json:"toolMode,omitempty"`
+	ExcludedModels []string              `json:"excludedModels,omitempty"`
+	Models         []ExternalModelConfig `json:"models,omitempty"`
+
+	extensions extensionFields
+}
+
+func (c *ProviderConfig) UnmarshalJSON(data []byte) error {
+	type plain ProviderConfig
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	extensions, err := decodeExtensionFields(data, "baseUrl", "baseUrls", "modelsUrl", "modelsAuth", "headers", "protocol", "toolMode", "excludedModels", "models")
+	if err != nil {
+		return err
+	}
+	*c = ProviderConfig(decoded)
+	c.extensions = extensions
+	return nil
+}
+
+func (c ProviderConfig) MarshalJSON() ([]byte, error) {
+	type plain ProviderConfig
+	return marshalWithExtensions(plain(c), c.extensions)
+}
+
+func (c ProviderConfig) Clone() ProviderConfig {
+	clone := c
+	if c.BaseURLs != nil {
+		clone.BaseURLs = make(map[string]string, len(c.BaseURLs))
+		for key, value := range c.BaseURLs {
+			clone.BaseURLs[key] = value
+		}
+	}
+	if c.Headers != nil {
+		clone.Headers = make(map[string]string, len(c.Headers))
+		for key, value := range c.Headers {
+			clone.Headers[key] = value
+		}
+	}
+	if c.ExcludedModels != nil {
+		clone.ExcludedModels = append([]string(nil), c.ExcludedModels...)
+	}
+	if c.Models != nil {
+		clone.Models = make([]ExternalModelConfig, len(c.Models))
+		for index, model := range c.Models {
+			clone.Models[index] = model.Clone()
+		}
+	}
+	clone.extensions = c.extensions.Clone()
+	return clone
+}
+
+func ValidateProviderID(id string) error {
+	if id == "official" || id == "wopal-ai" {
+		return fmt.Errorf("provider id %q is reserved", id)
+	}
+	if !providerIDPattern.MatchString(id) {
+		return fmt.Errorf("provider id %q must be a lowercase slug using letters, digits and hyphens", id)
+	}
+	return nil
+}
+
+func ValidateProtocol(protocol string) error {
+	if protocol == "" {
+		return nil
+	}
+	switch protocol {
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages, ProtocolGemini:
+		return nil
+	default:
+		return fmt.Errorf("protocol %q must be %s, %s, %s or %s", protocol, ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages, ProtocolGemini)
+	}
+}
+
+func ValidateHTTPURL(value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return err
+	}
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("must use http or https and include a host")
+	}
+	return nil
 }
 
 type ListenConfig struct {
@@ -234,12 +341,13 @@ func (c QuotaConfig) MarshalJSON() ([]byte, error) {
 // and the daemon read and write it through the same parser so a value can never
 // mean one thing in `config show` and another in `serve`.
 type GatewayConfig struct {
-	Version       int                 `json:"version,omitempty"`
-	Listen        ListenConfig        `json:"listen"`
-	WopalAI       WopalAIConfig       `json:"wopalAi"`
-	Notifications NotificationsConfig `json:"notifications,omitempty"`
-	Logs          Logs                `json:"logs,omitempty"`
-	Quota         QuotaConfig         `json:"quota,omitempty"`
+	Version       int                       `json:"version,omitempty"`
+	Listen        ListenConfig              `json:"listen"`
+	WopalAI       WopalAIConfig             `json:"wopalAi"`
+	Providers     map[string]ProviderConfig `json:"providers,omitempty"`
+	Notifications NotificationsConfig       `json:"notifications,omitempty"`
+	Logs          Logs                      `json:"logs,omitempty"`
+	Quota         QuotaConfig               `json:"quota,omitempty"`
 
 	extensions extensionFields
 }
@@ -250,7 +358,7 @@ func (c *GatewayConfig) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	extensions, err := decodeExtensionFields(data, "version", "listen", "wopalAi", "notifications", "logs", "quota")
+	extensions, err := decodeExtensionFields(data, "version", "listen", "wopalAi", "providers", "notifications", "logs", "quota")
 	if err != nil {
 		return err
 	}
@@ -351,7 +459,61 @@ func LoadGatewayConfig(path string) (*GatewayConfig, error) {
 	if err := saved.WopalAI.ValidateToolMode(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	if err := saved.ValidateProviders(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	return MergeGatewayConfig(&saved), nil
+}
+
+func (c *GatewayConfig) ValidateProviders() error {
+	if c == nil {
+		return fmt.Errorf("gateway config is nil")
+	}
+	for id, provider := range c.Providers {
+		if err := ValidateProviderID(id); err != nil {
+			return err
+		}
+		if strings.TrimSpace(provider.BaseURL) == "" {
+			return fmt.Errorf("provider %q baseUrl is required", id)
+		}
+		if err := ValidateHTTPURL(provider.BaseURL); err != nil {
+			return fmt.Errorf("provider %q baseUrl %w", id, err)
+		}
+		if err := ValidateProtocol(provider.Protocol); err != nil {
+			return fmt.Errorf("provider %q %w", id, err)
+		}
+		for protocol, baseURL := range provider.BaseURLs {
+			if err := ValidateProtocol(protocol); err != nil || protocol == "" {
+				if err == nil {
+					err = fmt.Errorf("protocol is required")
+				}
+				return fmt.Errorf("provider %q baseUrls: %w", id, err)
+			}
+			if err := ValidateHTTPURL(baseURL); err != nil {
+				return fmt.Errorf("provider %q baseUrls[%q] %w", id, protocol, err)
+			}
+		}
+		if provider.ModelsURL != "" {
+			if err := ValidateHTTPURL(provider.ModelsURL); err != nil {
+				return fmt.Errorf("provider %q modelsUrl %w", id, err)
+			}
+		}
+		if provider.ModelsAuth != "" && provider.ModelsAuth != "none" && provider.ModelsAuth != "provider-key" {
+			return fmt.Errorf("provider %q modelsAuth must be none or provider-key", id)
+		}
+		for _, model := range provider.Models {
+			if strings.TrimSpace(model.Name) == "" {
+				return fmt.Errorf("provider %q has a model with an empty name", id)
+			}
+			if err := ValidateProtocol(model.Protocol); err != nil {
+				return fmt.Errorf("provider %q model %q %w", id, model.Name, err)
+			}
+			if model.Alias != "" && strings.TrimSpace(model.Alias) == "" {
+				return fmt.Errorf("provider %q model %q alias cannot be whitespace", id, model.Name)
+			}
+		}
+	}
+	return nil
 }
 
 // removedConfigSection names a section that earlier configuration versions
@@ -395,6 +557,9 @@ func MergeGatewayConfig(saved *GatewayConfig) *GatewayConfig {
 		merged.Listen.Port = defaults.Listen.Port
 	}
 	merged.Version = gatewayConfigVersion
+	if merged.Providers == nil {
+		merged.Providers = map[string]ProviderConfig{}
+	}
 	merged.WopalAI.BaseURL = strings.TrimSpace(merged.WopalAI.BaseURL)
 	merged.WopalAI.ToolMode = merged.WopalAI.EffectiveToolMode()
 	if merged.WopalAI.Models == nil {
@@ -445,6 +610,9 @@ func LoadInstallConfig() (*GatewayConfig, error) {
 // SaveGatewayConfig writes the configuration atomically with 0600 permissions.
 func SaveGatewayConfig(cfg *GatewayConfig) error {
 	if err := cfg.WopalAI.ValidateToolMode(); err != nil {
+		return err
+	}
+	if err := cfg.ValidateProviders(); err != nil {
 		return err
 	}
 	// Resolve the root before any side effect: an unresolved root must fail the

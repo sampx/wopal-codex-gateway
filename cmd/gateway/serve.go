@@ -22,6 +22,7 @@ import (
 	"wopal-codex-gateway/internal/config"
 	"wopal-codex-gateway/internal/keychain"
 	"wopal-codex-gateway/internal/notify"
+	"wopal-codex-gateway/internal/provider"
 	"wopal-codex-gateway/internal/proxy"
 	"wopal-codex-gateway/internal/quota"
 )
@@ -51,6 +52,9 @@ func runServe(args []string) error {
 		return err
 	}
 	if err := config.ValidateServeConfig(gateway); err != nil {
+		return fmt.Errorf("%s: %w", gatewayConfigPath, err)
+	}
+	if _, err := provider.Build(gateway); err != nil {
 		return fmt.Errorf("%s: %w", gatewayConfigPath, err)
 	}
 	if err := config.SetProjectRoot(root); err != nil {

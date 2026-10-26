@@ -207,3 +207,84 @@ func TestGatewayConfigShapeHasNoOllamaField(t *testing.T) {
 		t.Fatal("GatewayConfig still declares an Olama field")
 	}
 }
+
+func TestGatewayConfigLoadsExternalProvidersAndPreservesExtensions(t *testing.T) {
+	useTempGatewayRoot(t)
+	body := `{"version":1,"wopalAi":{"baseUrl":"https://wopal.example/v1"},"providers":{"opencode-go":{"baseUrl":"https://opencode.example/openai/v1","baseUrls":{"gemini":"https://opencode.example/google"},"modelsUrl":"https://opencode.example/models","modelsAuth":"none","headers":{"x-opencode-session":"literal"},"protocol":"openai-responses","models":[{"name":"gpt-x","alias":"fast","protocol":"openai-responses"}],"future":{"keep":true}}},"futureRoot":{"keep":true}}`
+	cfg, err := LoadGatewayConfig(writeGatewayConfigFile(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := cfg.Providers["opencode-go"]
+	if !ok {
+		t.Fatalf("providers = %#v, want opencode-go", cfg.Providers)
+	}
+	if p.BaseURL != "https://opencode.example/openai/v1" || p.BaseURLs["gemini"] != "https://opencode.example/google" {
+		t.Fatalf("provider URLs = %+v", p)
+	}
+	if p.ModelsURL != "https://opencode.example/models" || p.ModelsAuth != "none" || p.Protocol != ProtocolOpenAIResponses {
+		t.Fatalf("provider discovery/protocol = %+v", p)
+	}
+	if len(p.Models) != 1 || p.Models[0].Alias != "fast" || p.Models[0].Protocol != ProtocolOpenAIResponses {
+		t.Fatalf("provider models = %#v", p.Models)
+	}
+	if err := SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := root["futureRoot"]; !ok {
+		t.Fatalf("top-level extension lost: %s", saved)
+	}
+	var providers map[string]json.RawMessage
+	if err := json.Unmarshal(root["providers"], &providers); err != nil {
+		t.Fatal(err)
+	}
+	providerFields := decodeObject(t, providers["opencode-go"], "provider")
+	if _, ok := providerFields["future"]; !ok {
+		t.Fatalf("provider extension lost: %s", providers["opencode-go"])
+	}
+}
+
+func TestGatewayConfigRejectsInvalidProviderIdentityAndProtocol(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "reserved provider",
+			body: `{"version":1,"wopalAi":{"baseUrl":"https://wopal.example/v1"},"providers":{"official":{"baseUrl":"https://example.test"}}}`,
+			want: "reserved",
+		},
+		{
+			name: "uppercase provider",
+			body: `{"version":1,"wopalAi":{"baseUrl":"https://wopal.example/v1"},"providers":{"OpenCode":{"baseUrl":"https://example.test"}}}`,
+			want: "provider id",
+		},
+		{
+			name: "invalid provider protocol",
+			body: `{"version":1,"wopalAi":{"baseUrl":"https://wopal.example/v1"},"providers":{"opencode":{"baseUrl":"https://example.test","protocol":"bogus"}}}`,
+			want: "protocol",
+		},
+		{
+			name: "invalid model protocol",
+			body: `{"version":1,"wopalAi":{"baseUrl":"https://wopal.example/v1"},"providers":{"opencode":{"baseUrl":"https://example.test","models":[{"name":"m","protocol":"bogus"}]}}}`,
+			want: "protocol",
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := LoadGatewayConfig(writeGatewayConfigFile(t, testCase.body))
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(testCase.want)) {
+				t.Fatalf("LoadGatewayConfig() error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+}
