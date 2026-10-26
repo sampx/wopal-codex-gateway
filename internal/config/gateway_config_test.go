@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -343,6 +344,37 @@ func TestProviderDiscoveryDefaults(t *testing.T) {
 			}
 			if got := tc.provider.EffectiveModelsAuth(); got != tc.wantAuth {
 				t.Fatalf("EffectiveModelsAuth=%q want %q", got, tc.wantAuth)
+			}
+		})
+	}
+}
+
+func TestGatewayConfigProviderHeadersAreRestricted(t *testing.T) {
+	valid := `{"version":1,"wopalAi":{"baseUrl":"https://wopal.example/v1"},"providers":{"p":{"baseUrl":"https://example.test","headers":{"x-session":"$CPA-SESSION-ID","x-static":"literal"}}}}`
+	if _, err := LoadGatewayConfig(writeGatewayConfigFile(t, valid)); err != nil {
+		t.Fatalf("valid provider headers rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		header string
+		value  string
+		want   string
+	}{
+		{"authorization", "Authorization", "literal", "reserved"},
+		{"cookie case insensitive", "cOoKiE", "literal", "reserved"},
+		{"account routing", "ChatGPT-Account-ID", "literal", "reserved"},
+		{"arbitrary client header expansion", "x-session", "$Authorization", "only exact $CPA-SESSION-ID"},
+		{"embedded session expansion", "x-session", "Bearer $CPA-SESSION-ID", "only exact $CPA-SESSION-ID"},
+		{"newline", "x-session", "bad\nvalue", "newline"},
+		{"invalid name", "bad:header", "literal", "header name"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"version":1,"wopalAi":{"baseUrl":"https://wopal.example/v1"},"providers":{"p":{"baseUrl":"https://example.test","headers":{%q:%q}}}}`, tc.header, tc.value)
+			_, err := LoadGatewayConfig(writeGatewayConfigFile(t, body))
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.want)) {
+				t.Fatalf("error = %v, want substring %q", err, tc.want)
 			}
 		})
 	}

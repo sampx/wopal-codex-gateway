@@ -42,7 +42,7 @@ func TestServedGatewayLogsClientVersionAndToolSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service, _, err := buildGatewayService(root, gateway, "test-wopal-key", "clientfp")
+	service, _, err := buildGatewayService(root, gateway, "test-wopal-key", nil, "clientfp")
 	if err != nil {
 		t.Fatalf("build service: %v", err)
 	}

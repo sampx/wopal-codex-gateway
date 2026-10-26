@@ -68,6 +68,10 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	providerKeys, err := loadRuntimeProviderKeys(gateway)
+	if err != nil {
+		return err
+	}
 
 	closeServiceLogs, err := redirectServiceLogs(root, gateway.Logs)
 	if err != nil {
@@ -78,7 +82,7 @@ func runServe(args []string) error {
 	log.SetOutput(os.Stdout)
 	log.AddHook(errorOnlyHook{})
 
-	service, logger, err := buildGatewayService(root, gateway, wopalKey, *instanceFlag)
+	service, logger, err := buildGatewayService(root, gateway, wopalKey, providerKeys, *instanceFlag)
 	if err != nil {
 		return err
 	}
@@ -97,14 +101,14 @@ func runServe(args []string) error {
 // daemon runs it. It is separate from runServe so integration tests can drive
 // the real assembly — the same server options, routing middleware and status
 // handlers — without capturing the process's stdout and stderr.
-func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, instance string) (*cliproxy.Service, *activity.Logger, error) {
+func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey string, providerKeys map[string]string, instance string) (*cliproxy.Service, *activity.Logger, error) {
 	// The SDK request logger is disabled at construction time (see
 	// disableSDKRequestLogging): no request-logging middleware is installed, so
 	// no request or response body can be written to disk.
 	requestBodyLogging := requestBodyLoggingState
 
 	compaction.ConfigureKey(wopalKey)
-	cliConfig, cliConfigPath, err := config.BuildCLIProxyConfig(root, gateway, wopalKey)
+	cliConfig, cliConfigPath, err := config.BuildCLIProxyConfig(root, gateway, wopalKey, providerKeys)
 	if err != nil {
 		return nil, nil, err
 	}

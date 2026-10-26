@@ -38,6 +38,16 @@ const (
 )
 
 var providerIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+var providerHeaderNamePattern = regexp.MustCompile(`^[!#$%&'*+.^_` + "`" + `|~0-9A-Za-z-]+$`)
+
+var reservedProviderHeaders = map[string]struct{}{
+	"authorization":       {},
+	"proxy-authorization": {},
+	"cookie":              {},
+	"x-api-key":           {},
+	"x-goog-api-key":      {},
+	"chatgpt-account-id":  {},
+}
 
 // ExternalModelConfig is one Wopal AI model entry in runtime/config.json. The
 // optional fields stay pointers to distinguish user overrides (including false)
@@ -221,6 +231,13 @@ func (c ProviderConfig) EffectiveModelsAuth() string {
 	return "none"
 }
 
+func (c ProviderConfig) BaseURLForProtocol(protocol string) string {
+	if value := strings.TrimSpace(c.BaseURLs[protocol]); value != "" {
+		return strings.TrimRight(value, "/")
+	}
+	return strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+}
+
 func ValidateProviderID(id string) error {
 	if id == "official" || id == "wopal-ai" {
 		return fmt.Errorf("provider id %q is reserved", id)
@@ -241,6 +258,25 @@ func ValidateProtocol(protocol string) error {
 	default:
 		return fmt.Errorf("protocol %q must be %s, %s, %s or %s", protocol, ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropicMessages, ProtocolGemini)
 	}
+}
+
+func ValidateProviderHeaders(headers map[string]string) error {
+	for name, value := range headers {
+		trimmedName := strings.TrimSpace(name)
+		if trimmedName == "" || trimmedName != name || !providerHeaderNamePattern.MatchString(trimmedName) {
+			return fmt.Errorf("provider header name %q is invalid", name)
+		}
+		if _, reserved := reservedProviderHeaders[strings.ToLower(trimmedName)]; reserved {
+			return fmt.Errorf("provider header %q is reserved for credentials or account routing", name)
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("provider header %q value contains a newline", name)
+		}
+		if strings.Contains(value, "$") && value != "$CPA-SESSION-ID" {
+			return fmt.Errorf("provider header %q may use only exact $CPA-SESSION-ID expansion", name)
+		}
+	}
+	return nil
 }
 
 func ValidateHTTPURL(value string) error {
@@ -548,6 +584,9 @@ func (c *GatewayConfig) ValidateProviders() error {
 		}
 		if provider.ModelsAuth != "" && provider.ModelsAuth != "none" && provider.ModelsAuth != "provider-key" {
 			return fmt.Errorf("provider %q modelsAuth must be none or provider-key", id)
+		}
+		if err := ValidateProviderHeaders(provider.Headers); err != nil {
+			return fmt.Errorf("provider %q: %w", id, err)
 		}
 		for _, model := range provider.Models {
 			if strings.TrimSpace(model.Name) == "" {
