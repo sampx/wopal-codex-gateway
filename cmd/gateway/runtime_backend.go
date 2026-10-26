@@ -20,9 +20,10 @@ import (
 )
 
 var (
-	runtimeGetWopalAPIKey   = keychain.GetWopalAPIKey
-	runtimeLoadProviderKeys = loadRuntimeProviderKeys
-	startGatewayBackendHook = startGatewayBackendWithLogger
+	runtimeGetWopalAPIKey    = keychain.GetWopalAPIKey
+	runtimeLoadProviderKeys  = loadRuntimeProviderKeys
+	runtimeHasProviderAPIKey = keychain.HasProviderAPIKey
+	startGatewayBackendHook  = startGatewayBackendWithLogger
 )
 
 type runtimeConfigCheckpoint struct {
@@ -60,10 +61,10 @@ func (c *runtimeConfigCheckpoint) Restore() error {
 }
 
 func startGatewayBackend(root, gatewayConfigPath, instance string) (*runtimeBackend, *gatewaySnapshot, error) {
-	return startGatewayBackendWithLogger(root, gatewayConfigPath, instance, nil)
+	return startGatewayBackendWithLogger(root, gatewayConfigPath, instance, nil, newRuntimeReloadStatus())
 }
 
-func startGatewayBackendWithLogger(root, gatewayConfigPath, instance string, sharedLogger *activity.Logger) (*runtimeBackend, *gatewaySnapshot, error) {
+func startGatewayBackendWithLogger(root, gatewayConfigPath, instance string, sharedLogger *activity.Logger, reloadStatus *runtimeReloadStatus) (*runtimeBackend, *gatewaySnapshot, error) {
 	snapshot, err := loadGatewaySnapshot(root, gatewayConfigPath)
 	if err != nil {
 		return nil, nil, err
@@ -85,7 +86,14 @@ func startGatewayBackendWithLogger(root, gatewayConfigPath, instance string, sha
 	internal.Listen.Host = "127.0.0.1"
 	internal.Listen.Port = port
 	roles := runtimeRolesForSnapshot(snapshot)
-	service, logger, err := buildGatewayServiceWithRuntimeLogger(root, &internal, wopalKey, providerKeys, instance, snapshot.routes.Resolve, true, sharedLogger, roles)
+	credentials := runtimeCredentialStatus(snapshot.gateway, providerKeys)
+	serviceRuntime := gatewayServiceRuntime{
+		Roles:         roles,
+		Credentials:   credentials,
+		Reload:        reloadStatus,
+		StatusGateway: snapshot.gateway,
+	}
+	service, logger, err := buildGatewayServiceWithRuntimeLogger(root, &internal, wopalKey, providerKeys, instance, snapshot.routes.Resolve, true, sharedLogger, serviceRuntime)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -128,15 +136,33 @@ func startGatewayBackendWithLogger(root, gatewayConfigPath, instance string, sha
 	return backend, snapshot, nil
 }
 
+func runtimeCredentialStatus(gateway *config.GatewayConfig, providerKeys map[string]string) map[string]bool {
+	status := map[string]bool{"wopal-ai": true}
+	if gateway == nil {
+		return status
+	}
+	for providerID := range gateway.Providers {
+		if key, ok := providerKeys[providerID]; ok && key != "" {
+			status[providerID] = true
+			continue
+		}
+		status[providerID] = runtimeHasProviderAPIKey(providerID)
+	}
+	return status
+}
+
 func runtimeRolesForSnapshot(snapshot *gatewaySnapshot) proxy.RuntimeRoles {
 	if snapshot == nil {
 		return proxy.RuntimeRoles{}
 	}
 	toTarget := func(role provider.ResolvedRole) proxy.RoleTarget {
 		return proxy.RoleTarget{
-			ProviderID:  role.ProviderID,
-			ClientModel: role.ClientModel,
-			Ready:       role.Status == provider.RoleReady,
+			ProviderID:    role.ProviderID,
+			UpstreamModel: role.UpstreamModel,
+			ClientModel:   role.ClientModel,
+			Source:        string(role.Source),
+			Status:        string(role.Status),
+			Ready:         role.Status == provider.RoleReady,
 		}
 	}
 	return proxy.RuntimeRoles{
@@ -145,12 +171,12 @@ func runtimeRolesForSnapshot(snapshot *gatewaySnapshot) proxy.RuntimeRoles {
 	}
 }
 
-func reloadGatewayBackend(root, gatewayConfigPath, instance string, listen config.ListenConfig, sharedLogger *activity.Logger) (*runtimeBackend, error) {
+func reloadGatewayBackend(root, gatewayConfigPath, instance string, listen config.ListenConfig, sharedLogger *activity.Logger, reloadStatus *runtimeReloadStatus) (*runtimeBackend, error) {
 	checkpoint, err := captureRuntimeConfigCheckpoint(root)
 	if err != nil {
 		return nil, err
 	}
-	candidate, snapshot, err := startGatewayBackendHook(root, gatewayConfigPath, instance, sharedLogger)
+	candidate, snapshot, err := startGatewayBackendHook(root, gatewayConfigPath, instance, sharedLogger, reloadStatus)
 	if err != nil {
 		if restoreErr := checkpoint.Restore(); restoreErr != nil {
 			return nil, fmt.Errorf("%v; restore runtime config: %w", err, restoreErr)

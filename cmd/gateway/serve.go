@@ -71,7 +71,8 @@ func runServe(args []string) error {
 	}
 	defer daemonLogger.Close()
 
-	backend, snapshot, err := startGatewayBackendWithLogger(root, gatewayConfigPath, *instanceFlag, daemonLogger)
+	reloadStatus := newRuntimeReloadStatus()
+	backend, snapshot, err := startGatewayBackendWithLogger(root, gatewayConfigPath, *instanceFlag, daemonLogger, reloadStatus)
 	if err != nil {
 		return err
 	}
@@ -104,12 +105,14 @@ func runServe(args []string) error {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				candidate, reloadErr := reloadGatewayBackend(root, gatewayConfigPath, *instanceFlag, listen, daemonLogger)
+				candidate, reloadErr := reloadGatewayBackend(root, gatewayConfigPath, *instanceFlag, listen, daemonLogger, reloadStatus)
 				if reloadErr != nil {
+					reloadStatus.MarkFailure(reloadErr)
 					logBackend(switcher.Current(), map[string]any{"event": "gateway_reload_failed", "error": reloadErr.Error()})
 					continue
 				}
 				switcher.Swap(candidate)
+				reloadStatus.MarkSuccess()
 				logBackend(candidate, map[string]any{"event": "gateway_reloaded"})
 			}
 		}
@@ -144,7 +147,7 @@ func buildGatewayServiceWithRuntime(root string, gateway *config.GatewayConfig, 
 	return buildGatewayServiceWithRuntimeLogger(root, gateway, wopalKey, providerKeys, instance, resolve, freezeSnapshot, nil)
 }
 
-func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayConfig, wopalKey string, providerKeys map[string]string, instance string, resolve proxy.RouteResolver, freezeSnapshot bool, sharedLogger *activity.Logger, roleSets ...proxy.RuntimeRoles) (*cliproxy.Service, *activity.Logger, error) {
+func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayConfig, wopalKey string, providerKeys map[string]string, instance string, resolve proxy.RouteResolver, freezeSnapshot bool, sharedLogger *activity.Logger, runtimeSets ...gatewayServiceRuntime) (*cliproxy.Service, *activity.Logger, error) {
 	// The SDK request logger is disabled at construction time (see
 	// disableSDKRequestLogging): no request-logging middleware is installed, so
 	// no request or response body can be written to disk.
@@ -173,12 +176,18 @@ func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayCo
 	logger.Write(map[string]any{"event": "quota_notification_configured", "status": quotaGuard.NotificationStatus()})
 
 	middleware := proxy.RoutingMiddleware(logger, quotaGuard)
-	if resolve != nil {
-		roles := proxy.RuntimeRoles{}
-		if len(roleSets) > 0 {
-			roles = roleSets[0]
+	runtimeState := gatewayServiceRuntime{StatusGateway: gateway, Reload: newRuntimeReloadStatus()}
+	if len(runtimeSets) > 0 {
+		runtimeState = runtimeSets[0]
+		if runtimeState.StatusGateway == nil {
+			runtimeState.StatusGateway = gateway
 		}
-		middleware = proxy.RoutingMiddlewareWithResolverAndRoles(logger, quotaGuard, resolve, roles)
+		if runtimeState.Reload == nil {
+			runtimeState.Reload = newRuntimeReloadStatus()
+		}
+	}
+	if resolve != nil {
+		middleware = proxy.RoutingMiddlewareWithResolverAndRoles(logger, quotaGuard, resolve, runtimeState.Roles)
 	}
 	builder := cliproxy.NewBuilder().
 		WithConfig(cliConfig).
@@ -196,15 +205,17 @@ func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayCo
 					})
 				})
 				engine.GET("/_status", func(c *gin.Context) {
-					c.JSON(200, gin.H{
-						"ok":                   true,
-						"listen":               fmt.Sprintf("%s:%d", gateway.Listen.Host, gateway.Listen.Port),
-						"official":             "native-pass-through",
-						"official_quota":       quotaGuard.Status(time.Now()),
-						"notifications":        quotaGuard.NotificationStatus(),
-						"wopal":                "cliproxy-responses-to-chat",
-						"request_body_logging": requestBodyLogging,
-					})
+					c.JSON(200, buildRuntimeStatusPayload(
+						runtimeState.StatusGateway,
+						runtimeState.Roles,
+						runtimeState.Credentials,
+						runtimeState.Reload.Snapshot(),
+						quotaGuard.Status(time.Now()),
+						quotaGuard.FailoverStatus(),
+						quotaGuard.NotificationStatus(),
+						instance,
+						requestBodyLogging,
+					))
 				})
 			}),
 		)

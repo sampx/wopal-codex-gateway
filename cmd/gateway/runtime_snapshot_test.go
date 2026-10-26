@@ -155,7 +155,7 @@ func TestReloadGatewayBackendFailureRestoresRuntimeConfigAndReturnsNoCandidate(t
 		t.Fatal(err)
 	}
 	originalStart := startGatewayBackendHook
-	startGatewayBackendHook = func(string, string, string, *activity.Logger) (*runtimeBackend, *gatewaySnapshot, error) {
+	startGatewayBackendHook = func(string, string, string, *activity.Logger, *runtimeReloadStatus) (*runtimeBackend, *gatewaySnapshot, error) {
 		if err := os.WriteFile(path, []byte("failed-candidate\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +163,7 @@ func TestReloadGatewayBackendFailureRestoresRuntimeConfigAndReturnsNoCandidate(t
 	}
 	t.Cleanup(func() { startGatewayBackendHook = originalStart })
 
-	backend, err := reloadGatewayBackend(root, "unused", "instance", config.ListenConfig{Host: "127.0.0.1", Port: 11435}, nil)
+	backend, err := reloadGatewayBackend(root, "unused", "instance", config.ListenConfig{Host: "127.0.0.1", Port: 11435}, nil, newRuntimeReloadStatus())
 	if err == nil || backend != nil {
 		t.Fatalf("reload = %#v, %v; want failed reload without candidate", backend, err)
 	}

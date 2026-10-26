@@ -3,9 +3,12 @@ package proxy
 import "wopal-codex-gateway/internal/routing"
 
 type RoleTarget struct {
-	ProviderID  string
-	ClientModel string
-	Ready       bool
+	ProviderID    string
+	UpstreamModel string
+	ClientModel   string
+	Source        string
+	Status        string
+	Ready         bool
 }
 
 type RuntimeRoles struct {
