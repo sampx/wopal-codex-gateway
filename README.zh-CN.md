@@ -610,37 +610,37 @@ bin/wopal-codex-gateway catalog refresh
 
 ### 12.2 回滚步骤
 
-先停掉当前服务：
-
-```sh
-bin/wopal-codex-gateway service stop
-```
-
-再启动 `recovery/` 里的旧版本：
+直接运行 recovery 入口：
 
 ```sh
 recovery/start-gateway.sh
 ```
 
-确认它已经接管端口：
+脚本严格按下面的顺序执行，任一步失败都会停止：
+
+1. 用**当前版本**执行 `codex restore`，先恢复 Codex 配置并卸载当前 LaunchAgent；
+2. 从 `recovery/` 启动上一版，直到 `/_health` 通过；
+3. 把已经验证可用的上一版恢复到 `bin/wopal-codex-gateway`，再用**上一版**执行 `codex install`，让上一版重新生成它能理解的 catalog 和 memories 配置。
+
+完成后可以再次确认：
 
 ```sh
 curl -s 127.0.0.1:11435/_health
 ```
 
-返回带 `instance` 和 `"ok": true` 的 JSON 就说明旧版本正在服务。
+返回带 `instance` 和 `"ok": true` 的 JSON 就说明上一版正在服务。脚本只有在上一版重新安装 Codex-facing 状态成功后才输出 `RESULT=ROLLED_BACK`。
 
 ### 12.3 回滚后的状态
 
 - `runtime/config.json` 和额度状态都是共享的，不需要恢复；
-- Codex 的接管配置不需要动，它指向的端口没变；
+- Codex catalog、memories model 和 Gateway 接管配置由上一版重新生成，不会继续保留新版本才认识的第三方 bare alias；
 - 旧版本会自己接管 `logs/`，日志继续写在同一处。
 
 确认旧版本稳定后，再决定是修新版本，还是让 `recovery/` 里的版本继续跑。
 
 ### 12.4 保持 recovery 可用
 
-`recovery/` 里的东西不要删。每次发布新版本时，把当前版本的可执行文件留一份在 `recovery/`，替换掉更旧的那份即可。
+`recovery/` 里的东西不要删。每次发布新版本前都要保持这三样材料可用：上一版 `wopal-codex-gatewayd`、指向它的 `rollback-launchd.plist`，以及 `start-gateway.sh`。它们都是本机 operator material，不进 Git。
 
 
 ## 13. 停用与卸载

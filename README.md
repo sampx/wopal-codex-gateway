@@ -606,37 +606,37 @@ Return to the last working release when a new one will not start.
 
 ### 12.2 Steps
 
-Stop the current service:
-
-```sh
-bin/wopal-codex-gateway service stop
-```
-
-Start the previous release from `recovery/`:
+Run the recovery entry directly:
 
 ```sh
 recovery/start-gateway.sh
 ```
 
-Confirm it owns the port:
+The script follows a fixed fail-stop sequence:
+
+1. Run `codex restore` with the **current release** so the current Codex takeover is removed first;
+2. Start the previous release from `recovery/` and require `/_health` to pass;
+3. Restore that verified previous executable to `bin/wopal-codex-gateway`, then run `codex install` with the **previous release** so it regenerates the catalog and memories settings it understands.
+
+After it completes, confirm the service again:
 
 ```sh
 curl -s 127.0.0.1:11435/_health
 ```
 
-A JSON body with `instance` and `"ok": true` means the previous release is serving.
+A JSON body with `instance` and `"ok": true` means the previous release is serving. The script prints `RESULT=ROLLED_BACK` only after the previous release has also reinstalled the Codex-facing state.
 
 ### 12.3 What a rollback keeps
 
 - `runtime/config.json` and the quota state are shared, so nothing needs restoring;
-- The Codex takeover needs no change: it points at the same port;
+- The previous release regenerates the Codex catalog, memories models, and Gateway takeover, so a third-party bare alias known only to the new release cannot remain active;
 - The previous release takes over `logs/` and keeps writing in place.
 
 Once it is stable, decide whether to fix the new release or keep running the one from `recovery/`.
 
 ### 12.4 Keeping recovery usable
 
-Do not delete `recovery/`. When you publish a release, copy the outgoing executable into `recovery/`, replacing the older one.
+Do not delete `recovery/`. Before publishing a release, keep all three local recovery assets current: the previous `wopal-codex-gatewayd`, `rollback-launchd.plist` pointing at it, and `start-gateway.sh`. These are operator-owned local material and stay out of Git.
 
 
 ## 13. Disable and uninstall
