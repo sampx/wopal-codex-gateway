@@ -115,12 +115,12 @@ Commands:
   auth set [--provider <id>]                                                  Store and validate a provider API key
   auth test [--provider <id>]                                                 Validate a stored provider API key
   auth status [--provider <id>]                                               Show whether a provider key is configured
-  models list                                                                 List models visible to the Wopal AI API key
-  models inspect [model...]                                                    Show effective capabilities and sources
-  models sync                                                                 Import all Codex-usable Wopal AI models
-  models add <model...> [--context-window N] [--vision] [--no-reasoning]
-  models set <model...> [--context-window N] [--vision|--no-vision] [--reasoning|--no-reasoning] [--auto|--reset-context-window|--reset-vision|--reset-reasoning]
-  models remove <model...>                                                    Remove Wopal AI models and exclude them from sync
+  models list [--provider <id>]                                                List available models; provider output includes protocol source
+  models inspect [model...] [--provider <id>]                                 Show effective capabilities and sources
+  models sync [--provider <id>]                                                Refresh Wopal config or external provider metadata
+  models add <model...> [--provider <id>] [--alias <name>] [--protocol <protocol>] [--context-window N] [--vision] [--no-reasoning]
+  models set <model...> [--provider <id>] [--alias <name>] [--protocol <protocol>] [--context-window N] [--vision|--no-vision] [--reasoning|--no-reasoning] [--auto|--reset-context-window|--reset-vision|--reset-reasoning]
+  models remove <model...> [--provider <id>]                                  Remove configured models; Wopal removal also excludes from sync
   catalog refresh                                                             Rebuild the Codex model catalog
   codex install                                                               Install the gateway into Codex
   codex restore                                                               Restore the pre-install Codex configuration

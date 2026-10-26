@@ -288,3 +288,62 @@ func TestGatewayConfigRejectsInvalidProviderIdentityAndProtocol(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderDiscoveryDefaults(t *testing.T) {
+	tests := []struct {
+		name        string
+		provider    ProviderConfig
+		wantEnabled bool
+		wantURL     string
+		wantAuth    string
+	}{
+		{
+			name:        "same origin openai style",
+			provider:    ProviderConfig{BaseURL: "https://api.example.test/v1"},
+			wantEnabled: true,
+			wantURL:     "https://api.example.test/v1/models",
+			wantAuth:    "provider-key",
+		},
+		{
+			name:        "cross origin models endpoint",
+			provider:    ProviderConfig{BaseURL: "https://api.example.test/v1", ModelsURL: "https://catalog.example.test/models"},
+			wantEnabled: true,
+			wantURL:     "https://catalog.example.test/models",
+			wantAuth:    "none",
+		},
+		{
+			name:        "explicit auth wins",
+			provider:    ProviderConfig{BaseURL: "https://api.example.test/v1", ModelsURL: "https://catalog.example.test/models", ModelsAuth: "provider-key"},
+			wantEnabled: true,
+			wantURL:     "https://catalog.example.test/models",
+			wantAuth:    "provider-key",
+		},
+		{
+			name:        "native gemini disabled",
+			provider:    ProviderConfig{BaseURL: "https://generativelanguage.googleapis.com", Protocol: ProtocolGemini},
+			wantEnabled: false,
+			wantURL:     "https://generativelanguage.googleapis.com/models",
+			wantAuth:    "provider-key",
+		},
+		{
+			name:        "native anthropic inferred from models",
+			provider:    ProviderConfig{BaseURL: "https://api.anthropic.com", Models: []ExternalModelConfig{{Name: "claude", Protocol: ProtocolAnthropicMessages}}},
+			wantEnabled: false,
+			wantURL:     "https://api.anthropic.com/models",
+			wantAuth:    "provider-key",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.provider.DiscoveryEnabled(); got != tc.wantEnabled {
+				t.Fatalf("DiscoveryEnabled=%v want %v", got, tc.wantEnabled)
+			}
+			if got := tc.provider.EffectiveModelsURL(); got != tc.wantURL {
+				t.Fatalf("EffectiveModelsURL=%q want %q", got, tc.wantURL)
+			}
+			if got := tc.provider.EffectiveModelsAuth(); got != tc.wantAuth {
+				t.Fatalf("EffectiveModelsAuth=%q want %q", got, tc.wantAuth)
+			}
+		})
+	}
+}
