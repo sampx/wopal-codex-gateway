@@ -112,9 +112,9 @@ Commands:
   config wopal [--base-url <url>] [--tool-mode code_mode_only|code_mode|direct] [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
   providers set <provider> --base-url <url> [--base-url-for <protocol>=<url>]... [--models-url <url>] [--models-auth none|provider-key] [--header <name>=<value>]... [--protocol <default>]
   providers remove <provider>                                                   Remove an unreferenced external provider
-  auth set                                                                    Store and validate the Wopal AI API key
-  auth test                                                                   Validate the stored Wopal AI API key
-  auth status                                                                 Show whether a key is configured
+  auth set [--provider <id>]                                                  Store and validate a provider API key
+  auth test [--provider <id>]                                                 Validate a stored provider API key
+  auth status [--provider <id>]                                               Show whether a provider key is configured
   models list                                                                 List models visible to the Wopal AI API key
   models inspect [model...]                                                    Show effective capabilities and sources
   models sync                                                                 Import all Codex-usable Wopal AI models

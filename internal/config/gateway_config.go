@@ -174,6 +174,53 @@ func (c ProviderConfig) Clone() ProviderConfig {
 	return clone
 }
 
+// DiscoveryEnabled reports whether this provider uses the OpenAI-style
+// models endpoint. An explicit modelsUrl always opts in. Without one, native
+// Gemini/Anthropic providers are discovery-disabled and rely on models add;
+// OpenAI-style or unspecified providers keep the baseUrl + /models default.
+func (c ProviderConfig) DiscoveryEnabled() bool {
+	if strings.TrimSpace(c.ModelsURL) != "" {
+		return true
+	}
+	switch c.Protocol {
+	case ProtocolGemini, ProtocolAnthropicMessages:
+		return false
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses:
+		return true
+	}
+	if len(c.Models) == 0 {
+		return true
+	}
+	for _, model := range c.Models {
+		switch model.Protocol {
+		case ProtocolGemini, ProtocolAnthropicMessages:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func (c ProviderConfig) EffectiveModelsURL() string {
+	if explicit := strings.TrimSpace(c.ModelsURL); explicit != "" {
+		return strings.TrimRight(explicit, "/")
+	}
+	return strings.TrimRight(strings.TrimSpace(c.BaseURL), "/") + "/models"
+}
+
+func (c ProviderConfig) EffectiveModelsAuth() string {
+	if c.ModelsAuth == "none" || c.ModelsAuth == "provider-key" {
+		return c.ModelsAuth
+	}
+	base, baseErr := url.Parse(strings.TrimSpace(c.BaseURL))
+	models, modelsErr := url.Parse(c.EffectiveModelsURL())
+	if baseErr == nil && modelsErr == nil && strings.EqualFold(base.Scheme, models.Scheme) && strings.EqualFold(base.Host, models.Host) {
+		return "provider-key"
+	}
+	return "none"
+}
+
 func ValidateProviderID(id string) error {
 	if id == "official" || id == "wopal-ai" {
 		return fmt.Errorf("provider id %q is reserved", id)
@@ -429,8 +476,9 @@ func DefaultGatewayConfig() *GatewayConfig {
 			Models:         []ExternalModelConfig{{Name: defaultWopalModelName}},
 			ExcludedModels: []string{},
 		},
-		Logs:  Logs{MaxSizeMB: DefaultLogMaxSizeMB, MaxBackups: DefaultLogMaxBackups},
-		Quota: QuotaConfig{MaxStepCap: DefaultQuotaMaxStepCap},
+		Providers: map[string]ProviderConfig{},
+		Logs:      Logs{MaxSizeMB: DefaultLogMaxSizeMB, MaxBackups: DefaultLogMaxBackups},
+		Quota:     QuotaConfig{MaxStepCap: DefaultQuotaMaxStepCap},
 	}
 }
 
