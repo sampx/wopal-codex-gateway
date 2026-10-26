@@ -139,6 +139,9 @@ func ModelMetadataPathFor(root string) string {
 func ProviderModelMetadataPathFor(root string) string {
 	return filepath.Join(StateDirFor(root), "provider-model-metadata.json")
 }
+func OfficialModelsPathFor(root string) string {
+	return filepath.Join(StateDirFor(root), "official-models.json")
+}
 func QuotaStatePathFor(root string) string {
 	return filepath.Join(StateDirFor(root), "official-quota-state.json")
 }
@@ -152,6 +155,7 @@ func RecoveryDir() string { return filepath.Join(MustProjectRoot(), "recovery") 
 
 func ConfigPath() string                { return ConfigPathFor(MustProjectRoot()) }
 func ProviderModelMetadataPath() string { return ProviderModelMetadataPathFor(MustProjectRoot()) }
+func OfficialModelsPath() string        { return OfficialModelsPathFor(MustProjectRoot()) }
 func RestoreStatePath() string          { return filepath.Join(StateDir(), "codex-restore.json") }
 func ActivityLogPath() string           { return filepath.Join(LogsDir(), "gateway.log") }
 func ServiceLogPath() string            { return filepath.Join(LogsDir(), "service.log") }

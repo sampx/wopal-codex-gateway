@@ -62,7 +62,8 @@ func (f *providerModelsFixture) runner() wopalModelsRunner {
 			f.metadata = &copy
 			return nil
 		},
-		getProviderAPIKey: func(providerID string) (string, error) { f.getKeyCalls++; return "provider-key", nil },
+		getProviderAPIKey:     func(providerID string) (string, error) { f.getKeyCalls++; return "provider-key", nil },
+		validateOfficialNames: func(*config.GatewayConfig) error { return nil },
 		refreshCatalog: func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error) {
 			f.refreshCalls++
 			return &catalog.CatalogRefreshResult{}, nil
@@ -220,5 +221,26 @@ func TestProviderModelsAddSetClearAliasAndRemove(t *testing.T) {
 	}
 	if len(fixture.cfg.Providers[providerID].Models) != 0 {
 		t.Fatalf("models=%#v", fixture.cfg.Providers[providerID].Models)
+	}
+}
+
+func TestProviderModelsAliasCollisionFailsBeforeSave(t *testing.T) {
+	providerID := "p"
+	fixture := newProviderModelsFixture(providerID, config.ProviderConfig{BaseURL: "https://api.example.test/v1"})
+	runner := fixture.runner()
+	runner.validateOfficialNames = func(cfg *config.GatewayConfig) error {
+		for _, model := range cfg.Providers[providerID].Models {
+			if model.Alias == "official-a" {
+				return errors.New(`provider "p" model "m" client-visible model name "official-a" collides with official model`)
+			}
+		}
+		return nil
+	}
+	err := runner.run("add", []string{"m", "--provider", providerID, "--alias", "official-a", "--protocol", "openai-chat"})
+	if err == nil || !strings.Contains(err.Error(), "collides with official model") {
+		t.Fatalf("error=%v", err)
+	}
+	if fixture.saveConfigCalls != 0 {
+		t.Fatalf("collision wrote config %d times", fixture.saveConfigCalls)
 	}
 }

@@ -287,6 +287,11 @@ func (runner wopalModelsRunner) runProviderAdd(providerID string, args []string)
 	if _, err := providerreg.Build(cfg); err != nil {
 		return err
 	}
+	if runner.validateOfficialNames != nil {
+		if err := runner.validateOfficialNames(cfg); err != nil {
+			return err
+		}
+	}
 	if err := runner.saveConfig(cfg); err != nil {
 		return err
 	}
@@ -328,6 +333,11 @@ func (runner wopalModelsRunner) runProviderSet(providerID string, args []string)
 	cfg.Providers[providerID] = providerCfg
 	if _, err := providerreg.Build(cfg); err != nil {
 		return err
+	}
+	if runner.validateOfficialNames != nil {
+		if err := runner.validateOfficialNames(cfg); err != nil {
+			return err
+		}
 	}
 	if err := runner.saveConfig(cfg); err != nil {
 		return err

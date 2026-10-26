@@ -24,6 +24,7 @@ type wopalModelsRunner struct {
 	loadProviderMetadata   func(string) (*catalog.ProviderModelMetadataSnapshot, error)
 	saveProviderMetadata   func(*catalog.ProviderModelMetadataSnapshot) error
 	getProviderAPIKey      func(string) (string, error)
+	validateOfficialNames  func(*config.GatewayConfig) error
 	refreshCatalog         func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error)
 	out                    io.Writer
 }
@@ -43,11 +44,12 @@ func newWopalModelsRunner() wopalModelsRunner {
 		fetchModelsDevProvider: func(providerID, etag string) (*catalog.ModelsDevProvider, bool, error) {
 			return catalog.FetchModelsDevProvider(catalog.ModelsDevCatalogURL, providerID, etag)
 		},
-		loadProviderMetadata: catalog.LoadProviderModelMetadata,
-		saveProviderMetadata: catalog.SaveProviderModelMetadata,
-		getProviderAPIKey:    keychain.GetProviderAPIKey,
-		refreshCatalog:       catalog.RefreshCatalog,
-		out:                  os.Stdout,
+		loadProviderMetadata:  catalog.LoadProviderModelMetadata,
+		saveProviderMetadata:  catalog.SaveProviderModelMetadata,
+		getProviderAPIKey:     keychain.GetProviderAPIKey,
+		validateOfficialNames: catalog.ValidateExternalNamesAgainstOfficial,
+		refreshCatalog:        catalog.RefreshCatalog,
+		out:                   os.Stdout,
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"wopal-codex-gateway/internal/config"
 )
@@ -440,9 +441,13 @@ func TestCatalogResolveCodexCommand(t *testing.T) {
 func catalogTestStubCommand(t *testing.T, output catalogCommandOutput, resolveErr error) {
 	t.Helper()
 	oldResolve := catalogResolveCodex
+	oldArtifact := catalogResolveNativeArtifact
+	oldIdentity := catalogComputeNativeIdentity
 	oldExecute := catalogExecuteCodex
 	t.Cleanup(func() {
 		catalogResolveCodex = oldResolve
+		catalogResolveNativeArtifact = oldArtifact
+		catalogComputeNativeIdentity = oldIdentity
 		catalogExecuteCodex = oldExecute
 	})
 	catalogResolveCodex = func() (string, error) {
@@ -450,6 +455,18 @@ func catalogTestStubCommand(t *testing.T, output catalogCommandOutput, resolveEr
 			return "", resolveErr
 		}
 		return "/fake/codex", nil
+	}
+	catalogResolveNativeArtifact = func(command string) (string, error) {
+		if command != "/fake/codex" {
+			t.Fatalf("artifact resolver command = %q, want /fake/codex", command)
+		}
+		return "/fake/native-codex", nil
+	}
+	catalogComputeNativeIdentity = func(path string) (NativeArtifactIdentity, error) {
+		if path != "/fake/native-codex" {
+			t.Fatalf("identity path = %q, want /fake/native-codex", path)
+		}
+		return NativeArtifactIdentity{CanonicalPath: path, SHA256: "stable-test-hash", Size: 1, ModTimeUnixNano: 1}, nil
 	}
 	catalogExecuteCodex = func(string) catalogCommandOutput { return output }
 }
@@ -504,5 +521,201 @@ func TestRefreshCatalogKeepsPreviousCatalogWhenCodexFails(t *testing.T) {
 				t.Fatalf("previous catalog was overwritten: %s", got)
 			}
 		})
+	}
+}
+
+func TestRefreshCatalogMergesProtocolReadyExternalModelsAndWritesBaseline(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(config.SetProjectRootForTest(root))
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	stubCatalogArtifact(t, []NativeArtifactIdentity{
+		{CanonicalPath: "/fake/native-codex", SHA256: "same", Size: 10, ModTimeUnixNano: 1},
+		{CanonicalPath: "/fake/native-codex", SHA256: "same", Size: 10, ModTimeUnixNano: 1},
+	})
+	catalogExecuteCodex = func(command string) catalogCommandOutput {
+		if command != "/fake/native-codex" {
+			t.Fatalf("bundled catalog executed with %q, want native artifact", command)
+		}
+		return catalogCommandOutput{stdout: []byte(`{"models":[{"slug":"official-a","visibility":"list"},{"slug":"official-hidden","visibility":"hide"}]}`)}
+	}
+
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.example/v1"
+	cfg.WopalAI.Models = []config.ExternalModelConfig{{Name: "wopal"}}
+	cfg.Providers["p"] = config.ProviderConfig{
+		BaseURL: "https://p.example/v1",
+		Models: []config.ExternalModelConfig{
+			{Name: "ready", Protocol: config.ProtocolOpenAIResponses},
+			{Name: "alias-upstream", Alias: "friendly", Protocol: config.ProtocolGemini},
+			{Name: "needs-protocol"},
+		},
+	}
+	if err := SaveProviderModelMetadata(&ProviderModelMetadataSnapshot{
+		Provider: "p", FetchedAt: time.Now().UTC(),
+		Models: []ProviderModelMetadata{{Name: "ready", ContextWindow: providerIntPtr(131072)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RefreshCatalog(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Native != 2 || result.WopalAI != 1 || result.External != 2 {
+		t.Fatalf("result=%+v", result)
+	}
+	data, err := os.ReadFile(config.CodexGatewayCatalogPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	var slugs []string
+	for _, model := range payload.Models {
+		if slug, _ := model["slug"].(string); slug != "" {
+			slugs = append(slugs, slug)
+		}
+	}
+	wantSlugs := []string{"wopal-ai/wopal", "p/ready", "friendly", "official-a", "official-hidden"}
+	if !reflect.DeepEqual(slugs, wantSlugs) {
+		t.Fatalf("catalog slugs=%#v want=%#v", slugs, wantSlugs)
+	}
+	baseline, err := LoadOfficialModelsBaseline()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline == nil || baseline.Artifact.SHA256 != "same" || !reflect.DeepEqual(baseline.Slugs, []string{"official-a", "official-hidden"}) {
+		t.Fatalf("baseline=%+v", baseline)
+	}
+}
+
+func TestRefreshCatalogRejectsArtifactChangeAndPreservesPreviousState(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(config.SetProjectRootForTest(root))
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+	previousCatalog := []byte(`{"models":[{"slug":"previous"}]}\n`)
+	if err := os.MkdirAll(filepath.Dir(config.CodexGatewayCatalogPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.CodexGatewayCatalogPath(), previousCatalog, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousBaseline := &OfficialModelsBaseline{Artifact: NativeArtifactIdentity{CanonicalPath: "/old", SHA256: "old"}, Slugs: []string{"old-official"}}
+	if err := SaveOfficialModelsBaseline(previousBaseline); err != nil {
+		t.Fatal(err)
+	}
+	baselineBefore, _ := os.ReadFile(config.OfficialModelsPath())
+
+	stubCatalogArtifact(t, []NativeArtifactIdentity{
+		{CanonicalPath: "/fake/native", SHA256: "h1"},
+		{CanonicalPath: "/fake/native", SHA256: "h2"},
+	})
+	catalogExecuteCodex = func(string) catalogCommandOutput {
+		return catalogCommandOutput{stdout: []byte(`{"models":[{"slug":"new"}]}`)}
+	}
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.example/v1"
+	if _, err := RefreshCatalog(cfg); err == nil || !strings.Contains(err.Error(), "changed while reading bundled catalog") {
+		t.Fatalf("error=%v", err)
+	}
+	catalogAfter, _ := os.ReadFile(config.CodexGatewayCatalogPath())
+	baselineAfter, _ := os.ReadFile(config.OfficialModelsPath())
+	if string(catalogAfter) != string(previousCatalog) || string(baselineAfter) != string(baselineBefore) {
+		t.Fatalf("previous state changed: catalog=%s baseline=%s", catalogAfter, baselineAfter)
+	}
+}
+
+func TestRefreshCatalogRejectsExternalOfficialCollisionBeforeWrites(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(config.SetProjectRootForTest(root))
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+	stubCatalogArtifact(t, []NativeArtifactIdentity{{CanonicalPath: "/fake/native", SHA256: "same"}, {CanonicalPath: "/fake/native", SHA256: "same"}})
+	catalogExecuteCodex = func(string) catalogCommandOutput {
+		return catalogCommandOutput{stdout: []byte(`{"models":[{"slug":"official-a"}]}`)}
+	}
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.example/v1"
+	cfg.Providers["p"] = config.ProviderConfig{BaseURL: "https://p.example", Models: []config.ExternalModelConfig{{Name: "m", Alias: "official-a", Protocol: config.ProtocolOpenAIChat}}}
+	if _, err := RefreshCatalog(cfg); err == nil || !strings.Contains(err.Error(), `client-visible model name "official-a" collides with official model`) {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := os.Stat(config.CodexGatewayCatalogPath()); !os.IsNotExist(err) {
+		t.Fatalf("catalog was written on collision: %v", err)
+	}
+	if _, err := os.Stat(config.OfficialModelsPath()); !os.IsNotExist(err) {
+		t.Fatalf("baseline was written on collision: %v", err)
+	}
+}
+
+func TestRefreshCatalogBaselineWriteFailureRollsBackCatalog(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(config.SetProjectRootForTest(root))
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+	previousCatalog := []byte(`{"models":[{"slug":"previous"}]}\n`)
+	if err := os.MkdirAll(filepath.Dir(config.CodexGatewayCatalogPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.CodexGatewayCatalogPath(), previousCatalog, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubCatalogArtifact(t, []NativeArtifactIdentity{{CanonicalPath: "/fake/native", SHA256: "same"}, {CanonicalPath: "/fake/native", SHA256: "same"}})
+	catalogExecuteCodex = func(string) catalogCommandOutput {
+		return catalogCommandOutput{stdout: []byte(`{"models":[{"slug":"official-a"}]}`)}
+	}
+
+	originalWrite := catalogWriteAtomic
+	t.Cleanup(func() { catalogWriteAtomic = originalWrite })
+	catalogWriteAtomic = func(path string, data []byte, mode os.FileMode) error {
+		if path == config.OfficialModelsPath() {
+			return errors.New("synthetic baseline write failure")
+		}
+		return config.WriteFileAtomic(path, data, mode)
+	}
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.example/v1"
+	if _, err := RefreshCatalog(cfg); err == nil || !strings.Contains(err.Error(), "synthetic baseline write failure") {
+		t.Fatalf("error=%v", err)
+	}
+	after, _ := os.ReadFile(config.CodexGatewayCatalogPath())
+	if string(after) != string(previousCatalog) {
+		t.Fatalf("catalog not rolled back: %s", after)
+	}
+}
+
+func stubCatalogArtifact(t *testing.T, identities []NativeArtifactIdentity) {
+	t.Helper()
+	oldResolve := catalogResolveCodex
+	oldArtifact := catalogResolveNativeArtifact
+	oldIdentity := catalogComputeNativeIdentity
+	oldExecute := catalogExecuteCodex
+	t.Cleanup(func() {
+		catalogResolveCodex = oldResolve
+		catalogResolveNativeArtifact = oldArtifact
+		catalogComputeNativeIdentity = oldIdentity
+		catalogExecuteCodex = oldExecute
+	})
+	catalogResolveCodex = func() (string, error) { return "/fake/codex-entry", nil }
+	catalogResolveNativeArtifact = func(command string) (string, error) {
+		if command != "/fake/codex-entry" {
+			t.Fatalf("resolve artifact command=%q", command)
+		}
+		return "/fake/native-codex", nil
+	}
+	index := 0
+	catalogComputeNativeIdentity = func(path string) (NativeArtifactIdentity, error) {
+		if path != "/fake/native-codex" {
+			t.Fatalf("identity path=%q", path)
+		}
+		if index >= len(identities) {
+			t.Fatalf("identity called too many times")
+		}
+		identity := identities[index]
+		index++
+		return identity, nil
 	}
 }
