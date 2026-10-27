@@ -132,7 +132,7 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 		}
 		switch route.Kind {
 		case routing.Wopal:
-			logger.Write(withClient(map[string]any{"event": "route_selected", "provider": "wopal-ai", "model": model, "path": path}, clientFields))
+			logger.Write(withClient(map[string]any{"event": "route_selected", "provider": route.ProviderID, "model": model, "path": path}, clientFields))
 			if c.Request.Method == http.MethodGet && path == "/v1/responses" && isWebsocketUpgrade(c.Request) {
 				c.Set("native_compaction_bridge", nativeReplay)
 				c.Set(clientContractWatcherContextKey, clientWatcher)

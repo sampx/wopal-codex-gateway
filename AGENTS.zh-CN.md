@@ -52,6 +52,7 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 | 单包测试 | `go test -race ./internal/quota/ -count=1` |
 | 操作入口 | `scripts/gateway <command>` |
 | 文档门禁 | `python3 <space>/skills/dev-doc-master/scripts/verify-docset.py docs --main DESIGN.md` |
+| 发布验证 | `scripts/validate-release.sh --base <已安装项目根目录>` |
 
 ## 实现规则
 
@@ -72,6 +73,37 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 - 以下边界用真实宿主验证，不要用假实现冒充已覆盖：Keychain 读写、`launchctl` 装载与健康等待、WebSocket 升级、`codex debug models --bundled` 输出、ChatGPT/Codex Desktop 的实际模型选择器。
 - 涉及请求正文的任何改动，必须跑 `TestServedGatewayNeverWritesPromptBodies`。去掉 nil factory 后该测试必须失败，这是它有效的判据。
 - 提交前跑完整门禁：`go build ./... && go vet ./... && gofmt -l cmd internal && go test -race ./... -count=1`。
+
+## 发布验证
+
+`go test` 只能证明代码逻辑正确，不能证明真实 Codex 客户端能用这个二进制。在把发布候选装到正在运行的 Gateway 之前，必须先在不碰运行实例的前提下完成端到端验证。
+
+执行 `scripts/validate-release.sh`。它会先构建当前工作树，再把构建产物指向一个临时项目根目录、自由回环端口启动，并把 `CODEX_HOME` 一起重定向到同一个临时目录。正在运行的安装不会被重启、不会被改配置、不会被写入。
+
+脚本本身就是契约：任何一项不通过都 fail closed，并且逐项打印 PASS/FAIL。
+
+| 层次 | 证明什么 |
+| --- | --- |
+| build | 当前工作树能编译出 `bin/wopal-codex-gateway` |
+| isolation | 临时端口不等于已安装端口；运行前后已安装实例的 `/_health` instance id 完全一致 |
+| L1 catalog | `/v1/models` 里外部模型与 Wopal AI 模型同时可见 |
+| L2 HTTP | `POST /v1/chat/completions` 与 `POST /v1/responses` 都经外部 provider 返回 200 且有正文 |
+| L3a websocket | 同一条 socket 连续两轮保持会话上下文 |
+| L3b websocket | 切到另一个 provider 的模型时以 1012 关闭，让客户端重发完整输入 |
+| L3c websocket | 未注册模型以 1012 fail closed，而不是静默回退 |
+| log evidence | turn 日志的 provider 是真正服务的那个；日志仍然只含 metadata |
+
+让这套验证可信的几条规则：
+
+- **绝不用「先把生产切过去」来验证发布候选。** 已安装的 LaunchAgent 固定绝对二进制路径，原地替换等于在任何检查跑之前就把坏候选变成故障。
+- **验证期间绝不把 `CODEX_HOME` 指向真实的 `~/.codex`。** 脚本把它重定向进临时根目录；验证过程不得改写操作者的 Codex 配置。
+- **验证协议层，不只验证顺路。** Chat Completions、Responses、WebSocket 帧循环是三套独立传输，过了一套不代表过了另外两套。
+- **日志证据是检查项，不是附赠品。** turn 事件带真实 provider，验证跑完可以事后审计。若日志分不清两个 provider，这次验证就不构成证据。
+- **部分通过等于失败。** L1/L2 通过但任一 L3 失败，不得安装该候选。
+
+默认参数针对 OpenCode Go 的低价模型，可用 `--provider`、`--model`、`--base-url` 或 `WG_VALIDATE_*` 覆盖。不要用自己不愿为几句单句对话付钱的模型做验证。
+
+脚本通过之后，脚本无法替代的人工检查仍然有效：ChatGPT/Codex Desktop 的模型选择器要同时显示官方与外部模型，真实会话要能跨越模型切换继续。这些是 Plan 的 `### User Validation`，只有用户能勾选。
 
 ## Code Review Rules
 

@@ -52,6 +52,7 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 | One package | `go test -race ./internal/quota/ -count=1` |
 | Operator entry | `scripts/gateway <command>` |
 | Doc gate | `python3 <space>/skills/dev-doc-master/scripts/verify-docset.py docs --main DESIGN.md` |
+| Release validation | `scripts/validate-release.sh --base <installed-project-root>` |
 
 ## Implementation Rules
 
@@ -72,6 +73,37 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 - These boundaries need the real host, and a fake must not stand in for them: Keychain access, `launchctl` loading and health waiting, WebSocket upgrade, `codex debug models --bundled` output, and the ChatGPT/Codex Desktop model picker.
 - Any change touching request bodies must run `TestServedGatewayNeverWritesPromptBodies`. Removing the nil factory must make that test fail; that is what makes it meaningful.
 - Run the full gate before committing: `go build ./... && go vet ./... && gofmt -l cmd internal && go test -race ./... -count=1`.
+
+## Release Validation
+
+`go test` proves the code. It does not prove that a real Codex client can use the built binary. Before a release candidate is installed over a running gateway, prove it end to end without touching the running gateway.
+
+Run `scripts/validate-release.sh`. It builds the working tree, then starts that binary against a throwaway project root on a free loopback port, with `CODEX_HOME` redirected into the same throwaway root. The running installation is never restarted, never reconfigured, and never written to.
+
+The script is the contract. It fails closed and reports one PASS/FAIL line per check:
+
+| Layer | What it proves |
+| --- | --- |
+| build | the working tree compiles into `bin/wopal-codex-gateway` |
+| isolation | the scratch port differs from the installed port, and the installed `/_health` instance id is identical before and after the run |
+| L1 catalog | `/v1/models` exposes the configured external model next to the Wopal AI models |
+| L2 HTTP | `POST /v1/chat/completions` and `POST /v1/responses` both return 200 with assistant text through the external provider |
+| L3a websocket | two turns on one socket keep conversation context |
+| L3b websocket | switching to a model on another provider closes the socket with 1012 so the client resends full input |
+| L3c websocket | an unregistered model closes with 1012 instead of silently falling back |
+| log evidence | turn log entries name the provider that actually served the turn, and the log stays metadata-only |
+
+Rules that make this validation trustworthy:
+
+- **Never validate a release candidate by switching the production gateway to it first.** An installed LaunchAgent pins an absolute binary path, so an in-place swap turns a broken candidate into an outage before any check runs.
+- **Never point `CODEX_HOME` at the real `~/.codex` during validation.** The script redirects it into the scratch root; a validation run must not be able to rewrite the operator's Codex config.
+- **Protocol layers, not just the happy path.** Chat Completions, Responses, and the websocket frame loop each have a separate transport; passing one does not cover the others.
+- **Log evidence is a check, not a convenience.** Because turn events name the serving provider, a validation run can be audited afterwards. If a log line cannot distinguish two providers, the validation is not evidence.
+- **A partial pass is a failure.** Do not install a candidate that passed L1 and L2 but failed any L3 check.
+
+The defaults target an OpenCode Go provider with a low-cost model. Override with `--provider`, `--model`, `--base-url`, or the `WG_VALIDATE_*` environment variables. Never validate against a model whose cost you are not willing to pay for a handful of one-sentence turns.
+
+After the script passes, the human-facing checks that a script cannot make still apply: the ChatGPT/Codex Desktop model picker showing official and external models together, and a real conversation surviving a model switch. Those are the Plan `### User Validation` steps, and only the user closes them.
 
 ## Code Review Rules
 

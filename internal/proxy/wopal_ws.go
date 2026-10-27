@@ -291,7 +291,7 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		inputItems = len(input)
 	}
 	turnFields := map[string]any{
-		"event": "turn_started", "turn_id": turnID, "provider": "wopal-ai", "client_model": model,
+		"event": "turn_started", "turn_id": turnID, "provider": s.providerID, "client_model": model,
 		"client_transport": "websocket", "upstream_transport": "http-sse", "input_items": inputItems,
 		"previous_response_id_present": routing.PreviousResponseID(message) != "",
 	}
@@ -324,14 +324,14 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		if ctx.Err() != nil {
 			return
 		}
-		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "error": err.Error(), "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": s.providerID, "error": err.Error(), "duration_ms": time.Since(started).Milliseconds()})
 		s.sendError(http.StatusBadGateway, "gateway_upstream_request_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "upstream_status": resp.StatusCode, "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": s.providerID, "upstream_status": resp.StatusCode, "duration_ms": time.Since(started).Milliseconds()})
 		s.clearActive()
 		s.sendUpstreamError(resp.StatusCode, raw)
 		return
@@ -362,7 +362,7 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 			if errCommit := s.commitState(prepared.NextRequest, output, responseID, prepared.NextCompactionID); errCommit != nil {
 				released := s.releaseState()
 				s.logger.Write(map[string]any{
-					"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": "wopal-ai",
+					"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": s.providerID,
 					"error": errCommit.Error(), "released_bytes": released,
 				})
 			}
@@ -390,9 +390,9 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		return
 	}
 	if terminalType == "response.completed" {
-		s.logger.Write(map[string]any{"event": "turn_completed", "turn_id": turnID, "provider": "wopal-ai", "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_completed", "turn_id": turnID, "provider": s.providerID, "duration_ms": time.Since(started).Milliseconds()})
 	} else {
-		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "terminal_event": terminalType, "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": s.providerID, "terminal_event": terminalType, "duration_ms": time.Since(started).Milliseconds()})
 	}
 }
 
@@ -444,7 +444,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 			return
 		}
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.providerID,
 			"error": err.Error(), "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -455,7 +455,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.providerID,
 			"upstream_status": resp.StatusCode, "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -506,7 +506,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 			return
 		}
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.providerID,
 			"error": err.Error(), "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -515,7 +515,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	}
 	if !terminal || terminalFailed {
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.providerID,
 			"reason": "summary_generation_incomplete", "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -526,7 +526,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	summary := compaction.ExtractSummary(finalOutput, streamedText.String())
 	if err := compaction.ValidateSummary(summary); err != nil {
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.providerID,
 			"reason": "invalid_summary", "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -557,7 +557,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	if err := s.commitState(compactedRequest, []byte("[]"), responseID, compactionID); err != nil {
 		released := s.releaseState()
 		s.logger.Write(map[string]any{
-			"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": s.providerID,
 			"error": err.Error(), "released_bytes": released,
 		})
 		s.clearActive()
@@ -590,7 +590,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 		return
 	}
 	s.logger.Write(map[string]any{
-		"event": "compaction_completed", "turn_id": turnID, "provider": "wopal-ai",
+		"event": "compaction_completed", "turn_id": turnID, "provider": s.providerID,
 		"summary_bytes": len(summary), "duration_ms": time.Since(started).Milliseconds(),
 	})
 }
