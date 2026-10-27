@@ -52,7 +52,7 @@ maintenance: 仅当出现长期有效、且无法由代码、测试或 DESIGN �
 | 全量测试 | `go test -race ./... -count=1` |
 | 单包测试 | `go test -race ./internal/quota/ -count=1` |
 | 操作入口 | `scripts/gateway <command>` |
-| 发布验证 | `scripts/validate-release.sh --base <已安装项目根目录>` |
+| 发布验证 | `scripts/validate-release.sh` |
 
 ## Implementation Rules
 
@@ -79,10 +79,10 @@ maintenance: 仅当出现长期有效、且无法由代码、测试或 DESIGN �
 `go test` 不证明真实客户端能用；发布候选必须在隔离环境端到端验证后才能安装。
 
 - **不得用生产验证。** LaunchAgent 固定绝对二进制路径，原地替换会先制造故障，再发现故障。
-- 入口固定为 `scripts/validate-release.sh`：临时项目根、空闲回环端口、重定向 `CODEX_HOME`，fail closed。验证不得写入真实 `~/.codex`。
+- 断言写在 `cmd/gateway/release_candidate_e2e_test.go`：真实配置装配、真实 listener、本地假上游；不依赖凭据，不产生调用费用。`scripts/validate-release.sh` 只负责跑它并核对已安装实例未变。
 - 触发条件是 diff 触及 `internal/{proxy,routing,catalog,provider,codex,config}`、`cmd/gateway`，或任何改变 Codex 可见 catalog/config 的改动。仅改文档、注释或测试文件不需要跑。
-- 覆盖范围由脚本定义并自行 fail closed，此处不复述，避免与实现漂移。放宽覆盖必须在评审中给出理由。
-- 脚本通过是安装前的最低条件，不替代用户在真实客户端上的验证。
+- 覆盖范围由该测试定义，此处不复述，避免与实现漂移。放宽覆盖必须在评审中给出理由。
+- 测试通过是安装前的最低条件，不替代用户在真实客户端上的验证。
 
 ## Code Review Rules
 

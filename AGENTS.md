@@ -52,7 +52,7 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 | Full tests | `go test -race ./... -count=1` |
 | One package | `go test -race ./internal/quota/ -count=1` |
 | Operator entry | `scripts/gateway <command>` |
-| Release validation | `scripts/validate-release.sh --base <installed-project-root>` |
+| Release validation | `scripts/validate-release.sh` |
 
 ## Implementation Rules
 
@@ -79,10 +79,10 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 `go test` does not prove a real client can use the binary; a candidate must pass an isolated end-to-end run before it is installed.
 
 - **Never validate on the installed instance.** The LaunchAgent pins an absolute binary path, so an in-place swap creates the outage before it reveals it.
-- The entry point is `scripts/validate-release.sh`: scratch project root, free loopback port, redirected `CODEX_HOME`, fail closed. A run must never write the real `~/.codex`.
+- Assertions live in `cmd/gateway/release_candidate_e2e_test.go`: real config assembly, a real listener, a local fake upstream, no credentials and no spend. `scripts/validate-release.sh` only runs it and confirms the installed instance did not change.
 - Run it when the diff touches `internal/{proxy,routing,catalog,provider,codex,config}`, `cmd/gateway`, or anything that changes the Codex-visible catalog or config. Doc, comment and test-only changes do not need it.
-- Coverage is defined by the script, which fails closed on its own; it is not restated here, so it cannot drift. Narrowing it requires a stated reason in review.
-- A passing script is the floor for installation, never a substitute for the user's check in the real client.
+- Coverage is defined by that test, so it is not restated here and cannot drift. Narrowing it requires a stated reason in review.
+- A passing test is the floor for installation, never a substitute for the user's check in the real client.
 
 ## Code Review Rules
 
