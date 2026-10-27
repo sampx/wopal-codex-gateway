@@ -44,10 +44,33 @@ func run(args []string) error {
 	case "serve":
 		return runServe(rest)
 	case "config", "providers", "auth", "models", "catalog", "codex", "service", "quota":
+		if requestsHelp(rest) {
+			printHelp()
+			return nil
+		}
 		return runCommandGroup(command, rest)
 	}
 
 	return fmt.Errorf("unknown command: %s", strings.Join(args, " "))
+}
+
+// requestsHelp reports whether the operator asked for help inside a command
+// group. Without it `providers --help` fails as an unknown subcommand and
+// `models add --help` fails as bad usage, which reads like the binary has no
+// help flag at all. `help` is honoured only as the group's own subcommand so a
+// model literally named "help" is still accepted as an argument.
+func requestsHelp(args []string) bool {
+	for index, arg := range args {
+		switch arg {
+		case "-h", "--help":
+			return true
+		case "help":
+			if index == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func runCommandGroup(group string, args []string) error {
@@ -106,6 +129,7 @@ func printHelp() {
 const helpText = `wopal-codex-gateway
 
 Commands:
+  help, -h, --help                                                            Print this list (also accepted after any command)
   serve --project-root <dir>                                                  Run the gateway daemon
   config migrate --from <existing.json> --to <new.json>                         Prepare a separate version-1 config
   config show                                                                 Print the gateway configuration
