@@ -134,8 +134,12 @@ func runConfigRole(args []string) error {
 				return fmt.Errorf("model role reset but Codex memories resolution failed: %w", err)
 			}
 			resolved := provider.ResolveRole(resolvedCfg, registry, provider.RoleCompaction)
-			if resolved.Status == provider.RoleReady {
-				if _, err := codex.UpdateManagedMemoriesModel(codex.GatewayBaseURL(cfg), resolved.ClientModel); err != nil {
+			memoryModel := resolved.ClientModel
+			if memoryModel == "" && resolved.ProviderID != "" && resolved.UpstreamModel != "" {
+				memoryModel = resolved.ProviderID + "/" + resolved.UpstreamModel
+			}
+			if memoryModel != "" {
+				if _, err := codex.UpdateManagedMemoriesModel(codex.GatewayBaseURL(cfg), memoryModel); err != nil {
 					return fmt.Errorf("model role reset but Codex memories update failed: %w", err)
 				}
 			}
