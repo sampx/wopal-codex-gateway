@@ -52,7 +52,6 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 | Full tests | `go test -race ./... -count=1` |
 | One package | `go test -race ./internal/quota/ -count=1` |
 | Operator entry | `scripts/gateway <command>` |
-| Doc gate | `python3 <space>/skills/dev-doc-master/scripts/verify-docset.py docs --main DESIGN.md` |
 | Release validation | `scripts/validate-release.sh --base <installed-project-root>` |
 
 ## Implementation Rules
@@ -77,13 +76,13 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 
 ## Release Validation
 
-`go test` proves logic, not that a real client can use the binary.
+`go test` does not prove a real client can use the binary; a candidate must pass an isolated end-to-end run before it is installed.
 
-- **Never replace the running installation to validate a candidate.** The LaunchAgent pins an absolute binary path, so an in-place swap turns a broken candidate into an outage before any check runs.
-- `scripts/validate-release.sh` is the only entry point: it serves the build output from a scratch project root on a free loopback port with a redirected `CODEX_HOME`, fails closed, and reports one PASS/FAIL line per check. A validation run must never write the real `~/.codex`.
-- Coverage is fixed: merged catalog exposes official, Wopal AI and external models together; `/v1/chat/completions` and `/v1/responses` each return assistant text through an external provider; two turns on one socket keep context; a cross-provider switch and an unregistered model both close with 1012 instead of silently falling back; turn logs name the serving provider and stay metadata-only; the installed `/_health` instance id is identical before and after.
-- Any failing transport layer blocks installation. Chat Completions, Responses, and the websocket frame loop are three separate transports; passing one does not cover the others.
-- Validation traffic uses low-cost models only. The model picker and a real conversation surviving a switch cannot be scripted; they are user validation and are never self-signed by an agent.
+- **Never validate on the installed instance.** The LaunchAgent pins an absolute binary path, so an in-place swap creates the outage before it reveals it.
+- The entry point is `scripts/validate-release.sh`: scratch project root, free loopback port, redirected `CODEX_HOME`, fail closed. A run must never write the real `~/.codex`.
+- Run it when the diff touches `internal/{proxy,routing,catalog,provider,codex,config}`, `cmd/gateway`, or anything that changes the Codex-visible catalog or config. Doc, comment and test-only changes do not need it.
+- Coverage is defined by the script, which fails closed on its own; it is not restated here, so it cannot drift. Narrowing it requires a stated reason in review.
+- A passing script is the floor for installation, never a substitute for the user's check in the real client.
 
 ## Code Review Rules
 
@@ -101,4 +100,6 @@ Generic review method lives in the review skills this space assembles: `df-imple
 - Is a new state file under `runtime/`, and recorded in `## Data and State Model` of the DESIGN?
 
 ## User-Supplied Rules
+
+- **Validation traffic uses low-cost models only.** A release validation sends a handful of one-sentence requests; never burn quota on a premium model to prove routing.
 

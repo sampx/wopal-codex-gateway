@@ -52,7 +52,6 @@ maintenance: 仅当出现长期有效、且无法由代码、测试或 DESIGN �
 | 全量测试 | `go test -race ./... -count=1` |
 | 单包测试 | `go test -race ./internal/quota/ -count=1` |
 | 操作入口 | `scripts/gateway <command>` |
-| 文档门禁 | `python3 <space>/skills/dev-doc-master/scripts/verify-docset.py docs --main DESIGN.md` |
 | 发布验证 | `scripts/validate-release.sh --base <已安装项目根目录>` |
 
 ## Implementation Rules
@@ -77,13 +76,13 @@ maintenance: 仅当出现长期有效、且无法由代码、测试或 DESIGN �
 
 ## Release Validation
 
-`go test` 只证明代码逻辑，不证明真实客户端能用这个二进制。
+`go test` 不证明真实客户端能用；发布候选必须在隔离环境端到端验证后才能安装。
 
-- **不得先替换正在运行的安装再验证。** LaunchAgent 固定绝对二进制路径，原地替换会在任何检查之前把坏候选变成故障。
-- `scripts/validate-release.sh` 是唯一入口：在临时项目根、空闲回环端口和重定向的 `CODEX_HOME` 上启动构建产物，fail closed，逐项 PASS/FAIL。验证进程不得写入真实 `~/.codex`。
-- 验证必须覆盖：合并后 catalog 同时含官方、Wopal AI 与外部模型；`/v1/chat/completions` 与 `/v1/responses` 各自经外部 provider 返回正文；同 socket 连续两轮保持上下文；跨 provider 切换与未注册模型都以 1012 关闭而不静默回退；turn 日志的 provider 是真正服务的那个且仍只含 metadata；运行前后已安装实例的 `/_health` instance id 不变。
-- 任一协议层失败即不得安装。Chat Completions、Responses、WebSocket 帧循环是三套独立传输，过一个不代表过其余。
-- 验证流量只用低价模型。模型选择器与真实会话切换无法脚本化，属于用户验证，不由脚本代替。
+- **不得用生产验证。** LaunchAgent 固定绝对二进制路径，原地替换会先制造故障，再发现故障。
+- 入口固定为 `scripts/validate-release.sh`：临时项目根、空闲回环端口、重定向 `CODEX_HOME`，fail closed。验证不得写入真实 `~/.codex`。
+- 触发条件是 diff 触及 `internal/{proxy,routing,catalog,provider,codex,config}`、`cmd/gateway`，或任何改变 Codex 可见 catalog/config 的改动。仅改文档、注释或测试文件不需要跑。
+- 覆盖范围由脚本定义并自行 fail closed，此处不复述，避免与实现漂移。放宽覆盖必须在评审中给出理由。
+- 脚本通过是安装前的最低条件，不替代用户在真实客户端上的验证。
 
 ## Code Review Rules
 
@@ -101,4 +100,6 @@ maintenance: 仅当出现长期有效、且无法由代码、测试或 DESIGN �
 - 新增状态文件是否在 `runtime/` 且已写进 DESIGN 的 `## Data and State Model`。
 
 ## User-Supplied Rules
+
+- **验证流量只用低价模型。** 一次发布验证只发少量单句请求，不得使用高价位模型消耗额度。
 
