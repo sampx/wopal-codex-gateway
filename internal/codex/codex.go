@@ -50,7 +50,7 @@ func InstallIntoCodex(cfg *config.GatewayConfig, compactionModel string) (*catal
 	if err != nil {
 		return nil, err
 	}
-	gatewayBaseURL := fmt.Sprintf("http://%s:%d/v1", cfg.Listen.Host, cfg.Listen.Port)
+	gatewayBaseURL := GatewayBaseURL(cfg)
 	currentState := captureRestoreState(currentText)
 	currentState.ExposedExternalModels = mergeExposedExternalModels(currentState.ExposedExternalModels, refresh.ExternalNames)
 	alreadyManaged := currentState.OpenAIBaseURL.Value == gatewayBaseURL &&
@@ -88,6 +88,45 @@ func InstallIntoCodex(cfg *config.GatewayConfig, compactionModel string) (*catal
 		return nil, err
 	}
 	return refresh, nil
+}
+
+// GatewayBaseURL is the Codex-facing endpoint installed into config.toml.
+func GatewayBaseURL(cfg *config.GatewayConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d/v1", cfg.Listen.Host, cfg.Listen.Port)
+}
+
+// UpdateManagedMemoriesModel keeps Codex memories aligned with the current
+// compaction role without changing the pre-install restore snapshot.
+func UpdateManagedMemoriesModel(gatewayBaseURL, memoryModel string) (bool, error) {
+	memoryModel = strings.TrimSpace(memoryModel)
+	if memoryModel == "" {
+		return false, fmt.Errorf("model_role_unavailable: compaction role is unavailable")
+	}
+	configFile := config.CodexConfigPath()
+	currentText, err := readCodexFile(configFile)
+	if err != nil {
+		return false, err
+	}
+	if currentText == "" {
+		return false, nil
+	}
+	managedCatalog := getRootString(currentText, codexManagedModelCatalogJSONKey).Value == config.CodexGatewayCatalogPath()
+	managedBase := getRootString(currentText, codexManagedOpenAIBaseURLKey).Value == strings.TrimRight(strings.TrimSpace(gatewayBaseURL), "/")
+	if !managedCatalog || !managedBase {
+		return false, nil
+	}
+	nextText := setSectionString(currentText, codexManagedMemoriesSection, codexManagedMemoryExtractModelKey, memoryModel)
+	nextText = setSectionString(nextText, codexManagedMemoriesSection, codexManagedMemoryConsolidationKey, memoryModel)
+	if nextText == currentText {
+		return false, nil
+	}
+	if err := writeCodexFileAtomic(configFile, nextText); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RestoreCodex undoes `codex install` and stops the gateway service.

@@ -201,3 +201,56 @@ func TestWebsocketExternalProviderSwitchReconnectsByProviderIdentity(t *testing.
 		t.Fatalf("cross-provider switch payload=%s err=%v, want reconnect close", payload, err)
 	}
 }
+
+func TestWebsocketRouteChangeFailsClosedWhenCurrentRouteDisappears(t *testing.T) {
+	tableA := routing.NewTable(map[string]routing.Route{
+		"old-alias": {Kind: routing.External, ProviderID: "one"},
+	}, nil, nil)
+	tableB := routing.NewTable(nil, nil, nil)
+	var current atomic.Pointer[routing.Table]
+	current.Store(tableA)
+	resolve := func(model string) (routing.Route, error) {
+		return current.Load().Resolve(model)
+	}
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, payload, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if reconnectForWebsocketRouteChange(conn, "one", payload, nil, resolve) {
+				return
+			}
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"kept"}`))
+		}
+	}))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "old-alias"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, payload, err := conn.ReadMessage(); err != nil || !strings.Contains(string(payload), "kept") {
+		t.Fatalf("current route payload=%s err=%v", payload, err)
+	}
+
+	current.Store(tableB)
+	if err := conn.WriteJSON(map[string]any{"type": "response.append", "model": "old-alias"}); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := conn.ReadMessage()
+	if !websocket.IsCloseError(err, websocket.CloseServiceRestart) {
+		t.Fatalf("deleted route must fail closed, payload=%s err=%v", payload, err)
+	}
+}

@@ -31,7 +31,16 @@ func reconnectForWebsocketRouteChange(conn *websocket.Conn, boundProvider string
 		return false
 	}
 	next, err := resolve(model)
-	if err != nil || next.ProviderID == "" || next.ProviderID == boundProvider {
+	if err != nil {
+		if logger != nil {
+			logger.Write(map[string]any{"event": "websocket_route_rejected", "model": model, "error": err.Error()})
+		}
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(
+			websocket.CloseServiceRestart, "model route unavailable; reconnect and resend full input",
+		), time.Now().Add(time.Second))
+		return true
+	}
+	if next.ProviderID == "" || next.ProviderID == boundProvider {
 		return false
 	}
 	if logger != nil {
@@ -58,7 +67,7 @@ func legacyRouteResolver(model string) (routing.Route, error) {
 	}
 }
 
-func rewriteQuotaFailoverWebsocketFrame(payload []byte, quotaGuard *quota.Guard, accountID, requestedOfficialModel string, now time.Time) ([]byte, bool, bool) {
+func rewriteQuotaFailoverWebsocketFrame(payload []byte, quotaGuard *quota.Guard, accountID, requestedOfficialModel, effectiveFallback string, now time.Time) ([]byte, bool, bool) {
 	var request map[string]any
 	if json.Unmarshal(payload, &request) != nil {
 		return payload, false, false
@@ -74,10 +83,10 @@ func rewriteQuotaFailoverWebsocketFrame(payload []byte, quotaGuard *quota.Guard,
 	if routing.Classify(model) != routing.Official {
 		return payload, false, false
 	}
-	if blocked, _ := quotaGuard.BlockedModel(accountID, model, now); !blocked {
+	if blocked, _ := quotaGuard.BlockedModelWithTarget(accountID, model, effectiveFallback, now); !blocked {
 		return payload, true, false
 	}
-	request["model"] = routing.OfficialQuotaFailoverModel
+	request["model"] = effectiveFallback
 	rewritten, err := json.Marshal(request)
 	if err != nil {
 		return payload, false, false

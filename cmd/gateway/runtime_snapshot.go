@@ -91,6 +91,7 @@ type runtimeBackend struct {
 	stop     func()
 	logger   *activity.Logger
 	target   *url.URL
+	routes   *routing.Table
 	active   atomic.Int64
 	draining atomic.Bool
 	stopOnce sync.Once
@@ -170,6 +171,14 @@ func (s *backendSwitcher) Current() *runtimeBackend {
 		return nil
 	}
 	return s.active.Load()
+}
+
+func (s *backendSwitcher) Resolve(model string) (routing.Route, error) {
+	backend := s.Current()
+	if backend == nil || backend.routes == nil {
+		return routing.Route{}, fmt.Errorf("gateway runtime is unavailable")
+	}
+	return backend.routes.Resolve(model)
 }
 
 func (s *backendSwitcher) Close() {

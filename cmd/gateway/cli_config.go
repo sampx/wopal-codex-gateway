@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"wopal-codex-gateway/internal/catalog"
+	"wopal-codex-gateway/internal/codex"
 	"wopal-codex-gateway/internal/config"
 	"wopal-codex-gateway/internal/provider"
 )
@@ -97,6 +98,11 @@ func runConfigRole(args []string) error {
 		if err := signalGatewayReloadAfterCommit(); err != nil {
 			return fmt.Errorf("model role saved but gateway reload failed: %w", err)
 		}
+		if name == provider.RoleCompaction {
+			if _, err := codex.UpdateManagedMemoriesModel(codex.GatewayBaseURL(cfg), resolved.ClientModel); err != nil {
+				return fmt.Errorf("model role saved but Codex memories update failed: %w", err)
+			}
+		}
 		return nil
 	case "reset":
 		if len(args) != 2 {
@@ -117,6 +123,22 @@ func runConfigRole(args []string) error {
 		}
 		if err := signalGatewayReloadAfterCommit(); err != nil {
 			return fmt.Errorf("model role reset but gateway reload failed: %w", err)
+		}
+		if name == provider.RoleCompaction {
+			resolvedCfg, err := resolveRuntimeModels(cfg)
+			if err != nil {
+				return fmt.Errorf("model role reset but Codex memories resolution failed: %w", err)
+			}
+			registry, err := provider.Build(resolvedCfg)
+			if err != nil {
+				return fmt.Errorf("model role reset but Codex memories resolution failed: %w", err)
+			}
+			resolved := provider.ResolveRole(resolvedCfg, registry, provider.RoleCompaction)
+			if resolved.Status == provider.RoleReady {
+				if _, err := codex.UpdateManagedMemoriesModel(codex.GatewayBaseURL(cfg), resolved.ClientModel); err != nil {
+					return fmt.Errorf("model role reset but Codex memories update failed: %w", err)
+				}
+			}
 		}
 		return nil
 	default:

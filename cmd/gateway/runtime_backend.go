@@ -23,7 +23,7 @@ var (
 	runtimeGetWopalAPIKey    = keychain.GetWopalAPIKey
 	runtimeLoadProviderKeys  = loadRuntimeProviderKeys
 	runtimeHasProviderAPIKey = keychain.HasProviderAPIKey
-	startGatewayBackendHook  = startGatewayBackendWithLogger
+	startGatewayBackendHook  = startGatewayBackendWithLoggerAndResolver
 )
 
 type runtimeConfigCheckpoint struct {
@@ -61,10 +61,14 @@ func (c *runtimeConfigCheckpoint) Restore() error {
 }
 
 func startGatewayBackend(root, gatewayConfigPath, instance string) (*runtimeBackend, *gatewaySnapshot, error) {
-	return startGatewayBackendWithLogger(root, gatewayConfigPath, instance, nil, newRuntimeReloadStatus())
+	return startGatewayBackendWithLoggerAndResolver(root, gatewayConfigPath, instance, nil, newRuntimeReloadStatus(), nil)
 }
 
 func startGatewayBackendWithLogger(root, gatewayConfigPath, instance string, sharedLogger *activity.Logger, reloadStatus *runtimeReloadStatus) (*runtimeBackend, *gatewaySnapshot, error) {
+	return startGatewayBackendWithLoggerAndResolver(root, gatewayConfigPath, instance, sharedLogger, reloadStatus, nil)
+}
+
+func startGatewayBackendWithLoggerAndResolver(root, gatewayConfigPath, instance string, sharedLogger *activity.Logger, reloadStatus *runtimeReloadStatus, resolve proxy.RouteResolver) (*runtimeBackend, *gatewaySnapshot, error) {
 	snapshot, err := loadGatewaySnapshot(root, gatewayConfigPath)
 	if err != nil {
 		return nil, nil, err
@@ -93,7 +97,11 @@ func startGatewayBackendWithLogger(root, gatewayConfigPath, instance string, sha
 		Reload:        reloadStatus,
 		StatusGateway: snapshot.gateway,
 	}
-	service, logger, err := buildGatewayServiceWithRuntimeLogger(root, &internal, wopalKey, providerKeys, instance, snapshot.routes.Resolve, true, sharedLogger, serviceRuntime)
+	activeResolver := resolve
+	if activeResolver == nil {
+		activeResolver = snapshot.routes.Resolve
+	}
+	service, logger, err := buildGatewayServiceWithRuntimeLogger(root, &internal, wopalKey, providerKeys, instance, activeResolver, true, sharedLogger, serviceRuntime)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -133,6 +141,7 @@ func startGatewayBackendWithLogger(root, gatewayConfigPath, instance string, sha
 	})
 	backend.logger = logger
 	backend.target = target
+	backend.routes = snapshot.routes
 	return backend, snapshot, nil
 }
 
@@ -172,11 +181,15 @@ func runtimeRolesForSnapshot(snapshot *gatewaySnapshot) proxy.RuntimeRoles {
 }
 
 func reloadGatewayBackend(root, gatewayConfigPath, instance string, listen config.ListenConfig, sharedLogger *activity.Logger, reloadStatus *runtimeReloadStatus) (*runtimeBackend, error) {
+	return reloadGatewayBackendWithResolver(root, gatewayConfigPath, instance, listen, sharedLogger, reloadStatus, nil)
+}
+
+func reloadGatewayBackendWithResolver(root, gatewayConfigPath, instance string, listen config.ListenConfig, sharedLogger *activity.Logger, reloadStatus *runtimeReloadStatus, resolve proxy.RouteResolver) (*runtimeBackend, error) {
 	checkpoint, err := captureRuntimeConfigCheckpoint(root)
 	if err != nil {
 		return nil, err
 	}
-	candidate, snapshot, err := startGatewayBackendHook(root, gatewayConfigPath, instance, sharedLogger, reloadStatus)
+	candidate, snapshot, err := startGatewayBackendHook(root, gatewayConfigPath, instance, sharedLogger, reloadStatus, resolve)
 	if err != nil {
 		if restoreErr := checkpoint.Restore(); restoreErr != nil {
 			return nil, fmt.Errorf("%v; restore runtime config: %w", err, restoreErr)

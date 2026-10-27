@@ -110,7 +110,7 @@ Commands:
   config migrate --from <existing.json> --to <new.json>                         Prepare a separate version-1 config
   config show                                                                 Print the gateway configuration
   config wopal [--base-url <url>] [--tool-mode code_mode_only|code_mode|direct] [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
-  providers set <provider> --base-url <url> [--base-url-for <protocol>=<url>]... [--models-url <url>] [--models-auth none|provider-key] [--header <name>=<value>]... [--protocol <default>]
+  providers set <provider> --base-url <url> [--base-url-for <protocol>=<url>]... [--models-url <url>] [--models-auth none|provider-key] [--header <name>=<value>]... [--protocol <default>] [--tool-mode <mode>]
   providers remove <provider>                                                   Remove an unreferenced external provider
   auth set [--provider <id>]                                                  Store and validate a provider API key
   auth test [--provider <id>]                                                 Validate a stored provider API key

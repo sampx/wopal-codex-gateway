@@ -72,11 +72,12 @@ func runServe(args []string) error {
 	defer daemonLogger.Close()
 
 	reloadStatus := newRuntimeReloadStatus()
-	backend, snapshot, err := startGatewayBackendWithLogger(root, gatewayConfigPath, *instanceFlag, daemonLogger, reloadStatus)
+	switcher := newBackendSwitcher(nil)
+	backend, snapshot, err := startGatewayBackendWithLoggerAndResolver(root, gatewayConfigPath, *instanceFlag, daemonLogger, reloadStatus, switcher.Resolve)
 	if err != nil {
 		return err
 	}
-	switcher := newBackendSwitcher(backend)
+	switcher.Swap(backend)
 	logBackend(backend, map[string]any{"event": "gateway_started", "architecture": "snapshot-frontdoor", "port": snapshot.gateway.Listen.Port})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -105,7 +106,7 @@ func runServe(args []string) error {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				candidate, reloadErr := reloadGatewayBackend(root, gatewayConfigPath, *instanceFlag, listen, daemonLogger, reloadStatus)
+				candidate, reloadErr := reloadGatewayBackendWithResolver(root, gatewayConfigPath, *instanceFlag, listen, daemonLogger, reloadStatus, switcher.Resolve)
 				if reloadErr != nil {
 					reloadStatus.MarkFailure(reloadErr)
 					logBackend(switcher.Current(), map[string]any{"event": "gateway_reload_failed", "error": reloadErr.Error()})

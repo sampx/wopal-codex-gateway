@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-Wopal Codex Gateway 是运行在 macOS 本机上的 Codex 路由网关，交付形态是单个 Go 二进制 `bin/wopal-codex-gateway`。它让 ChatGPT / Codex Desktop 或 Codex CLI 在保留官方模型能力的同时，也能在同一个模型选择器、同一个会话中使用 `wopal-ai/*` 模型。
+Wopal Codex Gateway 是运行在 macOS 本机上的 Codex 路由网关，交付形态是单个 Go 二进制 `bin/wopal-codex-gateway`。它让 ChatGPT / Codex Desktop 或 Codex CLI 在保留官方模型能力的同时，也能在同一个模型选择器、同一个会话中使用 Wopal AI 与已配置的其他外部 Provider 模型。
 
 它不只是一个 HTTP 代理，还负责模型目录合并、Codex 配置接管与恢复、WebSocket/HTTP 跨 Provider 路由、可移植的会话压缩、老会话兼容，以及官方额度保护与自动 failover/failback。
 
@@ -29,12 +29,13 @@ Wopal Codex Gateway 是运行在 macOS 本机上的 Codex 路由网关，交付�
 
 ## 1. 能力概览
 
-### 只有两种模型命名空间
+### 精确模型名路由
 
 - 无命名空间，例如 `gpt-6.1-sol`，走官方线路；
-- `wopal-ai/<model>`，例如 `wopal-ai/deepseek-v4.1-flash`，走 Wopal AI。
+- `wopal-ai/<model>`，例如 `wopal-ai/deepseek-v4.1-flash`，走 Wopal AI；
+- 其他已配置外部模型使用 `<provider-id>/<upstream-model>` 或显式 alias。
 
-其他命名空间一律拒绝，返回 HTTP 404 和 `model namespace is disabled`。官方凭证在进入 Wopal AI 路径前会被移除，不会转发给第三方 Provider。
+未知命名空间、已删除 alias 和未知 bare model 都会 fail closed，返回 `model_route_unavailable`。官方凭证在进入外部 Provider 路径前会被移除。
 
 ### 同一会话可跨 Provider 切换
 
@@ -48,7 +49,7 @@ WebSocket 跨 Provider 时，Gateway 会用 `1012 Service Restart` 关闭旧连�
 
 ### 会话压缩由 Gateway 接管
 
-新的会话压缩统一由：
+新的会话压缩使用当前 `compaction` role，默认目标是：
 
 ```text
 wopal-ai/deepseek-v4.1-flash
@@ -56,9 +57,9 @@ wopal-ai/deepseek-v4.1-flash
 
 生成摘要，再封装为 Gateway 自己的 `wgcp1` 可移植 capsule，不再生成只能由 OpenAI 理解的 opaque 压缩状态。
 
-### Codex Memory 走 Wopal AI
+### Codex Memory 与 compaction 共用 role
 
-Gateway 安装期间会配置：
+Gateway 安装期间会把当前 `compaction` 目标写入 Codex 的两个 memory 字段。默认 role 对应：
 
 ```toml
 [memories]
@@ -66,7 +67,7 @@ extract_model = "wopal-ai/deepseek-v4.1-flash"
 consolidation_model = "wopal-ai/deepseek-v4.1-flash"
 ```
 
-因此 Memory extraction / consolidation 不会消耗主要官方模型额度。
+Codex 仍由该 Gateway 接管时，修改或重置 `compaction` 会同步更新这两个受管字段。role 可以指向任意已配置的外部 Provider 模型。
 
 ### 官方额度自动保护
 
@@ -86,7 +87,7 @@ consolidation_model = "wopal-ai/deepseek-v4.1-flash"
 ```text
 请求的官方模型
     -> quota guard
-    -> wopal-ai/deepseek-v4.1-flash
+    -> 当前 officialFallback role
 ```
 
 额度 reset 后，下一次安全的 sampling step 会重新连接并切回原来请求的官方模型。
@@ -283,14 +284,14 @@ bin/wopal-codex-gateway codex install
 
 1. 检查 base URL 与已保存的 API Key；
 2. 从 `codex debug models --bundled` 读取官方模型目录；
-3. 合并官方模型与 `wopal-ai/*` 模型；
+3. 合并官方、Wopal AI 与所有已配置外部 Provider 模型；
 4. 生成 Gateway 专用 Codex model catalog；
 5. 安装并启动 `com.wopal.codex-gateway` LaunchAgent，程序参数为 `<binary> serve --project-root <root>`；
 6. 等待 `/_health` 健康检查通过；
 7. 记录安装前的 Codex 配置恢复点；
 8. 将 Codex `openai_base_url` 指向本地 Gateway；
 9. 将 Codex `model_catalog_json` 指向合并后的 catalog；
-10. 配置 Memory extraction / consolidation 使用 Wopal AI；
+10. 配置 Memory extraction / consolidation 使用当前 `compaction` role；
 11. 保留用户其他 Codex 配置与当前 `model` 不变。
 
 二进制缺失、配置非法或健康检查失败时，命令会在打印成功前以非 0 状态退出。
@@ -424,17 +425,23 @@ Wopal AI -> 官方模型
 
 ### 自动 compaction
 
-无论当前前台模型是官方还是 Wopal AI，新的会话 compaction 都由 Gateway 接管，使用：
+无论当前前台模型是官方还是 Wopal AI，新的会话 compaction 都由 Gateway 接管，使用当前 `compaction` role。默认目标为：
 
 ```text
 wopal-ai/deepseek-v4.1-flash
 ```
 
-这不是 Codex `[memories]` 配置，而是 Gateway runtime 策略。
+Codex memories 使用同一个 role；因此 Gateway 接管期间两者不会指向不同模型。查看或修改 role：
+
+```sh
+bin/wopal-codex-gateway config role
+bin/wopal-codex-gateway config role set compaction --provider vendor --model model-name
+bin/wopal-codex-gateway config role reset compaction
+```
 
 ### 自动 quota failover/failback
 
-每次新的 sampling step 之前，Gateway 都会重新检查额度。处于保护区的官方请求会切到 Wopal fallback 模型；reset 之后，下一次安全的 step 会切回原来请求的官方模型。
+每次新的 sampling step 之前，Gateway 都会重新检查额度。处于保护区的官方请求会切到当前 `officialFallback` role；reset 之后，下一次安全的 step 会切回原来请求的官方模型。
 
 Provider 切换、quota failover 或 failback 时出现 WebSocket `1012 Service Restart` 是预期控制行为，Codex 应重新建立连接并重放输入。
 
@@ -449,7 +456,7 @@ Provider 切换、quota failover 或 failback 时出现 WebSocket `1012 Service 
 curl -fsS http://127.0.0.1:11435/_status
 ```
 
-`official_quota.state` 为 `protected` 表示官方额度处于保护区；`official_quota.failover.active` 为 `true` 表示官方请求正在被自动换成 Wopal 模型。
+`official_quota.state` 为 `protected` 表示官方额度处于保护区；`official_quota.failover.active` 为 `true` 表示官方请求正在被自动换成当前 `officialFallback` 目标。Provider 与 role 的 readiness 也会出现在 `/_status` 中。
 
 通知依赖 `terminal-notifier`；未安装时不会弹通知，路由功能不受影响。需要关闭通知时，在 `runtime/config.json` 中设置：
 

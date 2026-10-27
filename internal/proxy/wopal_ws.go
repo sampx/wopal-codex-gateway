@@ -101,7 +101,7 @@ func serveExternalWebsocketBridgeWithCompaction(c *gin.Context, logger *activity
 			continue
 		}
 		if requestedOfficialModel != "" && failoverGuard != nil {
-			rewritten, failback, changed := rewriteQuotaFailoverWebsocketFrame(payload, failoverGuard, failoverAccountID, requestedOfficialModel, time.Now())
+			rewritten, failback, changed := rewriteQuotaFailoverWebsocketFrame(payload, failoverGuard, failoverAccountID, requestedOfficialModel, s.model, time.Now())
 			if failback {
 				logger.Write(map[string]any{"event": "official_quota_failback", "requested_model": requestedOfficialModel, "transport": "websocket"})
 				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "official quota recovered; reconnect and resend full input"), time.Now().Add(time.Second))

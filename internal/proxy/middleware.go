@@ -120,7 +120,7 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 				return
 			}
 			logger.Write(map[string]any{"event": "route_selected", "provider": roles.Compaction.ProviderID, "model": roles.Compaction.ClientModel, "path": path, "purpose": "compaction"})
-			_ = prepareWopalHTTP(c, logger, roles.Compaction.ClientModel, nativeReplay, inspection)
+			_ = prepareExternalHTTP(c, logger, roles.Compaction.ClientModel, roles.Compaction.ProviderID, roles.Compaction.ClientModel, nativeReplay, inspection)
 			return
 		}
 
@@ -140,7 +140,7 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 				serveExternalWebsocketBridgeWithCompaction(c, logger, model, route.ProviderID, resolve, readyRoleModel(roles.Compaction))
 				return
 			}
-			if c.Request.Method == http.MethodPost && !prepareWopalHTTP(c, logger, model, nativeReplay, inspection) {
+			if c.Request.Method == http.MethodPost && !prepareExternalHTTP(c, logger, model, route.ProviderID, readyRoleModel(roles.Compaction), nativeReplay, inspection) {
 				return
 			}
 			c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
@@ -154,6 +154,9 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 				c.Set(clientContractWatcherContextKey, clientWatcher)
 				c.Abort()
 				serveExternalWebsocketBridgeWithCompaction(c, logger, model, route.ProviderID, resolve, readyRoleModel(roles.Compaction))
+				return
+			}
+			if c.Request.Method == http.MethodPost && !prepareExternalHTTP(c, logger, model, route.ProviderID, readyRoleModel(roles.Compaction), nativeReplay, inspection) {
 				return
 			}
 			c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)
@@ -191,7 +194,7 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 							c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "quota_failover_rewrite_failed", "type": "invalid_request_error", "message": err.Error()}})
 							return
 						}
-						if !prepareWopalHTTP(c, logger, effectiveFallback, nativeReplay, inspection) {
+						if !prepareExternalHTTP(c, logger, effectiveFallback, roles.OfficialFallback.ProviderID, readyRoleModel(roles.Compaction), nativeReplay, inspection) {
 							return
 						}
 						c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)

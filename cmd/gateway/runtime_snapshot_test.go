@@ -6,13 +6,19 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"wopal-codex-gateway/internal/activity"
 	"wopal-codex-gateway/internal/catalog"
 	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/proxy"
+	"wopal-codex-gateway/internal/quota"
+	"wopal-codex-gateway/internal/routing"
 )
 
 func TestBackendSwitcherDrainsOldSnapshotAfterInflightRequestCompletes(t *testing.T) {
@@ -59,6 +65,78 @@ func TestBackendSwitcherDrainsOldSnapshotAfterInflightRequestCompletes(t *testin
 	case <-oldStopped:
 	case <-time.After(time.Second):
 		t.Fatal("old snapshot was not stopped after its final request completed")
+	}
+}
+
+func TestBackendSwitcherResolveUsesCurrentSnapshot(t *testing.T) {
+	oldRoutes := routing.NewTable(map[string]routing.Route{
+		"old-alias": {Kind: routing.External, ProviderID: "vendor"},
+	}, nil, nil)
+	nextRoutes := routing.NewTable(nil, nil, nil)
+	old := newRuntimeBackend(http.NotFoundHandler(), nil)
+	old.routes = oldRoutes
+	next := newRuntimeBackend(http.NotFoundHandler(), nil)
+	next.routes = nextRoutes
+	switcher := newBackendSwitcher(old)
+
+	if route, err := switcher.Resolve("old-alias"); err != nil || route.ProviderID != "vendor" {
+		t.Fatalf("old snapshot route = %#v, %v", route, err)
+	}
+	switcher.Swap(next)
+	if _, err := switcher.Resolve("old-alias"); err == nil {
+		t.Fatal("route resolver kept using the previous snapshot after swap")
+	}
+}
+
+func TestEstablishedWebsocketUsesCurrentSnapshotAfterSwap(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tableA := routing.NewTable(map[string]routing.Route{
+		"old-alias": {Kind: routing.External, ProviderID: "vendor"},
+	}, nil, nil)
+	tableB := routing.NewTable(nil, nil, nil)
+	switcher := newBackendSwitcher(nil)
+	engine := gin.New()
+	engine.Use(proxy.RoutingMiddlewareWithResolverAndRoles(nil, quota.NewGuard(nil), switcher.Resolve, proxy.RuntimeRoles{}))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		c.Data(http.StatusOK, "text/event-stream", []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"one\",\"status\":\"completed\",\"output\":[]}}\n\n"))
+	})
+	oldBackend := newRuntimeBackend(engine, nil)
+	oldBackend.routes = tableA
+	nextBackend := newRuntimeBackend(http.NotFoundHandler(), nil)
+	nextBackend.routes = tableB
+	switcher.Swap(oldBackend)
+
+	server := httptest.NewServer(switcher)
+	defer server.Close()
+	header := http.Header{}
+	header.Set("Authorization", "Bearer official-token")
+	header.Set("ChatGPT-Account-ID", "acct-reload")
+	header.Set("X-Codex-Routing-Hint", "model=old-alias")
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "old-alias", "input": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		var event map[string]any
+		if err := conn.ReadJSON(&event); err != nil {
+			t.Fatalf("initial websocket turn failed: %v", err)
+		}
+		if event["type"] == "response.completed" {
+			break
+		}
+	}
+
+	switcher.Swap(nextBackend)
+	if err := conn.WriteJSON(map[string]any{"type": "response.append", "model": "old-alias", "input": []any{}}); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := conn.ReadMessage()
+	if !websocket.IsCloseError(err, websocket.CloseServiceRestart) {
+		t.Fatalf("old socket kept the deleted route, payload=%s err=%v", payload, err)
 	}
 }
 
@@ -155,7 +233,7 @@ func TestReloadGatewayBackendFailureRestoresRuntimeConfigAndReturnsNoCandidate(t
 		t.Fatal(err)
 	}
 	originalStart := startGatewayBackendHook
-	startGatewayBackendHook = func(string, string, string, *activity.Logger, *runtimeReloadStatus) (*runtimeBackend, *gatewaySnapshot, error) {
+	startGatewayBackendHook = func(string, string, string, *activity.Logger, *runtimeReloadStatus, proxy.RouteResolver) (*runtimeBackend, *gatewaySnapshot, error) {
 		if err := os.WriteFile(path, []byte("failed-candidate\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -259,6 +260,59 @@ func TestConfigRoleSetListAndReset(t *testing.T) {
 	}
 	if saved.ModelRoles.OfficialFallback != nil {
 		t.Fatalf("role reset left explicit config: %+v", saved.ModelRoles.OfficialFallback)
+	}
+}
+
+func TestConfigRoleCompactionUpdatesInstalledCodexMemories(t *testing.T) {
+	setupConfigAuthTestRoot(t)
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	if err := os.MkdirAll(filepath.Dir(config.CodexConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.WopalAI.Models = append(cfg.WopalAI.Models, config.ExternalModelConfig{Name: "deepseek-v4.1-flash"})
+	cfg.Providers["vendor"] = config.ProviderConfig{
+		BaseURL: "https://vendor.test",
+		Models:  []config.ExternalModelConfig{{Name: "upstream", Alias: "friendly", Protocol: config.ProtocolOpenAIResponses}},
+	}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	gatewayBaseURL := fmt.Sprintf("http://%s:%d/v1", cfg.Listen.Host, cfg.Listen.Port)
+	codexConfig := "model_catalog_json = " + fmt.Sprintf("%q", config.CodexGatewayCatalogPath()) + "\n" +
+		"openai_base_url = " + fmt.Sprintf("%q", gatewayBaseURL) + "\n\n" +
+		"[memories]\n" +
+		"extract_model = \"wopal-ai/old\"\n" +
+		"consolidation_model = \"wopal-ai/old\"\n\n" +
+		"[other]\nkeep = true\n"
+	if err := os.WriteFile(config.CodexConfigPath(), []byte(codexConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readCodexConfig := func() string {
+		t.Helper()
+		data, err := os.ReadFile(config.CodexConfigPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	if err := runConfigCommand("role", []string{"set", "compaction", "--provider", "vendor", "--model", "upstream"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCodexConfig(); strings.Count(got, "\"friendly\"") != 2 || !strings.Contains(got, "[other]\nkeep = true") {
+		t.Fatalf("compaction role set did not update only managed memories keys:\n%s", got)
+	}
+
+	if err := runConfigCommand("role", []string{"reset", "compaction"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCodexConfig(); strings.Count(got, "\"wopal-ai/deepseek-v4.1-flash\"") != 2 {
+		t.Fatalf("compaction role reset did not restore the default memory model:\n%s", got)
 	}
 }
 

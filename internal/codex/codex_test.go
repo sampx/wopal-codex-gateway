@@ -3,6 +3,7 @@ package codex
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -227,5 +228,62 @@ func TestRecordExposedExternalModelsAccumulatesOnlyForInstalledGateway(t *testin
 	}
 	if got, want := strings.Join(state.ExposedExternalModels, ","), "old-alias,new-alias,vendor/model"; got != want {
 		t.Fatalf("exposed external models = %q, want %q", got, want)
+	}
+}
+
+func TestUpdateManagedMemoriesModelOnlyTouchesActiveGatewayConfig(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	restoreRoot := config.SetProjectRootForTest(root)
+	t.Cleanup(restoreRoot)
+	if err := os.MkdirAll(config.StateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(config.CodexConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	gatewayBaseURL := "http://127.0.0.1:11435/v1"
+	original := "model = \"gpt-6.1-sol\"\n" +
+		"model_catalog_json = " + strconv.Quote(config.CodexGatewayCatalogPath()) + "\n" +
+		"openai_base_url = " + strconv.Quote(gatewayBaseURL) + "\n\n" +
+		"[memories]\n" +
+		"extract_model = \"wopal-ai/old\"\n" +
+		"consolidation_model = \"wopal-ai/old\"\n\n" +
+		"[other]\nkeep = true\n"
+	if err := os.WriteFile(config.CodexConfigPath(), []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := UpdateManagedMemoriesModel(gatewayBaseURL, "vendor/friendly")
+	if err != nil {
+		t.Fatalf("UpdateManagedMemoriesModel: %v", err)
+	}
+	if !updated {
+		t.Fatal("managed Codex config was not updated")
+	}
+	data, err := os.ReadFile(config.CodexConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Count(got, `vendor/friendly`) != 2 {
+		t.Fatalf("memory models were not updated in both fields:\n%s", got)
+	}
+	if !strings.Contains(got, "[other]\nkeep = true") {
+		t.Fatalf("unrelated Codex config was changed:\n%s", got)
+	}
+
+	updated, err = UpdateManagedMemoriesModel("http://127.0.0.1:9999/v1", "vendor/other")
+	if err != nil || updated {
+		t.Fatalf("non-gateway config update = %v, %v", updated, err)
+	}
+	after, err := os.ReadFile(config.CodexConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != got {
+		t.Fatal("non-gateway Codex config was modified")
 	}
 }
