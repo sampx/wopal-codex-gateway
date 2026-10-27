@@ -1,13 +1,14 @@
 ---
-name: Wopal Codex Gateway AGENT RULES
-description: Agent rules for this Go gateway repo: path contract, privacy boundary, configuration and quota semantics.
+name: Wopal Codex Gateway Agent Rules
+description: Long-lived development constraints for this local Codex gateway: path contract, privacy boundary, configuration and quota semantics, release validation.
+maintenance: Maintain only when a long-lived development or verification constraint appears that neither code, tests, nor DESIGN can carry on their own. Record only rules that change future agent decisions; never one-off tasks, implementation facts, incident notes, or anything derivable from the code.
 ---
 
 # Agent Development Rules
 
 ## Canonical References
 
-Canonical references:
+These documents are normative, not background reading:
 
 - DESIGN: `docs/DESIGN.md`
 
@@ -76,34 +77,13 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 
 ## Release Validation
 
-`go test` proves the code. It does not prove that a real Codex client can use the built binary. Before a release candidate is installed over a running gateway, prove it end to end without touching the running gateway.
+`go test` proves logic, not that a real client can use the binary.
 
-Run `scripts/validate-release.sh`. It builds the working tree, then starts that binary against a throwaway project root on a free loopback port, with `CODEX_HOME` redirected into the same throwaway root. The running installation is never restarted, never reconfigured, and never written to.
-
-The script is the contract. It fails closed and reports one PASS/FAIL line per check:
-
-| Layer | What it proves |
-| --- | --- |
-| build | the working tree compiles into `bin/wopal-codex-gateway` |
-| isolation | the scratch port differs from the installed port, and the installed `/_health` instance id is identical before and after the run |
-| L1 catalog | `/v1/models` exposes the configured external model next to the Wopal AI models |
-| L2 HTTP | `POST /v1/chat/completions` and `POST /v1/responses` both return 200 with assistant text through the external provider |
-| L3a websocket | two turns on one socket keep conversation context |
-| L3b websocket | switching to a model on another provider closes the socket with 1012 so the client resends full input |
-| L3c websocket | an unregistered model closes with 1012 instead of silently falling back |
-| log evidence | turn log entries name the provider that actually served the turn, and the log stays metadata-only |
-
-Rules that make this validation trustworthy:
-
-- **Never validate a release candidate by switching the production gateway to it first.** An installed LaunchAgent pins an absolute binary path, so an in-place swap turns a broken candidate into an outage before any check runs.
-- **Never point `CODEX_HOME` at the real `~/.codex` during validation.** The script redirects it into the scratch root; a validation run must not be able to rewrite the operator's Codex config.
-- **Protocol layers, not just the happy path.** Chat Completions, Responses, and the websocket frame loop each have a separate transport; passing one does not cover the others.
-- **Log evidence is a check, not a convenience.** Because turn events name the serving provider, a validation run can be audited afterwards. If a log line cannot distinguish two providers, the validation is not evidence.
-- **A partial pass is a failure.** Do not install a candidate that passed L1 and L2 but failed any L3 check.
-
-The defaults target an OpenCode Go provider with a low-cost model. Override with `--provider`, `--model`, `--base-url`, or the `WG_VALIDATE_*` environment variables. Never validate against a model whose cost you are not willing to pay for a handful of one-sentence turns.
-
-After the script passes, the human-facing checks that a script cannot make still apply: the ChatGPT/Codex Desktop model picker showing official and external models together, and a real conversation surviving a model switch. Those are the Plan `### User Validation` steps, and only the user closes them.
+- **Never replace the running installation to validate a candidate.** The LaunchAgent pins an absolute binary path, so an in-place swap turns a broken candidate into an outage before any check runs.
+- `scripts/validate-release.sh` is the only entry point: it serves the build output from a scratch project root on a free loopback port with a redirected `CODEX_HOME`, fails closed, and reports one PASS/FAIL line per check. A validation run must never write the real `~/.codex`.
+- Coverage is fixed: merged catalog exposes official, Wopal AI and external models together; `/v1/chat/completions` and `/v1/responses` each return assistant text through an external provider; two turns on one socket keep context; a cross-provider switch and an unregistered model both close with 1012 instead of silently falling back; turn logs name the serving provider and stay metadata-only; the installed `/_health` instance id is identical before and after.
+- Any failing transport layer blocks installation. Chat Completions, Responses, and the websocket frame loop are three separate transports; passing one does not cover the others.
+- Validation traffic uses low-cost models only. The model picker and a real conversation surviving a switch cannot be scripted; they are user validation and are never self-signed by an agent.
 
 ## Code Review Rules
 
@@ -112,6 +92,7 @@ Generic review method lives in the review skills this space assembles: `df-imple
 ### Project-specific review checkpoints
 
 - Do logging and error paths still stay metadata-only? Check new fields for prompts, bodies, tool arguments, tool output, and credentials.
+- Does every turn event report the provider taken from the actual route resolution rather than a fixed literal?
 - Are paths still obtained only through `internal/config` helpers, with no duplicated directory names elsewhere?
 - Is a configuration schema change backward compatible: new fields defaulted, removed sections rejected loudly?
 - Does a quota or failover change alter base threshold semantics, and can the `/_status` fields still explain an early stop?
@@ -120,5 +101,4 @@ Generic review method lives in the review skills this space assembles: `df-imple
 - Is a new state file under `runtime/`, and recorded in `## Data and State Model` of the DESIGN?
 
 ## User-Supplied Rules
-
 

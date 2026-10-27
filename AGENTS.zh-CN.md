@@ -1,11 +1,12 @@
 ---
-name: Wopal Codex Gateway AGENT RULES
-description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、隐私边界、配置与额度语义。
+name: Wopal Codex Gateway 开发规则
+description: 本地 Codex 路由网关长期适用的开发约束：路径契约、隐私边界、配置与额度语义、发布验证。
+maintenance: 仅当出现长期有效、且无法由代码、测试或 DESIGN 本身承载的开发或验证约束变化时维护本文件；只记录会影响未来 Agent 决策的规则，禁止写入一次性任务、实现事实、故障记录或可从代码直接得出的说明。
 ---
 
-# Agent 开发规范
+# Agent Development Rules
 
-## 规范引用
+## Canonical References
 
 以下文档是规范，不是参考资料：
 
@@ -13,7 +14,7 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 
 `docs/DESIGN.md` 的 `## Project Layout` 定义目录职责，`## Data and State Model` 定义每个状态文件的所有者与权限。改动目录结构或新增状态文件前先读这两节。
 
-## 架构与目录
+## Architecture and Directories
 
 单 Go 二进制，控制面与数据面同进程。`cmd/gateway` 只解析子命令并装配依赖，规则在各 `internal/` 包内。
 
@@ -40,7 +41,7 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 | `logs/` | 网关与服务日志，不入 Git |
 | `recovery/` | 回滚材料，不入 Git，运行路径不读取 |
 
-## 开发命令
+## Development Commands
 
 | 场景 | 命令 |
 | --- | --- |
@@ -54,7 +55,7 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 | 文档门禁 | `python3 <space>/skills/dev-doc-master/scripts/verify-docset.py docs --main DESIGN.md` |
 | 发布验证 | `scripts/validate-release.sh --base <已安装项目根目录>` |
 
-## 实现规则
+## Implementation Rules
 
 - **路径只有一个来源。** 所有目录与文件路径都来自 `internal/config/paths.go` 的 helper；不在别处拼 `filepath.Join(root, "runtime", ...)`。新增路径先加 helper。
 - **四块目录各司其职。** 可执行文件只进 `bin/`，跨重启状态只进 `runtime/`，人类诊断输出只进 `logs/`，回滚材料只进 `recovery/`。不要新增第五处，也不要把临时文件塞进 `runtime/`。
@@ -67,43 +68,22 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 - **Codex 配置只改 managed keys。** 安装只触碰 `model_catalog_json`、`openai_base_url`、`[memories] extract_model`、`[memories] consolidation_model`；恢复时 `model` 仅在当前值是本 Gateway 记录曾暴露过的 client-visible name 时回退；官方 bare slug 保留用户当前选择。不要整份重写 `~/.codex/config.toml`，保留用户注释与无关配置。
 - **写入都要原子。** 配置与状态文件使用临时文件加 rename，权限 `0600`；目录 `0700`。
 
-## 测试
+## Testing
 
 - 可测的纯逻辑走 TDD：先写失败的测试，再写实现。路径契约、配置解析与校验、能力解析、额度阈值计算、路由分类都属于这一层。
 - 以下边界用真实宿主验证，不要用假实现冒充已覆盖：Keychain 读写、`launchctl` 装载与健康等待、WebSocket 升级、`codex debug models --bundled` 输出、ChatGPT/Codex Desktop 的实际模型选择器。
 - 涉及请求正文的任何改动，必须跑 `TestServedGatewayNeverWritesPromptBodies`。去掉 nil factory 后该测试必须失败，这是它有效的判据。
 - 提交前跑完整门禁：`go build ./... && go vet ./... && gofmt -l cmd internal && go test -race ./... -count=1`。
 
-## 发布验证
+## Release Validation
 
-`go test` 只能证明代码逻辑正确，不能证明真实 Codex 客户端能用这个二进制。在把发布候选装到正在运行的 Gateway 之前，必须先在不碰运行实例的前提下完成端到端验证。
+`go test` 只证明代码逻辑，不证明真实客户端能用这个二进制。
 
-执行 `scripts/validate-release.sh`。它会先构建当前工作树，再把构建产物指向一个临时项目根目录、自由回环端口启动，并把 `CODEX_HOME` 一起重定向到同一个临时目录。正在运行的安装不会被重启、不会被改配置、不会被写入。
-
-脚本本身就是契约：任何一项不通过都 fail closed，并且逐项打印 PASS/FAIL。
-
-| 层次 | 证明什么 |
-| --- | --- |
-| build | 当前工作树能编译出 `bin/wopal-codex-gateway` |
-| isolation | 临时端口不等于已安装端口；运行前后已安装实例的 `/_health` instance id 完全一致 |
-| L1 catalog | `/v1/models` 里外部模型与 Wopal AI 模型同时可见 |
-| L2 HTTP | `POST /v1/chat/completions` 与 `POST /v1/responses` 都经外部 provider 返回 200 且有正文 |
-| L3a websocket | 同一条 socket 连续两轮保持会话上下文 |
-| L3b websocket | 切到另一个 provider 的模型时以 1012 关闭，让客户端重发完整输入 |
-| L3c websocket | 未注册模型以 1012 fail closed，而不是静默回退 |
-| log evidence | turn 日志的 provider 是真正服务的那个；日志仍然只含 metadata |
-
-让这套验证可信的几条规则：
-
-- **绝不用「先把生产切过去」来验证发布候选。** 已安装的 LaunchAgent 固定绝对二进制路径，原地替换等于在任何检查跑之前就把坏候选变成故障。
-- **验证期间绝不把 `CODEX_HOME` 指向真实的 `~/.codex`。** 脚本把它重定向进临时根目录；验证过程不得改写操作者的 Codex 配置。
-- **验证协议层，不只验证顺路。** Chat Completions、Responses、WebSocket 帧循环是三套独立传输，过了一套不代表过了另外两套。
-- **日志证据是检查项，不是附赠品。** turn 事件带真实 provider，验证跑完可以事后审计。若日志分不清两个 provider，这次验证就不构成证据。
-- **部分通过等于失败。** L1/L2 通过但任一 L3 失败，不得安装该候选。
-
-默认参数针对 OpenCode Go 的低价模型，可用 `--provider`、`--model`、`--base-url` 或 `WG_VALIDATE_*` 覆盖。不要用自己不愿为几句单句对话付钱的模型做验证。
-
-脚本通过之后，脚本无法替代的人工检查仍然有效：ChatGPT/Codex Desktop 的模型选择器要同时显示官方与外部模型，真实会话要能跨越模型切换继续。这些是 Plan 的 `### User Validation`，只有用户能勾选。
+- **不得先替换正在运行的安装再验证。** LaunchAgent 固定绝对二进制路径，原地替换会在任何检查之前把坏候选变成故障。
+- `scripts/validate-release.sh` 是唯一入口：在临时项目根、空闲回环端口和重定向的 `CODEX_HOME` 上启动构建产物，fail closed，逐项 PASS/FAIL。验证进程不得写入真实 `~/.codex`。
+- 验证必须覆盖：合并后 catalog 同时含官方、Wopal AI 与外部模型；`/v1/chat/completions` 与 `/v1/responses` 各自经外部 provider 返回正文；同 socket 连续两轮保持上下文；跨 provider 切换与未注册模型都以 1012 关闭而不静默回退；turn 日志的 provider 是真正服务的那个且仍只含 metadata；运行前后已安装实例的 `/_health` instance id 不变。
+- 任一协议层失败即不得安装。Chat Completions、Responses、WebSocket 帧循环是三套独立传输，过一个不代表过其余。
+- 验证流量只用低价模型。模型选择器与真实会话切换无法脚本化，属于用户验证，不由脚本代替。
 
 ## Code Review Rules
 
@@ -112,6 +92,7 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 ### 本项目检查点
 
 - 日志与错误路径是否仍满足 metadata-only：新增字段里有没有 prompt、正文、工具参数、工具输出、凭证。
+- turn 事件的 provider 是否来自实际路由结果，而不是固定字面量。
 - 路径是否只经 `internal/config` 的 helper 获取；有没有在别处重复拼接目录名。
 - 配置 schema 改动是否向后兼容：新字段有默认值，被移除的段有明确报错。
 - 额度与 failover 改动是否改变基础阈值语义，`/_status` 字段是否仍能解释提前停的原因。
@@ -120,5 +101,4 @@ description: Go 本地路由网关仓库的 Agent 操作规则：路径契约、
 - 新增状态文件是否在 `runtime/` 且已写进 DESIGN 的 `## Data and State Model`。
 
 ## User-Supplied Rules
-
 
