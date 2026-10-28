@@ -329,21 +329,20 @@ func SanitizeParsedRequest(payload map[string]any, logger *activity.Logger) bool
 	if payload == nil {
 		return false
 	}
-	input, ok := payload["input"].([]any)
-	if !ok {
-		return false
-	}
+	input, _ := payload["input"].([]any)
 	hadWopalCompaction := inputHasCapsule(input)
 	hadLocalPreviousResponse := hasLocalPreviousResponseID(payload)
 	expanded, neutralized := sanitizeRequestInput(input)
 	expanded, strippedIDs, droppedReferences, itemTypes := normalizeInputItems(expanded)
 	convertedMessages := normalizePlaintextAgentMessages(expanded)
-	clearedTools := clearCodexCollaborationEncryption(payload)
+	clearedTools, renamedTools := prepareOfficialCollaboration(payload)
 	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse &&
-		convertedMessages == 0 && clearedTools == 0 {
+		convertedMessages == 0 && clearedTools == 0 && renamedTools == 0 {
 		return false
 	}
-	payload["input"] = expanded
+	if input != nil {
+		payload["input"] = expanded
+	}
 	if hadWopalCompaction || hadLocalPreviousResponse {
 		delete(payload, "previous_response_id")
 	}
@@ -351,6 +350,9 @@ func SanitizeParsedRequest(payload map[string]any, logger *activity.Logger) bool
 		fields := collectedNeutralizationFields(payload, neutralized, strippedIDs, droppedReferences, itemTypes)
 		if convertedMessages > 0 {
 			fields["converted_agent_messages"] = convertedMessages
+		}
+		if renamedTools > 0 {
+			fields["renamed_collaboration_items"] = renamedTools
 		}
 		if clearedTools > 0 {
 			fields["cleared_collaboration_encryption"] = clearedTools
@@ -505,21 +507,20 @@ func SanitizeWebsocketFrame(payload []byte, logger *activity.Logger) ([]byte, bo
 	if err := decoder.Decode(&message); err != nil {
 		return nil, false
 	}
-	input, ok := message["input"].([]any)
-	if !ok {
-		return nil, false
-	}
+	input, _ := message["input"].([]any)
 	hadWopalCompaction := inputHasCapsule(input)
 	hadLocalPreviousResponse := hasLocalPreviousResponseID(message)
 	expanded, neutralized := sanitizeRequestInput(input)
 	expanded, strippedIDs, droppedReferences, itemTypes := normalizeInputItems(expanded)
 	convertedMessages := normalizePlaintextAgentMessages(expanded)
-	clearedTools := clearCodexCollaborationEncryption(message)
+	clearedTools, renamedTools := prepareOfficialCollaboration(message)
 	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse &&
-		convertedMessages == 0 && clearedTools == 0 {
+		convertedMessages == 0 && clearedTools == 0 && renamedTools == 0 {
 		return nil, false
 	}
-	message["input"] = expanded
+	if input != nil {
+		message["input"] = expanded
+	}
 	if hadWopalCompaction || hadLocalPreviousResponse {
 		delete(message, "previous_response_id")
 	}
@@ -533,6 +534,9 @@ func SanitizeWebsocketFrame(payload []byte, logger *activity.Logger) ([]byte, bo
 	}
 	if convertedMessages > 0 {
 		loggerFields["converted_agent_messages"] = convertedMessages
+	}
+	if renamedTools > 0 {
+		loggerFields["renamed_collaboration_items"] = renamedTools
 	}
 	if clearedTools > 0 {
 		loggerFields["cleared_collaboration_encryption"] = clearedTools

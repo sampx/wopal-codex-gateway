@@ -480,6 +480,11 @@ func sanitizeOfficialInspection(req *http.Request, inspection *requestInspection
 	if inspection == nil || inspection.payload == nil {
 		return
 	}
+	if compaction.OfficialCollaborationRewriteRequired(inspection.payload) {
+		stream, _ := inspection.payload["stream"].(bool)
+		*req = *req.WithContext(context.WithValue(req.Context(), officialCollaborationContextKey{}, officialCollaborationResponseStream(stream)))
+		req.Header.Set("Accept-Encoding", "identity")
+	}
 	if !compaction.SanitizeParsedRequest(inspection.payload, logger) {
 		return
 	}
@@ -510,7 +515,7 @@ func newOfficialReverseProxy(target *url.URL, chatgpt bool, logger *activity.Log
 			"event": "official_upstream_connected", "upstream": target.Host,
 			"status": resp.StatusCode, "protocol": resp.Proto, "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
 		})
-		return nil
+		return restoreOfficialHTTPResponse(resp)
 	}
 	return proxy
 }

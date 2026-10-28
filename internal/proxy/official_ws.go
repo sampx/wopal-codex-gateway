@@ -83,8 +83,9 @@ func serveOfficialWebsocketBridgeWithRuntime(c *gin.Context, logger *activity.Lo
 	clientRequest := c.Request.Clone(c.Request.Context())
 	var clientWriteMu sync.Mutex
 	var upstreamWriteMu sync.Mutex
-	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger, quotaGuard, accountID, boundModel, nativeReplay, clientRequest, &clientWriteMu, &upstreamWriteMu, resolve, roles)
-	go pumpOfficialWebsocket(upstreamConn, clientConn, done, false, logger, quotaGuard, accountID, boundModel, nil, nil, &upstreamWriteMu, &clientWriteMu, nil, roles)
+	var collaborationRenamed officialCollaborationState
+	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger, quotaGuard, accountID, boundModel, nativeReplay, clientRequest, &clientWriteMu, &upstreamWriteMu, resolve, roles, &collaborationRenamed)
+	go pumpOfficialWebsocket(upstreamConn, clientConn, done, false, logger, quotaGuard, accountID, boundModel, nil, nil, &upstreamWriteMu, &clientWriteMu, nil, roles, &collaborationRenamed)
 
 	<-done
 	_ = clientConn.Close()
@@ -97,7 +98,7 @@ func serveOfficialWebsocketBridgeWithRuntime(c *gin.Context, logger *activity.Lo
 
 // pumpOfficialWebsocket copies frames one direction. Each connection has exactly
 // one reader and one writer goroutine, which websocket.Conn requires.
-func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activity.Logger, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge, clientRequest *http.Request, sourceWriteMu, targetWriteMu *sync.Mutex, resolve RouteResolver, roles RuntimeRoles) {
+func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activity.Logger, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge, clientRequest *http.Request, sourceWriteMu, targetWriteMu *sync.Mutex, resolve RouteResolver, roles RuntimeRoles, collaborationRenamed *officialCollaborationState) {
 	defer func() { done <- struct{}{} }()
 	for {
 		messageType, payload, err := source.ReadMessage()
@@ -166,8 +167,24 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 		}
 		if !rewriteClientFrames && isDataFrame {
 			quotaGuard.ObserveRateLimitPayload(accountID, payload, time.Now())
+			var restoreErr error
+			payload, restoreErr = collaborationRenamed.restore(payload)
+			if restoreErr != nil {
+				// Preserve the native failure, then reconnect rather than guessing
+				// which create owns subsequent tool-call identities.
+				_ = writeOfficialWebsocketMessage(target, targetWriteMu, messageType, payload)
+				logger.Write(map[string]any{"event": "official_ws_restore_ambiguous"})
+				return
+			}
 		}
 		if rewriteClientFrames && isDataFrame {
+			var request map[string]any
+			if json.Unmarshal(payload, &request) == nil {
+				if err := collaborationRenamed.prepare(request); err != nil {
+					logger.Write(map[string]any{"event": "official_ws_pending_limit"})
+					return
+				}
+			}
 			if rewritten, ok := compaction.SanitizeWebsocketFrame(payload, logger); ok {
 				payload = rewritten
 			}
