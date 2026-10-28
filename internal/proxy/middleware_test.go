@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"wopal-codex-gateway/internal/activity"
 	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/quota"
+	"wopal-codex-gateway/internal/routing"
 )
 
 func TestRouteModelNamespaces(t *testing.T) {
@@ -73,10 +76,71 @@ func TestRouteModelNamespaces(t *testing.T) {
 			if hits := officialHits.Load() - before; hits != tc.wantHits {
 				t.Fatalf("official upstream hits = %d, want %d", hits, tc.wantHits)
 			}
-			if tc.wantStatus == http.StatusNotFound && !strings.Contains(string(body), "model namespace is disabled") {
+			if tc.wantStatus == http.StatusNotFound && !strings.Contains(string(body), "is not registered") {
 				t.Fatalf("rejection body = %s", body)
 			}
 		})
+	}
+}
+
+func TestRoutingMiddlewareUsesExactRouteTableAndFailsBareOnVerifierDrift(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var officialHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		officialHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	logger, err := activity.New(t.TempDir(), config.Logs{MaxSizeMB: 1, MaxBackups: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.Close()
+
+	drifted := false
+	table := routing.NewTable(map[string]routing.Route{
+		"vendor/model": {Kind: routing.External, ProviderID: "vendor"},
+		"short":        {Kind: routing.External, ProviderID: "vendor"},
+	}, []string{"gpt-official"}, func() error {
+		if drifted {
+			return fmt.Errorf("native artifact changed")
+		}
+		return nil
+	})
+	target := mustURL(upstream.URL)
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithResolverAndTargetsAndQuotaGuard(logger, target, target, quota.NewGuard(logger), table.Resolve))
+	engine.POST("/v1/responses", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	downstream := httptest.NewServer(engine)
+	defer downstream.Close()
+
+	post := func(model string) (int, string) {
+		t.Helper()
+		resp, err := http.Post(downstream.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"`+model+`","input":"hi"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+
+	if status, _ := post("vendor/model"); status != http.StatusNoContent {
+		t.Fatalf("namespaced external status = %d", status)
+	}
+	if status, _ := post("gpt-official"); status != http.StatusOK || officialHits.Load() != 1 {
+		t.Fatalf("official status=%d hits=%d", status, officialHits.Load())
+	}
+	drifted = true
+	for _, model := range []string{"short", "gpt-official"} {
+		status, body := post(model)
+		if status != http.StatusNotFound || !strings.Contains(body, "native artifact changed") {
+			t.Fatalf("drifted bare %q status=%d body=%s", model, status, body)
+		}
+	}
+	if status, _ := post("vendor/model"); status != http.StatusNoContent {
+		t.Fatalf("namespaced external after drift status = %d", status)
 	}
 }
 

@@ -135,7 +135,7 @@ func TestMissingRootNeverWritesToWorkingDirectory(t *testing.T) {
 	}
 	valid := DefaultGatewayConfig()
 	valid.WopalAI.BaseURL = "https://example.test/v1"
-	if _, _, err := BuildCLIProxyConfig("", valid, "test-key"); err == nil {
+	if _, _, err := BuildCLIProxyConfig("", valid, "test-key", nil); err == nil {
 		t.Error("SDK write accepted missing root")
 	}
 	func() {
@@ -203,7 +203,7 @@ func TestSDKRuntimeIsAtomicallyReplacedAndPrivate(t *testing.T) {
 	}
 	gateway := DefaultGatewayConfig()
 	gateway.WopalAI.BaseURL = "https://example.test/v1"
-	cfg, got, err := BuildCLIProxyConfig(root, gateway, "test-key")
+	cfg, got, err := BuildCLIProxyConfig(root, gateway, "test-key", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

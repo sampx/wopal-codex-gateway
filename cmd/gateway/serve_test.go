@@ -54,3 +54,23 @@ func TestServeReadsConfigFromProjectRoot(t *testing.T) {
 		t.Fatalf("serve did not read %s: %v", configPath, err)
 	}
 }
+
+func TestServeRejectsDuplicateClientVisibleNamesBeforeSideEffects(t *testing.T) {
+	root := useTempGatewayRoot(t)
+	path := filepath.Join(root, "runtime", "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"version":1,"wopalAi":{"baseUrl":"https://wopal.example/v1"},"providers":{"one":{"baseUrl":"https://one.example","models":[{"name":"a","alias":"shared"}]},"two":{"baseUrl":"https://two.example","models":[{"name":"b","alias":"shared"}]}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runServe([]string{"--project-root", root, "--config", path})
+	if err == nil || !strings.Contains(err.Error(), "duplicate client-visible model") || !strings.Contains(err.Error(), "shared") {
+		t.Fatalf("serve error = %v, want duplicate client-visible model", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "logs")); statErr == nil {
+		t.Fatal("serve created logs before rejecting duplicate model names")
+	}
+}

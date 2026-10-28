@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -141,6 +142,185 @@ func unavailableMessage(id any) map[string]any {
 	}
 }
 
+// Collaboration tool names whose message argument the Codex client may mark as
+// encrypted. Left as encrypted: true, the official model is free to emit
+// ciphertext for the delegated task, and a sub-agent that runs on a
+// third-party model can only show that ciphertext.
+var officialCollaborationMessageTools = map[string]bool{
+	"spawn_agent":   true,
+	"send_message":  true,
+	"followup_task": true,
+}
+
+// officialCollaborationNamespace is the only tool namespace whose message
+// argument uses Codex's encrypted-content contract.
+const officialCollaborationNamespace = "collaboration"
+
+// clearCollaborationMessageEncryption removes parameters.properties.message.encrypted
+// from the three message-bearing tools inside the collaboration namespace. A
+// same-named function in another namespace, or a direct top-level function, is
+// unrelated and must keep its schema untouched.
+func clearCollaborationMessageEncryption(tools any) (any, int) {
+	list, ok := tools.([]any)
+	if !ok {
+		return tools, 0
+	}
+	cleared := 0
+	for _, value := range list {
+		namespace, ok := value.(map[string]any)
+		if !ok || itemTypeOf(namespace) != "namespace" ||
+			strings.TrimSpace(fmt.Sprint(namespace["name"])) != officialCollaborationNamespace {
+			continue
+		}
+		inner, ok := namespace["tools"].([]any)
+		if !ok {
+			continue
+		}
+		for _, raw := range inner {
+			tool, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			name := strings.TrimSpace(fmt.Sprint(tool["name"]))
+			if !officialCollaborationMessageTools[name] {
+				continue
+			}
+			parameters, ok := tool["parameters"].(map[string]any)
+			if !ok {
+				continue
+			}
+			properties, ok := parameters["properties"].(map[string]any)
+			if !ok {
+				continue
+			}
+			message, ok := properties["message"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, ok := message["encrypted"]; !ok {
+				continue
+			}
+			delete(message, "encrypted")
+			properties["message"] = message
+			parameters["properties"] = properties
+			tool["parameters"] = parameters
+			cleared++
+		}
+	}
+	return tools, cleared
+}
+
+// clearCodexCollaborationEncryption strips the encryption flag from the
+// collaboration tools carried by a Codex request, both at the top level and in
+// any additional_tools input item, and reports the number of cleared properties.
+func clearCodexCollaborationEncryption(payload map[string]any) int {
+	if payload == nil {
+		return 0
+	}
+	cleared := 0
+	if tools, ok := payload["tools"]; ok {
+		if rewritten, count := clearCollaborationMessageEncryption(tools); count > 0 {
+			payload["tools"] = rewritten
+			cleared += count
+		}
+	}
+	input, ok := payload["input"].([]any)
+	if !ok {
+		return cleared
+	}
+	for _, value := range input {
+		item, ok := value.(map[string]any)
+		if !ok || itemTypeOf(item) != "additional_tools" {
+			continue
+		}
+		if tools, ok := item["tools"]; ok {
+			if rewritten, count := clearCollaborationMessageEncryption(tools); count > 0 {
+				item["tools"] = rewritten
+				cleared += count
+			}
+		}
+	}
+	return cleared
+}
+
+// openAICiphertextPrefix is the stable start of the unpadded base64url Fernet
+// token used by Responses API encrypted content. The prefix alone is not
+// sufficient: delegated task text may legitimately begin with the same bytes.
+const openAICiphertextPrefix = "gAAAAA"
+
+const (
+	openAICiphertextVersion    = byte(0x80)
+	openAICiphertextFixedBytes = 57 // version + timestamp + IV + HMAC
+	openAICiphertextBlockBytes = 16
+)
+
+// looksLikeOpenAICiphertext validates the complete Fernet wire shape instead
+// of guessing from a content prefix. Codex serializes plaintext delegated tasks
+// and genuine OpenAI ciphertext with identical provenance metadata, so the
+// gateway has no producer signal to consult here. Structural validation rejects
+// arbitrary prefix collisions; a task body that is itself a complete Fernet
+// token remains indistinguishable until the client exposes explicit provenance.
+func looksLikeOpenAICiphertext(value string) bool {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, openAICiphertextPrefix) {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(decoded) < openAICiphertextFixedBytes+openAICiphertextBlockBytes {
+		return false
+	}
+	return decoded[0] == openAICiphertextVersion &&
+		(len(decoded)-openAICiphertextFixedBytes)%openAICiphertextBlockBytes == 0
+}
+
+// normalizePlaintextAgentMessages converts an agent_message whose
+// encrypted_content is not a genuine OpenAI ciphertext into a plain user
+// message, and reports how many items it converted.
+//
+// A sub-agent task delegated by a third-party parent carries the task text in
+// encrypted_content without encryption. The official upstream validates that
+// field and rejects foreign content, so the item cannot cross the official
+// branch as-is. An item holding genuine official ciphertext is left completely
+// untouched: the official upstream can still resolve it, and rewriting it would
+// discard a payload only that upstream can read.
+func normalizePlaintextAgentMessages(input []any) int {
+	converted := 0
+	for _, value := range input {
+		item, ok := value.(map[string]any)
+		if !ok || itemTypeOf(item) != "agent_message" {
+			continue
+		}
+		content, ok := item["content"].([]any)
+		if !ok {
+			continue
+		}
+		convertedParts := 0
+		for _, raw := range content {
+			part, ok := raw.(map[string]any)
+			if !ok || itemTypeOf(part) != "encrypted_content" {
+				continue
+			}
+			encoded, _ := part["encrypted_content"].(string)
+			if strings.TrimSpace(encoded) == "" || looksLikeOpenAICiphertext(encoded) {
+				continue
+			}
+			delete(part, "encrypted_content")
+			part["type"] = "input_text"
+			part["text"] = encoded
+			convertedParts++
+		}
+		if convertedParts == 0 {
+			continue
+		}
+		delete(item, "author")
+		delete(item, "recipient")
+		item["type"] = "message"
+		item["role"] = "user"
+		converted++
+	}
+	return converted
+}
+
 // SanitizeParsedRequest neutralizes gateway-issued items in an already parsed
 // official-bound payload. It returns false when the payload needs no rewrite.
 // The caller can therefore reuse one parse for routing and sanitization while
@@ -157,7 +337,10 @@ func SanitizeParsedRequest(payload map[string]any, logger *activity.Logger) bool
 	hadLocalPreviousResponse := hasLocalPreviousResponseID(payload)
 	expanded, neutralized := sanitizeRequestInput(input)
 	expanded, strippedIDs, droppedReferences, itemTypes := normalizeInputItems(expanded)
-	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse {
+	convertedMessages := normalizePlaintextAgentMessages(expanded)
+	clearedTools := clearCodexCollaborationEncryption(payload)
+	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse &&
+		convertedMessages == 0 && clearedTools == 0 {
 		return false
 	}
 	payload["input"] = expanded
@@ -165,7 +348,14 @@ func SanitizeParsedRequest(payload map[string]any, logger *activity.Logger) bool
 		delete(payload, "previous_response_id")
 	}
 	if logger != nil {
-		logger.Write(collectedNeutralizationFields(payload, neutralized, strippedIDs, droppedReferences, itemTypes))
+		fields := collectedNeutralizationFields(payload, neutralized, strippedIDs, droppedReferences, itemTypes)
+		if convertedMessages > 0 {
+			fields["converted_agent_messages"] = convertedMessages
+		}
+		if clearedTools > 0 {
+			fields["cleared_collaboration_encryption"] = clearedTools
+		}
+		logger.Write(fields)
 	}
 	return true
 }
@@ -323,7 +513,10 @@ func SanitizeWebsocketFrame(payload []byte, logger *activity.Logger) ([]byte, bo
 	hadLocalPreviousResponse := hasLocalPreviousResponseID(message)
 	expanded, neutralized := sanitizeRequestInput(input)
 	expanded, strippedIDs, droppedReferences, itemTypes := normalizeInputItems(expanded)
-	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse {
+	convertedMessages := normalizePlaintextAgentMessages(expanded)
+	clearedTools := clearCodexCollaborationEncryption(message)
+	if neutralized == 0 && strippedIDs == 0 && droppedReferences == 0 && !hadLocalPreviousResponse &&
+		convertedMessages == 0 && clearedTools == 0 {
 		return nil, false
 	}
 	message["input"] = expanded
@@ -337,6 +530,12 @@ func SanitizeWebsocketFrame(payload []byte, logger *activity.Logger) ([]byte, bo
 		"item_count":         neutralized,
 		"stripped_item_ids":  strippedIDs,
 		"dropped_references": droppedReferences,
+	}
+	if convertedMessages > 0 {
+		loggerFields["converted_agent_messages"] = convertedMessages
+	}
+	if clearedTools > 0 {
+		loggerFields["cleared_collaboration_encryption"] = clearedTools
 	}
 	if logger != nil && len(itemTypes) > 0 {
 		loggerFields["item_types"] = itemTypes

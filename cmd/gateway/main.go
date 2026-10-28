@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -42,12 +44,68 @@ func run(args []string) error {
 		printHelp()
 		return nil
 	case "serve":
-		return runServe(rest)
-	case "config", "auth", "models", "catalog", "codex", "service", "quota":
+		// serve parses its own flags, so "serve --help" reaches it as
+		// flag.ErrHelp. That is a help request, not a failure.
+		if err := runServe(rest); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	case "config", "providers", "auth", "models", "catalog", "codex", "service", "quota":
+		if requestsHelp(rest) {
+			printHelp()
+			return nil
+		}
 		return runCommandGroup(command, rest)
 	}
 
 	return fmt.Errorf("unknown command: %s", strings.Join(args, " "))
+}
+
+// valueOptions are the flags that consume their next argument. Help detection
+// has to skip that argument: "--model -h" names a model, it does not ask for
+// help.
+var valueOptions = map[string]bool{
+	"--provider":       true,
+	"--model":          true,
+	"--alias":          true,
+	"--protocol":       true,
+	"--context-window": true,
+	"--base-url":       true,
+	"--base-url-for":   true,
+	"--models-url":     true,
+	"--models-auth":    true,
+	"--header":         true,
+	"--tool-mode":      true,
+	"--from":           true,
+	"--to":             true,
+}
+
+// requestsHelp reports whether the operator asked for help inside a command
+// group. Without it "providers --help" fails as an unknown subcommand and
+// "models add --help" fails as bad usage, which reads like the binary has no
+// help flag at all. Two positions are deliberately not help requests: a
+// "help" that is not the group's own subcommand, and any token bound as a
+// value to a preceding option. Both name data, not a request.
+func requestsHelp(args []string) bool {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if valueOptions[arg] {
+			index++
+			continue
+		}
+		switch arg {
+		case "-h", "--help":
+			return true
+		case "help":
+			if index == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func runCommandGroup(group string, args []string) error {
@@ -59,6 +117,8 @@ func runCommandGroup(group string, args []string) error {
 	switch group {
 	case "config":
 		return runConfigCommand(subcommand, rest)
+	case "providers":
+		return runProvidersCommand(subcommand, rest)
 	case "auth":
 		return runAuthCommand(subcommand, rest)
 	case "models":
@@ -104,19 +164,22 @@ func printHelp() {
 const helpText = `wopal-codex-gateway
 
 Commands:
+  help, -h, --help                                                            Print this list (also accepted after any command)
   serve --project-root <dir>                                                  Run the gateway daemon
   config migrate --from <existing.json> --to <new.json>                         Prepare a separate version-1 config
   config show                                                                 Print the gateway configuration
   config wopal [--base-url <url>] [--tool-mode code_mode_only|code_mode|direct] [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
-  auth set                                                                    Store and validate the Wopal AI API key
-  auth test                                                                   Validate the stored Wopal AI API key
-  auth status                                                                 Show whether a key is configured
-  models list                                                                 List models visible to the Wopal AI API key
-  models inspect [model...]                                                    Show effective capabilities and sources
-  models sync                                                                 Import all Codex-usable Wopal AI models
-  models add <model...> [--context-window N] [--vision] [--no-reasoning]
-  models set <model...> [--context-window N] [--vision|--no-vision] [--reasoning|--no-reasoning] [--auto|--reset-context-window|--reset-vision|--reset-reasoning]
-  models remove <model...>                                                    Remove Wopal AI models and exclude them from sync
+  providers set <provider> --base-url <url> [--base-url-for <protocol>=<url>]... [--models-url <url>] [--models-auth none|provider-key] [--header <name>=<value>]... [--protocol <default>] [--tool-mode <mode>]
+  providers remove <provider>                                                   Remove an unreferenced external provider
+  auth set [--provider <id>]                                                  Store and validate a provider API key
+  auth test [--provider <id>]                                                 Validate a stored provider API key
+  auth status [--provider <id>]                                               Show whether a provider key is configured
+  models list [--provider <id>]                                                List available models; provider output includes protocol source
+  models inspect [model...] [--provider <id>]                                 Show effective capabilities and sources
+  models sync [--provider <id>]                                                Refresh Wopal config or external provider metadata
+  models add <model...> [--provider <id>] [--alias <name>] [--protocol <protocol>] [--context-window N] [--vision] [--no-reasoning]
+  models set <model...> [--provider <id>] [--alias <name>] [--protocol <protocol>] [--context-window N] [--vision|--no-vision] [--reasoning|--no-reasoning] [--auto|--reset-context-window|--reset-vision|--reset-reasoning]
+  models remove <model...> [--provider <id>]                                  Remove configured models; Wopal removal also excludes from sync
   catalog refresh                                                             Rebuild the Codex model catalog
   codex install                                                               Install the gateway into Codex
   codex restore                                                               Restore the pre-install Codex configuration

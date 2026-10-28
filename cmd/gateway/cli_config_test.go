@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,9 @@ func setupConfigAuthTestRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	t.Cleanup(config.SetProjectRootForTest(root))
+	originalSignal := signalGatewayReload
+	signalGatewayReload = func() error { return nil }
+	t.Cleanup(func() { signalGatewayReload = originalSignal })
 	if err := os.MkdirAll(filepath.Join(root, "runtime"), 0o700); err != nil {
 		t.Fatalf("create runtime directory: %v", err)
 	}
@@ -216,5 +220,177 @@ func TestConfigToolModeFlagPersistsAndRejectsInvalidValue(t *testing.T) {
 		if string(after) != string(before) {
 			t.Fatalf("invalid mode changed config: %v", args)
 		}
+	}
+}
+
+func TestConfigRoleSetListAndReset(t *testing.T) {
+	setupConfigAuthTestRoot(t)
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.Providers["vendor"] = config.ProviderConfig{
+		BaseURL: "https://vendor.test",
+		Models:  []config.ExternalModelConfig{{Name: "upstream", Alias: "friendly", Protocol: config.ProtocolOpenAIResponses}},
+	}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runConfigCommand("role", []string{"set", "official-fallback", "--provider", "vendor", "--model", "upstream"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureConfigAuthTestStdout(t, func() error { return runConfigCommand("role", nil) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"officialFallback provider=vendor upstream=upstream client=friendly source=explicit status=ready",
+		"compaction provider=wopal-ai upstream=deepseek-v4.1-flash source=default status=unavailable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("role output missing %q:\n%s", want, out)
+		}
+	}
+
+	if err := runConfigCommand("role", []string{"reset", "official-fallback"}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.LoadGatewayConfig(config.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.ModelRoles.OfficialFallback != nil {
+		t.Fatalf("role reset left explicit config: %+v", saved.ModelRoles.OfficialFallback)
+	}
+}
+
+func TestConfigRoleCompactionUpdatesInstalledCodexMemories(t *testing.T) {
+	setupConfigAuthTestRoot(t)
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	if err := os.MkdirAll(filepath.Dir(config.CodexConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.WopalAI.Models = append(cfg.WopalAI.Models, config.ExternalModelConfig{Name: "deepseek-v4.1-flash"})
+	cfg.Providers["vendor"] = config.ProviderConfig{
+		BaseURL: "https://vendor.test",
+		Models:  []config.ExternalModelConfig{{Name: "upstream", Alias: "friendly", Protocol: config.ProtocolOpenAIResponses}},
+	}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	gatewayBaseURL := fmt.Sprintf("http://%s:%d/v1", cfg.Listen.Host, cfg.Listen.Port)
+	codexConfig := "model_catalog_json = " + fmt.Sprintf("%q", config.CodexGatewayCatalogPath()) + "\n" +
+		"openai_base_url = " + fmt.Sprintf("%q", gatewayBaseURL) + "\n\n" +
+		"[memories]\n" +
+		"extract_model = \"wopal-ai/old\"\n" +
+		"consolidation_model = \"wopal-ai/old\"\n\n" +
+		"[other]\nkeep = true\n"
+	if err := os.WriteFile(config.CodexConfigPath(), []byte(codexConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readCodexConfig := func() string {
+		t.Helper()
+		data, err := os.ReadFile(config.CodexConfigPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	if err := runConfigCommand("role", []string{"set", "compaction", "--provider", "vendor", "--model", "upstream"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCodexConfig(); strings.Count(got, "\"friendly\"") != 2 || !strings.Contains(got, "[other]\nkeep = true") {
+		t.Fatalf("compaction role set did not update only managed memories keys:\n%s", got)
+	}
+
+	if err := runConfigCommand("role", []string{"reset", "compaction"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCodexConfig(); strings.Count(got, "\"wopal-ai/deepseek-v4.1-flash\"") != 2 {
+		t.Fatalf("compaction role reset did not restore the default memory model:\n%s", got)
+	}
+}
+
+func TestConfigRoleCompactionResetWritesUnavailableDefaultTarget(t *testing.T) {
+	setupConfigAuthTestRoot(t)
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	if err := os.MkdirAll(filepath.Dir(config.CodexConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.Providers["vendor"] = config.ProviderConfig{
+		BaseURL: "https://vendor.test",
+		Models:  []config.ExternalModelConfig{{Name: "upstream", Alias: "friendly", Protocol: config.ProtocolOpenAIResponses}},
+	}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	gatewayBaseURL := fmt.Sprintf("http://%s:%d/v1", cfg.Listen.Host, cfg.Listen.Port)
+	codexConfig := "model_catalog_json = " + fmt.Sprintf("%q", config.CodexGatewayCatalogPath()) + "\n" +
+		"openai_base_url = " + fmt.Sprintf("%q", gatewayBaseURL) + "\n\n" +
+		"[memories]\n" +
+		"extract_model = \"wopal-ai/old\"\n" +
+		"consolidation_model = \"wopal-ai/old\"\n"
+	if err := os.WriteFile(config.CodexConfigPath(), []byte(codexConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runConfigCommand("role", []string{"set", "compaction", "--provider", "vendor", "--model", "upstream"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runConfigCommand("role", []string{"reset", "compaction"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(config.CodexConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, "\"friendly\"") {
+		t.Fatalf("unavailable default reset kept the stale explicit role:\n%s", got)
+	}
+	if strings.Count(got, "\"wopal-ai/deepseek-v4.1-flash\"") != 2 {
+		t.Fatalf("reset did not write the fail-closed default target:\n%s", got)
+	}
+}
+
+func TestConfigRoleSetRejectsMissingOrUnreadyTargetBeforeWrite(t *testing.T) {
+	root := setupConfigAuthTestRoot(t)
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.Providers["vendor"] = config.ProviderConfig{
+		BaseURL: "https://vendor.test",
+		Models:  []config.ExternalModelConfig{{Name: "needs-protocol"}},
+	}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(root, "runtime", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"set", "official-fallback", "--provider", "missing", "--model", "x"},
+		{"set", "compaction", "--provider", "vendor", "--model", "needs-protocol"},
+		{"set", "compaction", "--provider", "official", "--model", "gpt"},
+	} {
+		if err := runConfigCommand("role", args); err == nil {
+			t.Fatalf("role set %v unexpectedly succeeded", args)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(root, "runtime", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("invalid role set changed config")
 	}
 }

@@ -54,7 +54,7 @@ func TestServedGatewayNeverWritesPromptBodies(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service, _, err := buildGatewayService(root, gateway, "test-wopal-key", "e2e")
+	service, _, err := buildGatewayService(root, gateway, "test-wopal-key", nil, "e2e")
 	if err != nil {
 		t.Fatalf("build service: %v", err)
 	}

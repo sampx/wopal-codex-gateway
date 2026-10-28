@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"wopal-codex-gateway/internal/compaction"
 	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/quota"
 	"wopal-codex-gateway/internal/routing"
 )
 
@@ -72,9 +73,13 @@ func TestNativeCompactionModelSwitch(t *testing.T) {
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL + "/backend-api/codex")
+	table := routing.NewTable(map[string]routing.Route{
+		"wopal-ai/test": {Kind: routing.Wopal, ProviderID: "wopal-ai"},
+		"vendor/model":  {Kind: routing.External, ProviderID: "vendor"},
+	}, nil, nil)
 	var posts atomic.Int32
 	engine := gin.New()
-	engine.Use(routingMiddlewareWithTargets(nil, target, target))
+	engine.Use(routingMiddlewareWithResolverAndTargetsAndQuotaGuard(nil, target, target, quota.NewGuard(nil), table.Resolve))
 	engine.POST("/v1/responses", func(c *gin.Context) {
 		var body map[string]any
 		_ = c.ShouldBindJSON(&body)
@@ -91,58 +96,112 @@ func TestNativeCompactionModelSwitch(t *testing.T) {
 	})
 	server := httptest.NewServer(engine)
 	defer server.Close()
-	for _, transport := range []string{"websocket", "http"} {
-		t.Run(transport, func(t *testing.T) {
-			message := map[string]any{"type": "response.create", "model": "wopal-ai/test", "input": []any{
-				map[string]any{"type": "compaction", "id": "cmp-native", "encrypted_content": "official-ciphertext"},
-				map[string]any{"type": "message", "role": "user", "content": "continue-user"},
-			}}
-			headers := http.Header{"Authorization": {"Bearer official-token"}, "Chatgpt-Account-Id": {"acct-test"}, "X-Codex-Routing-Hint": {"model=wopal-ai/test"}}
-			if transport == "websocket" {
-				conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", headers)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer conn.Close()
-				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-				if err := conn.WriteJSON(message); err != nil {
-					t.Fatal(err)
-				}
-				for {
-					var event map[string]any
-					if err := conn.ReadJSON(&event); err != nil {
+	for _, model := range []string{"wopal-ai/test", "vendor/model"} {
+		for _, transport := range []string{"websocket", "http"} {
+			t.Run(model+"/"+transport, func(t *testing.T) {
+				message := map[string]any{"type": "response.create", "model": model, "input": []any{
+					map[string]any{"type": "compaction", "id": "cmp-native", "encrypted_content": "official-ciphertext"},
+					map[string]any{"type": "message", "role": "user", "content": "continue-user"},
+				}}
+				headers := http.Header{"Authorization": {"Bearer official-token"}, "Chatgpt-Account-Id": {"acct-test"}, "X-Codex-Routing-Hint": {"model=" + model}}
+				if transport == "websocket" {
+					conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", headers)
+					if err != nil {
 						t.Fatal(err)
 					}
-					if event["type"] == "error" {
-						t.Fatalf("switch rejected: %v", event)
+					defer conn.Close()
+					_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+					if err := conn.WriteJSON(message); err != nil {
+						t.Fatal(err)
 					}
-					if event["type"] == "response.completed" {
-						break
+					for {
+						var event map[string]any
+						if err := conn.ReadJSON(&event); err != nil {
+							t.Fatal(err)
+						}
+						if event["type"] == "error" {
+							t.Fatalf("switch rejected: %v", event)
+						}
+						if event["type"] == "response.completed" {
+							break
+						}
+					}
+				} else {
+					delete(message, "type")
+					raw, _ := json.Marshal(message)
+					req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", bytes.NewReader(raw))
+					req.Header = headers
+					req.Header.Set("Content-Type", "application/json")
+					resp, err := http.DefaultClient.Do(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer resp.Body.Close()
+					body, _ := io.ReadAll(resp.Body)
+					if resp.StatusCode != 200 || !bytes.Contains(body, []byte("response.completed")) {
+						t.Fatalf("HTTP switch failed: %d %s", resp.StatusCode, body)
 					}
 				}
-			} else {
-				delete(message, "type")
-				raw, _ := json.Marshal(message)
-				req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", bytes.NewReader(raw))
-				req.Header = headers
-				req.Header.Set("Content-Type", "application/json")
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer resp.Body.Close()
-				body, _ := io.ReadAll(resp.Body)
-				if resp.StatusCode != 200 || !bytes.Contains(body, []byte("response.completed")) {
-					t.Fatalf("HTTP switch failed: %d %s", resp.StatusCode, body)
-				}
-			}
-		})
+			})
+		}
 	}
-	if posts.Load() != 2 {
+	if posts.Load() != 4 {
 		t.Fatalf("third-party calls=%d", posts.Load())
 	}
 	if summaries.Load() != 1 {
 		t.Fatalf("same native capsule summarized %d times, want one cached conversion", summaries.Load())
+	}
+}
+
+func TestExternalHTTPExpandsWgcp1ReplayBeforeForwarding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	compaction.ConfigureKey("external-http-replay-test")
+	encoded, err := compaction.SealCapsule(compaction.Capsule{
+		ID:      "cmp-external",
+		Model:   "wopal-ai/test",
+		Summary: "EXTERNAL-REPLAY-TOKEN",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := routing.NewTable(map[string]routing.Route{
+		"vendor/model": {Kind: routing.External, ProviderID: "vendor"},
+	}, nil, nil)
+	seen := make(chan string, 1)
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithResolverAndTargetsAndQuotaGuard(nil, mustURL("http://127.0.0.1:1"), mustURL("http://127.0.0.1:1"), quota.NewGuard(nil), table.Resolve))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		raw, _ := io.ReadAll(c.Request.Body)
+		seen <- string(raw)
+		c.Data(http.StatusOK, "text/event-stream", []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"external-result\",\"status\":\"completed\",\"output\":[]}}\n\n"))
+	})
+	server := httptest.NewServer(engine)
+	defer server.Close()
+
+	body, _ := json.Marshal(map[string]any{
+		"model":  "vendor/model",
+		"stream": true,
+		"input": []any{
+			map[string]any{"type": "compaction", "id": "cmp-external", "encrypted_content": encoded},
+			map[string]any{"type": "message", "role": "user", "content": "continue"},
+		},
+	})
+	resp, err := http.Post(server.URL+"/v1/responses", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("external replay status=%d body=%s", resp.StatusCode, raw)
+	}
+	select {
+	case got := <-seen:
+		if strings.Contains(got, compaction.CapsulePrefix) || !strings.Contains(got, "EXTERNAL-REPLAY-TOKEN") {
+			t.Fatalf("external HTTP request bypassed replay expansion: %s", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("external upstream was not called")
 	}
 }
 

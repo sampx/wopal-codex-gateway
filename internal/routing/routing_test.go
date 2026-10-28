@@ -3,9 +3,74 @@ package routing
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestTableResolvesExactExternalVerifiedOfficialAndRejectsUnknown(t *testing.T) {
+	verifyCalls := 0
+	table := NewTable(map[string]Route{
+		"wopal-ai/deepseek": {Kind: Wopal, ProviderID: "wopal-ai"},
+		"vendor/model":      {Kind: External, ProviderID: "vendor"},
+		"short":             {Kind: External, ProviderID: "vendor"},
+	}, []string{"gpt-official"}, func() error {
+		verifyCalls++
+		return nil
+	})
+
+	cases := []struct {
+		model      string
+		wantKind   Kind
+		wantID     string
+		wantErr    bool
+		wantVerify bool
+	}{
+		{model: "vendor/model", wantKind: External, wantID: "vendor"},
+		{model: "wopal-ai/deepseek", wantKind: Wopal, wantID: "wopal-ai"},
+		{model: "short", wantKind: External, wantID: "vendor", wantVerify: true},
+		{model: "gpt-official", wantKind: Official, wantID: "official", wantVerify: true},
+		{model: "vendor/missing", wantErr: true},
+		{model: "unknown-bare", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		before := verifyCalls
+		got, err := table.Resolve(tc.model)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("Resolve(%q) error = nil, want route error", tc.model)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Resolve(%q): %v", tc.model, err)
+		}
+		if got.Kind != tc.wantKind || got.ProviderID != tc.wantID {
+			t.Fatalf("Resolve(%q) = %#v, want kind=%q provider=%q", tc.model, got, tc.wantKind, tc.wantID)
+		}
+		if (verifyCalls > before) != tc.wantVerify {
+			t.Fatalf("Resolve(%q) verifier call mismatch: before=%d after=%d", tc.model, before, verifyCalls)
+		}
+	}
+}
+
+func TestTableFailsAllBareNamesWhenOfficialArtifactIsInvalid(t *testing.T) {
+	want := errors.New("native Codex artifact changed")
+	table := NewTable(map[string]Route{
+		"bare-alias":   {Kind: External, ProviderID: "vendor"},
+		"vendor/model": {Kind: External, ProviderID: "vendor"},
+	}, []string{"gpt-official"}, func() error { return want })
+
+	for _, model := range []string{"bare-alias", "gpt-official"} {
+		if _, err := table.Resolve(model); !errors.Is(err, want) {
+			t.Fatalf("Resolve(%q) error = %v, want %v", model, err, want)
+		}
+	}
+	if got, err := table.Resolve("vendor/model"); err != nil || got.ProviderID != "vendor" {
+		t.Fatalf("namespaced external route = %#v, %v; want unaffected external route", got, err)
+	}
+}
 
 func TestClassify(t *testing.T) {
 	cases := map[string]Kind{

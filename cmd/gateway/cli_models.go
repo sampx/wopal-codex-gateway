@@ -7,20 +7,29 @@ import (
 	"strings"
 
 	"wopal-codex-gateway/internal/catalog"
+	"wopal-codex-gateway/internal/codex"
 	"wopal-codex-gateway/internal/config"
 	"wopal-codex-gateway/internal/keychain"
 )
 
 type wopalModelsRunner struct {
-	loadConfig     func() (*config.GatewayConfig, error)
-	saveConfig     func(*config.GatewayConfig) error
-	fetchModels    func(string, string) ([]string, error)
-	fetchMetadata  func(string, string) (*catalog.ModelMetadataSnapshot, error)
-	loadMetadata   func(string) (*catalog.ModelMetadataSnapshot, error)
-	saveMetadata   func(*catalog.ModelMetadataSnapshot) error
-	getAPIKey      func() (string, error)
-	refreshCatalog func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error)
-	out            io.Writer
+	loadConfig             func() (*config.GatewayConfig, error)
+	saveConfig             func(*config.GatewayConfig) error
+	fetchModels            func(string, string) ([]string, error)
+	fetchMetadata          func(string, string) (*catalog.ModelMetadataSnapshot, error)
+	loadMetadata           func(string) (*catalog.ModelMetadataSnapshot, error)
+	saveMetadata           func(*catalog.ModelMetadataSnapshot) error
+	getAPIKey              func() (string, error)
+	fetchProviderModels    func(string, string, bool) ([]string, error)
+	fetchModelsDevProvider func(string, string) (*catalog.ModelsDevProvider, bool, error)
+	loadProviderMetadata   func(string) (*catalog.ProviderModelMetadataSnapshot, error)
+	saveProviderMetadata   func(*catalog.ProviderModelMetadataSnapshot) error
+	getProviderAPIKey      func(string) (string, error)
+	validateOfficialNames  func(*config.GatewayConfig) error
+	refreshCatalog         func(*config.GatewayConfig) (*catalog.CatalogRefreshResult, error)
+	recordExposedModels    func([]string) error
+	signalReload           func() error
+	out                    io.Writer
 }
 
 func newWopalModelsRunner() wopalModelsRunner {
@@ -28,14 +37,24 @@ func newWopalModelsRunner() wopalModelsRunner {
 		loadConfig: func() (*config.GatewayConfig, error) {
 			return config.LoadGatewayConfig(config.ConfigPath())
 		},
-		saveConfig:     config.SaveGatewayConfig,
-		fetchModels:    catalog.FetchWopalModels,
-		fetchMetadata:  catalog.FetchWopalModelMetadata,
-		loadMetadata:   catalog.LoadModelMetadata,
-		saveMetadata:   catalog.SaveModelMetadata,
-		getAPIKey:      keychain.GetWopalAPIKey,
-		refreshCatalog: catalog.RefreshCatalog,
-		out:            os.Stdout,
+		saveConfig:          config.SaveGatewayConfig,
+		fetchModels:         catalog.FetchWopalModels,
+		fetchMetadata:       catalog.FetchWopalModelMetadata,
+		loadMetadata:        catalog.LoadModelMetadata,
+		saveMetadata:        catalog.SaveModelMetadata,
+		getAPIKey:           keychain.GetWopalAPIKey,
+		fetchProviderModels: catalog.FetchOpenAIModelIDs,
+		fetchModelsDevProvider: func(providerID, etag string) (*catalog.ModelsDevProvider, bool, error) {
+			return catalog.FetchModelsDevProvider(catalog.ModelsDevCatalogURL, providerID, etag)
+		},
+		loadProviderMetadata:  catalog.LoadProviderModelMetadata,
+		saveProviderMetadata:  catalog.SaveProviderModelMetadata,
+		getProviderAPIKey:     keychain.GetProviderAPIKey,
+		validateOfficialNames: catalog.ValidateExternalNamesAgainstOfficial,
+		refreshCatalog:        catalog.RefreshCatalog,
+		recordExposedModels:   codex.RecordExposedExternalModels,
+		signalReload:          signalGatewayReloadAfterCommit,
+		out:                   os.Stdout,
 	}
 }
 
@@ -44,6 +63,14 @@ func runModelsCommand(subcommand string, args []string) error {
 }
 
 func (runner wopalModelsRunner) run(subcommand string, args []string) error {
+	providerID, remaining, err := parseModelsProvider(args)
+	if err != nil {
+		return err
+	}
+	if providerID != "" && providerID != "wopal-ai" {
+		return runner.runProvider(subcommand, providerID, remaining)
+	}
+	args = remaining
 	switch subcommand {
 	case "list":
 		return runner.runList()
@@ -313,6 +340,16 @@ func (runner wopalModelsRunner) refreshModelCatalog(cfg *config.GatewayConfig) (
 	}
 	if result == nil {
 		return nil, fmt.Errorf("catalog refresh returned no result")
+	}
+	if runner.recordExposedModels != nil {
+		if err := runner.recordExposedModels(result.ExternalNames); err != nil {
+			return nil, fmt.Errorf("record exposed external models: %w", err)
+		}
+	}
+	if runner.signalReload != nil {
+		if err := runner.signalReload(); err != nil {
+			return nil, fmt.Errorf("model changes saved but gateway reload failed: %w", err)
+		}
 	}
 	return result, nil
 }

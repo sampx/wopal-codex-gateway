@@ -5,6 +5,7 @@ import (
 
 	"wopal-codex-gateway/internal/codex"
 	"wopal-codex-gateway/internal/config"
+	"wopal-codex-gateway/internal/provider"
 )
 
 func runCodexCommand(subcommand string, args []string) error {
@@ -14,7 +15,22 @@ func runCodexCommand(subcommand string, args []string) error {
 		if err != nil {
 			return err
 		}
-		result, err := codex.InstallIntoCodex(cfg)
+		resolved, err := resolveRuntimeModels(cfg)
+		if err != nil {
+			return err
+		}
+		registry, err := provider.Build(resolved)
+		if err != nil {
+			return err
+		}
+		if err := provider.ValidateExplicitRoles(resolved, registry); err != nil {
+			return err
+		}
+		compactionRole := provider.ResolveRole(resolved, registry, provider.RoleCompaction)
+		if compactionRole.Status != provider.RoleReady {
+			return fmt.Errorf("model_role_unavailable: compaction role is unavailable: %s", compactionRole.Reason)
+		}
+		result, err := codex.InstallIntoCodex(cfg, compactionRole.ClientModel)
 		if err != nil {
 			return err
 		}

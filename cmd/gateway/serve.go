@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,7 +23,6 @@ import (
 	"wopal-codex-gateway/internal/activity"
 	"wopal-codex-gateway/internal/compaction"
 	"wopal-codex-gateway/internal/config"
-	"wopal-codex-gateway/internal/keychain"
 	"wopal-codex-gateway/internal/notify"
 	"wopal-codex-gateway/internal/proxy"
 	"wopal-codex-gateway/internal/quota"
@@ -46,26 +48,15 @@ func runServe(args []string) error {
 		gatewayConfigPath = config.ConfigPathFor(root)
 	}
 
-	gateway, err := config.LoadGatewayConfig(gatewayConfigPath)
-	if err != nil {
-		return err
-	}
-	if err := config.ValidateServeConfig(gateway); err != nil {
-		return fmt.Errorf("%s: %w", gatewayConfigPath, err)
-	}
 	if err := config.SetProjectRoot(root); err != nil {
 		return err
 	}
-	gateway, err = resolveRuntimeModels(gateway)
-	if err != nil {
-		return err
-	}
-	wopalKey, err := keychain.GetWopalAPIKey()
+	initialSnapshot, err := loadGatewaySnapshot(root, gatewayConfigPath)
 	if err != nil {
 		return err
 	}
 
-	closeServiceLogs, err := redirectServiceLogs(root, gateway.Logs)
+	closeServiceLogs, err := redirectServiceLogs(root, initialSnapshot.gateway.Logs)
 	if err != nil {
 		return err
 	}
@@ -74,18 +65,74 @@ func runServe(args []string) error {
 	log.SetOutput(os.Stdout)
 	log.AddHook(errorOnlyHook{})
 
-	service, logger, err := buildGatewayService(root, gateway, wopalKey, *instanceFlag)
+	daemonLogger, err := activity.New(config.LogsDirFor(root), initialSnapshot.gateway.Logs)
+	if err != nil {
+		return fmt.Errorf("initialize daemon activity logger: %w", err)
+	}
+	defer daemonLogger.Close()
+
+	reloadStatus := newRuntimeReloadStatus()
+	switcher := newBackendSwitcher(nil)
+	backend, snapshot, err := startGatewayBackendWithLoggerAndResolver(root, gatewayConfigPath, *instanceFlag, daemonLogger, reloadStatus, switcher.Resolve)
 	if err != nil {
 		return err
 	}
-	logger.Write(map[string]any{"event": "gateway_started", "architecture": "embedded-cliproxy", "port": gateway.Listen.Port})
+	switcher.Swap(backend)
+	logBackend(backend, map[string]any{"event": "gateway_started", "architecture": "snapshot-frontdoor", "port": snapshot.gateway.Listen.Port})
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := service.Run(ctx); err != nil && ctx.Err() == nil {
-		logger.Write(map[string]any{"event": "gateway_failed", "error": err.Error()})
-		return fmt.Errorf("run embedded CLIProxyAPI service: %w", err)
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+
+	listen := snapshot.gateway.Listen
+	front := &http.Server{
+		Addr:    net.JoinHostPort(listen.Host, fmt.Sprintf("%d", listen.Port)),
+		Handler: switcher,
 	}
-	logger.Write(map[string]any{"event": "gateway_stopped"})
+	frontErr := make(chan error, 1)
+	go func() {
+		err := front.ListenAndServe()
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		frontErr <- err
+	}()
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				candidate, reloadErr := reloadGatewayBackendWithResolver(root, gatewayConfigPath, *instanceFlag, listen, daemonLogger, reloadStatus, switcher.Resolve)
+				if reloadErr != nil {
+					reloadStatus.MarkFailure(reloadErr)
+					logBackend(switcher.Current(), map[string]any{"event": "gateway_reload_failed", "error": reloadErr.Error()})
+					continue
+				}
+				switcher.Swap(candidate)
+				reloadStatus.MarkSuccess()
+				logBackend(candidate, map[string]any{"event": "gateway_reloaded"})
+			}
+		}
+	}()
+
+	select {
+	case err := <-frontErr:
+		if err != nil {
+			logBackend(switcher.Current(), map[string]any{"event": "gateway_failed", "error": err.Error()})
+			switcher.Close()
+			return fmt.Errorf("run gateway front door: %w", err)
+		}
+	case <-ctx.Done():
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+	_ = front.Shutdown(shutdownCtx)
+	logBackend(switcher.Current(), map[string]any{"event": "gateway_stopped"})
+	switcher.Close()
 	return nil
 }
 
@@ -93,20 +140,33 @@ func runServe(args []string) error {
 // daemon runs it. It is separate from runServe so integration tests can drive
 // the real assembly — the same server options, routing middleware and status
 // handlers — without capturing the process's stdout and stderr.
-func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, instance string) (*cliproxy.Service, *activity.Logger, error) {
+func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey string, providerKeys map[string]string, instance string) (*cliproxy.Service, *activity.Logger, error) {
+	return buildGatewayServiceWithRuntime(root, gateway, wopalKey, providerKeys, instance, nil, false)
+}
+
+func buildGatewayServiceWithRuntime(root string, gateway *config.GatewayConfig, wopalKey string, providerKeys map[string]string, instance string, resolve proxy.RouteResolver, freezeSnapshot bool) (*cliproxy.Service, *activity.Logger, error) {
+	return buildGatewayServiceWithRuntimeLogger(root, gateway, wopalKey, providerKeys, instance, resolve, freezeSnapshot, nil)
+}
+
+func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayConfig, wopalKey string, providerKeys map[string]string, instance string, resolve proxy.RouteResolver, freezeSnapshot bool, sharedLogger *activity.Logger, runtimeSets ...gatewayServiceRuntime) (*cliproxy.Service, *activity.Logger, error) {
 	// The SDK request logger is disabled at construction time (see
 	// disableSDKRequestLogging): no request-logging middleware is installed, so
 	// no request or response body can be written to disk.
 	requestBodyLogging := requestBodyLoggingState
 
 	compaction.ConfigureKey(wopalKey)
-	cliConfig, cliConfigPath, err := config.BuildCLIProxyConfig(root, gateway, wopalKey)
+	cliConfig, cliConfigPath, err := config.BuildCLIProxyConfig(root, gateway, wopalKey, providerKeys)
 	if err != nil {
 		return nil, nil, err
 	}
-	logger, err := activity.New(config.LogsDirFor(root), gateway.Logs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("initialize activity logger: %w", err)
+	logger := sharedLogger
+	createdLogger := false
+	if logger == nil {
+		logger, err = activity.New(config.LogsDirFor(root), gateway.Logs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("initialize activity logger: %w", err)
+		}
+		createdLogger = true
 	}
 	logger.Write(map[string]any{
 		"event": "gateway_starting", "host": gateway.Listen.Host, "port": gateway.Listen.Port,
@@ -116,12 +176,26 @@ func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, i
 	quotaGuard.SetNotifier(notify.NewQuotaNotifier(logger, gateway.Notifications))
 	logger.Write(map[string]any{"event": "quota_notification_configured", "status": quotaGuard.NotificationStatus()})
 
+	middleware := proxy.RoutingMiddleware(logger, quotaGuard)
+	runtimeState := gatewayServiceRuntime{StatusGateway: gateway, Reload: newRuntimeReloadStatus()}
+	if len(runtimeSets) > 0 {
+		runtimeState = runtimeSets[0]
+		if runtimeState.StatusGateway == nil {
+			runtimeState.StatusGateway = gateway
+		}
+		if runtimeState.Reload == nil {
+			runtimeState.Reload = newRuntimeReloadStatus()
+		}
+	}
+	if resolve != nil {
+		middleware = proxy.RoutingMiddlewareWithResolverAndRoles(logger, quotaGuard, resolve, runtimeState.Roles)
+	}
 	builder := cliproxy.NewBuilder().
 		WithConfig(cliConfig).
 		WithConfigPath(cliConfigPath).
 		WithServerOptions(
 			sdkapi.WithRequestLoggerFactory(disableSDKRequestLogging),
-			sdkapi.WithMiddleware(proxy.RoutingMiddleware(logger, quotaGuard)),
+			sdkapi.WithMiddleware(middleware),
 			sdkapi.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *sdkconfig.Config) {
 				engine.GET("/_health", func(c *gin.Context) {
 					c.JSON(200, gin.H{
@@ -132,20 +206,30 @@ func buildGatewayService(root string, gateway *config.GatewayConfig, wopalKey, i
 					})
 				})
 				engine.GET("/_status", func(c *gin.Context) {
-					c.JSON(200, gin.H{
-						"ok":                   true,
-						"listen":               fmt.Sprintf("%s:%d", gateway.Listen.Host, gateway.Listen.Port),
-						"official":             "native-pass-through",
-						"official_quota":       quotaGuard.Status(time.Now()),
-						"notifications":        quotaGuard.NotificationStatus(),
-						"wopal":                "cliproxy-responses-to-chat",
-						"request_body_logging": requestBodyLogging,
-					})
+					c.JSON(200, buildRuntimeStatusPayload(
+						runtimeState.StatusGateway,
+						runtimeState.Roles,
+						runtimeState.Credentials,
+						runtimeState.Reload.Snapshot(),
+						quotaGuard.Status(time.Now()),
+						quotaGuard.FailoverStatus(),
+						quotaGuard.NotificationStatus(),
+						instance,
+						requestBodyLogging,
+					))
 				})
 			}),
 		)
+	if freezeSnapshot {
+		builder = builder.WithWatcherFactory(func(string, string, func(*sdkconfig.Config)) (*cliproxy.WatcherWrapper, error) {
+			return nil, nil
+		})
+	}
 	service, err := builder.Build()
 	if err != nil {
+		if createdLogger {
+			logger.Close()
+		}
 		return nil, nil, fmt.Errorf("build embedded CLIProxyAPI service: %w", err)
 	}
 	return service, logger, nil

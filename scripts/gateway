@@ -20,7 +20,7 @@ Codex integration:
   install            Install/enable the gateway in Codex
   disable            Restore pre-install Codex config and unload the gateway
 
-Models and auth:
+Wopal AI models and auth:
   models list        List models visible to the Wopal AI API key
   models sync        Import all Codex-usable Wopal AI models
   models add <name...>     Add one or more Wopal AI models locally
@@ -30,9 +30,27 @@ Models and auth:
   auth test          Validate the stored Wopal AI API key
   auth status        Show whether a key is configured
 
+External providers (add --provider <id> after the model names where relevant):
+  providers set <id> --base-url <url> [--base-url-for <protocol>=<url>]...
+                     [--models-url <url>] [--models-auth none|provider-key]
+                     [--header <name>=<value>]... [--protocol <default>]
+                     [--tool-mode direct|code_mode|code_mode_only]
+  providers remove <id>            Remove an unreferenced external provider
+  auth set --provider <id>         Store and validate a provider API key
+  auth test --provider <id>        Validate the stored provider API key
+  auth status --provider <id>      Show whether the provider key is configured
+  models sync --provider <id>      Refresh an external provider's model metadata
+  models add <model...> --provider <id> [--protocol <protocol>] [--alias <name>]
+  models set <model...> --provider <id> [metadata options]
+  models remove <model...> --provider <id>
+
 Low-level passthrough:
   config ...         Run a gateway config command
   catalog refresh    Rebuild model catalog
+  quota ...          Quota learning state, e.g. quota reset-learning
+  codex ...          Raw codex subcommands, e.g. codex install / codex restore
+
+Every command accepts -h / --help.
 USAGE
 }
 
@@ -60,7 +78,7 @@ case "$cmd" in
     "$BIN" codex restore "$@"
     echo "Restart ChatGPT/Codex Desktop manually to reload the original configuration."
     ;;
-  models|service|auth|config|catalog)
+  models|service|auth|config|catalog|providers|quota|codex)
     require_bin
     exec "$BIN" "$cmd" "$@"
     ;;
@@ -72,3 +90,4 @@ case "$cmd" in
     exit 2
     ;;
 esac
+

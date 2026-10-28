@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Wopal Codex Gateway is a local macOS routing gateway for Codex, shipped as a single Go binary at `bin/wopal-codex-gateway`. It lets ChatGPT/Codex Desktop or Codex CLI keep native official models while also using `wopal-ai/*` models from the same model picker and the same conversation.
+Wopal Codex Gateway is a local macOS routing gateway for Codex, shipped as a single Go binary at `bin/wopal-codex-gateway`. It lets ChatGPT/Codex Desktop or Codex CLI keep native official models while also using Wopal AI and configured external-provider models from the same picker and conversation.
 
 It is more than an HTTP proxy. It also owns model-catalog composition, reversible Codex configuration, HTTP/WebSocket provider switching, portable conversation compaction, legacy-session compatibility, and automatic native-quota failover/failback.
 
@@ -29,14 +29,15 @@ For architecture and behavioral invariants, see [`docs/DESIGN.md`](docs/DESIGN.m
 
 ## 1. Features
 
-### Two model namespaces
+### Exact model names
 
-There are exactly two namespaces:
+Routing uses exact, configured names:
 
 - no namespace, for example `gpt-6.1-sol`, routes to the official provider;
-- `wopal-ai/<model>`, for example `wopal-ai/deepseek-v4.1-flash`, routes to Wopal AI.
+- `wopal-ai/<model>`, for example `wopal-ai/deepseek-v4.1-flash`, routes to Wopal AI;
+- other configured external models use `<provider-id>/<upstream-model>` or an explicit alias.
 
-Any other namespace is rejected with HTTP 404 and the message `model namespace is disabled`. Official credentials are removed before a request enters the Wopal AI path.
+Unknown namespaces, deleted aliases, and unknown bare models fail closed with `model_route_unavailable`. Official credentials are removed before a request enters an external-provider path.
 
 ### Provider switching inside one conversation
 
@@ -50,7 +51,7 @@ When a WebSocket route changes provider, the gateway closes it with `1012 Servic
 
 ### Gateway-owned portable compaction
 
-New conversation compaction is intercepted by the gateway and uses:
+New conversation compaction is intercepted by the gateway and uses the current `compaction` role. Its default target is:
 
 ```text
 wopal-ai/deepseek-v4.1-flash
@@ -58,9 +59,9 @@ wopal-ai/deepseek-v4.1-flash
 
 The summary is sealed into the gateway-owned `wgcp1` portable capsule instead of creating new OpenAI-only opaque compaction state.
 
-### Codex Memory uses Wopal AI
+### Codex Memory shares the compaction role
 
-While installed, the gateway configures:
+While installed, the gateway writes the current `compaction` target into both Codex memory fields. With the default role:
 
 ```toml
 [memories]
@@ -68,7 +69,7 @@ extract_model = "wopal-ai/deepseek-v4.1-flash"
 consolidation_model = "wopal-ai/deepseek-v4.1-flash"
 ```
 
-This keeps background Memory extraction/consolidation from consuming the primary native-model quota.
+Changing or resetting `compaction` updates these two managed fields when Codex is still pointed at this gateway. The role can target any configured external provider.
 
 ### Automatic native-quota protection
 
@@ -88,7 +89,7 @@ When protected:
 ```text
 requested native model
     -> quota guard
-    -> wopal-ai/deepseek-v4.1-flash
+    -> current officialFallback role
 ```
 
 After the quota reset time, the next safe sampling step reconnects and returns to the originally requested native model.
@@ -285,14 +286,14 @@ It performs the full integration workflow:
 
 1. requires a configured base URL and a stored API key;
 2. loads official models from `codex debug models --bundled`;
-3. merges official and `wopal-ai/*` catalog entries;
+3. merges official, Wopal AI, and configured external-provider catalog entries;
 4. writes the gateway Codex model catalog;
 5. installs and starts the `com.wopal.codex-gateway` LaunchAgent with `<binary> serve --project-root <root>`;
 6. waits for `/_health` to become healthy;
 7. saves the pre-install Codex configuration as a restore point;
 8. points Codex `openai_base_url` at the local gateway;
 9. points `model_catalog_json` at the merged catalog;
-10. configures Memory extraction/consolidation to Wopal AI;
+10. configures Memory extraction/consolidation to the current `compaction` role;
 11. preserves unrelated Codex settings and the current `model`.
 
 A missing binary, invalid configuration, or failing health check makes the command exit non-zero before it prints success.
@@ -420,17 +421,23 @@ Very old conversations may still contain OpenAI-native opaque compaction state. 
 
 ### Automatic compaction
 
-New conversation compaction is gateway-owned regardless of the foreground model and uses:
+New conversation compaction is gateway-owned regardless of the foreground model and uses the current `compaction` role. The default is:
 
 ```text
 wopal-ai/deepseek-v4.1-flash
 ```
 
-This is a gateway runtime policy, separate from Codex `[memories]` configuration.
+Codex memories use the same role, so the two cannot drift while the gateway manages Codex. Inspect or change the roles with:
+
+```sh
+bin/wopal-codex-gateway config role
+bin/wopal-codex-gateway config role set compaction --provider vendor --model model-name
+bin/wopal-codex-gateway config role reset compaction
+```
 
 ### Automatic quota failover/failback
 
-Before every new sampling step the gateway rechecks quota state. A protected native request is routed to the Wopal fallback model; after reset, a safe subsequent step reconnects to the originally requested native model.
+Before every new sampling step the gateway rechecks quota state. A protected native request is routed to the current `officialFallback` role; after reset, a safe subsequent step reconnects to the originally requested native model.
 
 A WebSocket `1012 Service Restart` during provider change, quota failover, or failback is an expected control path: Codex should reconnect and replay the full input.
 
@@ -445,7 +452,7 @@ To check which model a request is actually running on:
 curl -fsS http://127.0.0.1:11435/_status
 ```
 
-`official_quota.state` is `protected` while native quota is in reserve; `official_quota.failover.active` is `true` while native requests are being replaced by Wopal models.
+`official_quota.state` is `protected` while native quota is in reserve; `official_quota.failover.active` is `true` while native requests are being replaced by the configured `officialFallback` target. Provider and role readiness are also reported under `/_status`.
 
 Notifications require `terminal-notifier`; without it nothing is posted and routing is unaffected. To turn them off, set this in `runtime/config.json`:
 
@@ -606,37 +613,37 @@ Return to the last working release when a new one will not start.
 
 ### 12.2 Steps
 
-Stop the current service:
-
-```sh
-bin/wopal-codex-gateway service stop
-```
-
-Start the previous release from `recovery/`:
+Run the recovery entry directly:
 
 ```sh
 recovery/start-gateway.sh
 ```
 
-Confirm it owns the port:
+The script follows a fixed fail-stop sequence:
+
+1. Run `codex restore` with the **current release** so the current Codex takeover is removed first;
+2. Start the previous release from `recovery/` and require `/_health` to pass;
+3. Restore that verified previous executable to `bin/wopal-codex-gateway`, then run `codex install` with the **previous release** so it regenerates the catalog and memories settings it understands.
+
+After it completes, confirm the service again:
 
 ```sh
 curl -s 127.0.0.1:11435/_health
 ```
 
-A JSON body with `instance` and `"ok": true` means the previous release is serving.
+A JSON body with `instance` and `"ok": true` means the previous release is serving. The script prints `RESULT=ROLLED_BACK` only after the previous release has also reinstalled the Codex-facing state.
 
 ### 12.3 What a rollback keeps
 
 - `runtime/config.json` and the quota state are shared, so nothing needs restoring;
-- The Codex takeover needs no change: it points at the same port;
+- The previous release regenerates the Codex catalog, memories models, and Gateway takeover, so a third-party bare alias known only to the new release cannot remain active;
 - The previous release takes over `logs/` and keeps writing in place.
 
 Once it is stable, decide whether to fix the new release or keep running the one from `recovery/`.
 
 ### 12.4 Keeping recovery usable
 
-Do not delete `recovery/`. When you publish a release, copy the outgoing executable into `recovery/`, replacing the older one.
+Do not delete `recovery/`. Before publishing a release, keep all three local recovery assets current: the previous `wopal-codex-gatewayd`, `rollback-launchd.plist` pointing at it, and `start-gateway.sh`. These are operator-owned local material and stay out of Git.
 
 
 ## 13. Disable and uninstall

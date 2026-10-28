@@ -1,13 +1,14 @@
 ---
-name: Wopal Codex Gateway AGENT RULES
-description: Agent rules for this Go gateway repo: path contract, privacy boundary, configuration and quota semantics.
+name: Wopal Codex Gateway Agent Rules
+description: Long-lived development constraints for this local Codex gateway: path contract, privacy boundary, configuration and quota semantics, release validation.
+maintenance: Maintain only when a long-lived development or verification constraint appears that neither code, tests, nor DESIGN can carry on their own. Record only rules that change future agent decisions; never one-off tasks, implementation facts, incident notes, or anything derivable from the code.
 ---
 
 # Agent Development Rules
 
 ## Canonical References
 
-Canonical references:
+These documents are normative, not background reading:
 
 - DESIGN: `docs/DESIGN.md`
 
@@ -51,7 +52,7 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 | Full tests | `go test -race ./... -count=1` |
 | One package | `go test -race ./internal/quota/ -count=1` |
 | Operator entry | `scripts/gateway <command>` |
-| Doc gate | `python3 <space>/skills/dev-doc-master/scripts/verify-docset.py docs --main DESIGN.md` |
+| Release validation | `scripts/validate-release.sh` |
 
 ## Implementation Rules
 
@@ -73,6 +74,16 @@ One Go binary holds the control plane and the data plane. `cmd/gateway` parses s
 - Any change touching request bodies must run `TestServedGatewayNeverWritesPromptBodies`. Removing the nil factory must make that test fail; that is what makes it meaningful.
 - Run the full gate before committing: `go build ./... && go vet ./... && gofmt -l cmd internal && go test -race ./... -count=1`.
 
+## Release Validation
+
+`go test` does not prove a real client can use the binary; a candidate must pass an isolated end-to-end run before it is installed.
+
+- **Never validate on the installed instance.** The LaunchAgent pins an absolute binary path, so an in-place swap creates the outage before it reveals it.
+- Assertions live in `cmd/gateway/release_candidate_e2e_test.go`: real config assembly, a real listener, a local fake upstream, no credentials and no spend. `scripts/validate-release.sh` only runs it and confirms the installed instance did not change.
+- Run it when the diff touches `internal/{proxy,routing,catalog,provider,codex,config}`, `cmd/gateway`, or anything that changes the Codex-visible catalog or config. Doc, comment and test-only changes do not need it.
+- Coverage is defined by that test, so it is not restated here and cannot drift. Narrowing it requires a stated reason in review.
+- A passing test is the floor for installation, never a substitute for the user's check in the real client.
+
 ## Code Review Rules
 
 Generic review method lives in the review skills this space assembles: `df-implement-review` for code changes and `df-proposal-review` for plans and proposals. Report a defect only when the diff introduces it, and name the concrete trigger, the affected behavior, and evidence in the changed code. Omit pre-existing problems, style preferences, and anything CI already enforces.
@@ -80,6 +91,7 @@ Generic review method lives in the review skills this space assembles: `df-imple
 ### Project-specific review checkpoints
 
 - Do logging and error paths still stay metadata-only? Check new fields for prompts, bodies, tool arguments, tool output, and credentials.
+- Does every turn event report the provider taken from the actual route resolution rather than a fixed literal?
 - Are paths still obtained only through `internal/config` helpers, with no duplicated directory names elsewhere?
 - Is a configuration schema change backward compatible: new fields defaulted, removed sections rejected loudly?
 - Does a quota or failover change alter base threshold semantics, and can the `/_status` fields still explain an early stop?
@@ -89,4 +101,5 @@ Generic review method lives in the review skills this space assembles: `df-imple
 
 ## User-Supplied Rules
 
+- **Validation traffic uses low-cost models only.** A release validation sends a handful of one-sentence requests; never burn quota on a premium model to prove routing.
 

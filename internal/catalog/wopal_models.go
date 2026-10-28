@@ -38,9 +38,12 @@ type RemoveWopalModelsResult struct {
 // ModelPatch carries the metadata a caller wants to change. A nil field is left
 // untouched unless its reset flag is set. CLI callers reject reset/set conflicts.
 type ModelPatch struct {
+	Alias              *string
+	Protocol           *string
 	ContextWindow      *int
 	Vision             *bool
 	Reasoning          *bool
+	ResetAlias         bool
 	ResetContextWindow bool
 	ResetVision        bool
 	ResetReasoning     bool
@@ -97,6 +100,14 @@ func SyncWopalModelConfigs(current []config.ExternalModelConfig, availableIDs, e
 }
 
 func AddWopalModelConfigs(current []config.ExternalModelConfig, names []string, defaults ModelPatch) AddWopalModelsResult {
+	return addModelConfigs(current, names, defaults, normalizeWopalModelName)
+}
+
+func AddProviderModelConfigs(current []config.ExternalModelConfig, names []string, defaults ModelPatch) AddWopalModelsResult {
+	return addModelConfigs(current, names, defaults, normalizeProviderModelName)
+}
+
+func addModelConfigs(current []config.ExternalModelConfig, names []string, defaults ModelPatch, normalize func(string) string) AddWopalModelsResult {
 	models := make([]config.ExternalModelConfig, 0, len(current)+len(names))
 	known := make(map[string]struct{}, len(current)+len(names))
 	for _, model := range current {
@@ -107,7 +118,7 @@ func AddWopalModelConfigs(current []config.ExternalModelConfig, names []string, 
 	result := AddWopalModelsResult{Models: models, Added: []string{}, Existing: []string{}}
 	reportedExisting := make(map[string]struct{}, len(names))
 	for _, rawName := range names {
-		name := normalizeWopalModelName(rawName)
+		name := normalize(rawName)
 		if name == "" {
 			continue
 		}
@@ -127,7 +138,15 @@ func AddWopalModelConfigs(current []config.ExternalModelConfig, names []string, 
 }
 
 func UpdateWopalModelConfigs(current []config.ExternalModelConfig, names []string, patch ModelPatch) UpdateWopalModelsResult {
-	requested := uniqueNormalizedModelNames(names)
+	return updateModelConfigs(current, names, patch, normalizeWopalModelName)
+}
+
+func UpdateProviderModelConfigs(current []config.ExternalModelConfig, names []string, patch ModelPatch) UpdateWopalModelsResult {
+	return updateModelConfigs(current, names, patch, normalizeProviderModelName)
+}
+
+func updateModelConfigs(current []config.ExternalModelConfig, names []string, patch ModelPatch, normalize func(string) string) UpdateWopalModelsResult {
+	requested := uniqueNormalizedModelNamesWith(names, normalize)
 	requestedSet := make(map[string]struct{}, len(requested))
 	for _, name := range requested {
 		requestedSet[name] = struct{}{}
@@ -160,7 +179,15 @@ func UpdateWopalModelConfigs(current []config.ExternalModelConfig, names []strin
 }
 
 func RemoveWopalModelConfigs(current []config.ExternalModelConfig, names []string) RemoveWopalModelsResult {
-	requested := uniqueNormalizedModelNames(names)
+	return removeModelConfigs(current, names, normalizeWopalModelName)
+}
+
+func RemoveProviderModelConfigs(current []config.ExternalModelConfig, names []string) RemoveWopalModelsResult {
+	return removeModelConfigs(current, names, normalizeProviderModelName)
+}
+
+func removeModelConfigs(current []config.ExternalModelConfig, names []string, normalize func(string) string) RemoveWopalModelsResult {
+	requested := uniqueNormalizedModelNamesWith(names, normalize)
 	existing := make(map[string]struct{}, len(current))
 	for _, model := range current {
 		existing[model.Name] = struct{}{}
@@ -193,11 +220,19 @@ func normalizeWopalModelName(name string) string {
 	return name
 }
 
+func normalizeProviderModelName(name string) string {
+	return strings.TrimSpace(name)
+}
+
 func uniqueNormalizedModelNames(names []string) []string {
+	return uniqueNormalizedModelNamesWith(names, normalizeWopalModelName)
+}
+
+func uniqueNormalizedModelNamesWith(names []string, normalize func(string) string) []string {
 	unique := make([]string, 0, len(names))
 	seen := make(map[string]struct{}, len(names))
 	for _, rawName := range names {
-		name := normalizeWopalModelName(rawName)
+		name := normalize(rawName)
 		if name == "" {
 			continue
 		}
@@ -228,6 +263,9 @@ func cloneExternalModel(model config.ExternalModelConfig) config.ExternalModelCo
 }
 
 func applyModelPatch(model config.ExternalModelConfig, patch ModelPatch) config.ExternalModelConfig {
+	if patch.ResetAlias {
+		model.Alias = ""
+	}
 	if patch.ResetContextWindow {
 		model.ContextWindow = nil
 	}
@@ -236,6 +274,12 @@ func applyModelPatch(model config.ExternalModelConfig, patch ModelPatch) config.
 	}
 	if patch.ResetReasoning {
 		model.Reasoning = nil
+	}
+	if patch.Alias != nil {
+		model.Alias = *patch.Alias
+	}
+	if patch.Protocol != nil {
+		model.Protocol = *patch.Protocol
 	}
 	if patch.ContextWindow != nil {
 		contextWindow := *patch.ContextWindow

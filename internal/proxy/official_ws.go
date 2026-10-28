@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -32,6 +33,14 @@ const (
 var officialWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
 func serveOfficialWebsocketBridge(c *gin.Context, logger *activity.Logger, target *url.URL, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge) {
+	serveOfficialWebsocketBridgeWithResolver(c, logger, target, quotaGuard, accountID, boundModel, nativeReplay, legacyRouteResolver)
+}
+
+func serveOfficialWebsocketBridgeWithResolver(c *gin.Context, logger *activity.Logger, target *url.URL, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge, resolve RouteResolver) {
+	serveOfficialWebsocketBridgeWithRuntime(c, logger, target, quotaGuard, accountID, boundModel, nativeReplay, resolve, defaultRuntimeRoles())
+}
+
+func serveOfficialWebsocketBridgeWithRuntime(c *gin.Context, logger *activity.Logger, target *url.URL, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge, resolve RouteResolver, roles RuntimeRoles) {
 	// Dial upstream before upgrading the client so a failed dial still returns
 	// a clean HTTP error instead of a half-open websocket.
 	upstreamConn, upstreamResponse, err := dialOfficialWebsocketUpstream(c, target)
@@ -74,8 +83,8 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activity.Logger, targe
 	clientRequest := c.Request.Clone(c.Request.Context())
 	var clientWriteMu sync.Mutex
 	var upstreamWriteMu sync.Mutex
-	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger, quotaGuard, accountID, boundModel, nativeReplay, clientRequest, &clientWriteMu, &upstreamWriteMu)
-	go pumpOfficialWebsocket(upstreamConn, clientConn, done, false, logger, quotaGuard, accountID, boundModel, nil, nil, &upstreamWriteMu, &clientWriteMu)
+	go pumpOfficialWebsocket(clientConn, upstreamConn, done, true, logger, quotaGuard, accountID, boundModel, nativeReplay, clientRequest, &clientWriteMu, &upstreamWriteMu, resolve, roles)
+	go pumpOfficialWebsocket(upstreamConn, clientConn, done, false, logger, quotaGuard, accountID, boundModel, nil, nil, &upstreamWriteMu, &clientWriteMu, nil, roles)
 
 	<-done
 	_ = clientConn.Close()
@@ -88,7 +97,7 @@ func serveOfficialWebsocketBridge(c *gin.Context, logger *activity.Logger, targe
 
 // pumpOfficialWebsocket copies frames one direction. Each connection has exactly
 // one reader and one writer goroutine, which websocket.Conn requires.
-func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activity.Logger, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge, clientRequest *http.Request, sourceWriteMu, targetWriteMu *sync.Mutex) {
+func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, rewriteClientFrames bool, logger *activity.Logger, quotaGuard *quota.Guard, accountID, boundModel string, nativeReplay *compaction.NativeBridge, clientRequest *http.Request, sourceWriteMu, targetWriteMu *sync.Mutex, resolve RouteResolver, roles RuntimeRoles) {
 	defer func() { done <- struct{}{} }()
 	for {
 		messageType, payload, err := source.ReadMessage()
@@ -107,7 +116,11 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 			return
 		}
 		isDataFrame := messageType == websocket.TextMessage || messageType == websocket.BinaryMessage
-		if rewriteClientFrames && isDataFrame && reconnectForWebsocketRouteChange(source, routing.Official, payload, logger) {
+		activeResolver := resolve
+		if activeResolver == nil {
+			activeResolver = legacyRouteResolver
+		}
+		if rewriteClientFrames && isDataFrame && reconnectForWebsocketRouteChange(source, "official", payload, logger, activeResolver) {
 			return
 		}
 		if rewriteClientFrames && isDataFrame {
@@ -125,16 +138,26 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 					sourceWriteMu.Unlock()
 					return
 				}
-				logger.Write(map[string]any{"event": "official_compaction_intercepted", "compaction_model": compaction.DedicatedModel, "transport": "websocket"})
-				runOfficialWebsocketCompaction(source, sourceWriteMu, logger, nativeReplay, clientRequest, message)
+				compactionModel := readyRoleModel(roles.Compaction)
+				if compactionModel == "" {
+					writeModelRoleUnavailableWebsocket(source, sourceWriteMu, "compaction")
+					continue
+				}
+				logger.Write(map[string]any{"event": "official_compaction_intercepted", "compaction_model": compactionModel, "transport": "websocket"})
+				runOfficialWebsocketCompaction(source, sourceWriteMu, logger, nativeReplay, clientRequest, message, compactionModel, roles.Compaction.ProviderID)
 				continue
 			}
 			if model, ok := officialInferenceModel(payload, boundModel); ok {
-				if blocked, reason := quotaGuard.BlockedModel(accountID, model, time.Now()); blocked {
-					logger.Write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "model": model, "reason": reason, "action": "failover", "effective_model": routing.OfficialQuotaFailoverModel})
+				effectiveFallback := readyRoleModel(roles.OfficialFallback)
+				if blocked, reason := quotaGuard.BlockedModelWithTarget(accountID, model, effectiveFallback, time.Now()); blocked {
+					if effectiveFallback == "" {
+						writeModelRoleUnavailableWebsocket(source, sourceWriteMu, "officialFallback")
+						continue
+					}
+					logger.Write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "model": model, "reason": reason, "action": "failover", "effective_model": effectiveFallback})
 					sourceWriteMu.Lock()
 					_ = source.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(
-						websocket.CloseServiceRestart, "official quota reserve protected; reconnect for automatic Wopal failover",
+						websocket.CloseServiceRestart, "official quota reserve protected; reconnect for automatic external failover",
 					), time.Now().Add(time.Second))
 					sourceWriteMu.Unlock()
 					return
@@ -180,15 +203,18 @@ func officialCompactionTriggerMessage(payload []byte) (map[string]any, bool) {
 	return message, true
 }
 
-func runOfficialWebsocketCompaction(client *websocket.Conn, clientWriteMu *sync.Mutex, logger *activity.Logger, nativeReplay *compaction.NativeBridge, original *http.Request, message map[string]any) {
+func runOfficialWebsocketCompaction(client *websocket.Conn, clientWriteMu *sync.Mutex, logger *activity.Logger, nativeReplay *compaction.NativeBridge, original *http.Request, message map[string]any, compactionModel, providerID string) {
 	if original == nil {
 		return
 	}
 	session := &wopalWebsocketSession{
-		logger:       logger,
-		model:        compaction.DedicatedModel,
-		request:      original.Clone(original.Context()),
-		nativeReplay: nativeReplay,
+		logger:             logger,
+		model:              compactionModel,
+		providerID:         providerID,
+		compactionModel:    compactionModel,
+		compactionProvider: providerID,
+		request:            original.Clone(original.Context()),
+		nativeReplay:       nativeReplay,
 	}
 	session.emit = func(payload []byte) error {
 		return writeOfficialWebsocketMessage(client, clientWriteMu, websocket.TextMessage, payload)
@@ -200,6 +226,13 @@ func runOfficialWebsocketCompaction(client *websocket.Conn, clientWriteMu *sync.
 	}
 	session.forwardCompactionTurn(ctx, uuid.NewString(), time.Now(), message)
 	session.finishTurn(cancel)
+}
+
+func writeModelRoleUnavailableWebsocket(conn *websocket.Conn, mu *sync.Mutex, role string) {
+	payload, _ := json.Marshal(map[string]any{"type": "error", "status": http.StatusServiceUnavailable, "error": map[string]any{
+		"type": "server_error", "code": "model_role_unavailable", "message": fmt.Sprintf("model role %s is unavailable", role),
+	}})
+	_ = writeOfficialWebsocketMessage(conn, mu, websocket.TextMessage, payload)
 }
 
 func dialOfficialWebsocketUpstream(c *gin.Context, target *url.URL) (*websocket.Conn, *http.Response, error) {

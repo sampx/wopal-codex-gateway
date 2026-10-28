@@ -16,9 +16,13 @@ import (
 )
 
 // InstallIntoCodex points Codex at the gateway and records the pre-install state.
-func InstallIntoCodex(cfg *config.GatewayConfig) (*catalog.CatalogRefreshResult, error) {
+func InstallIntoCodex(cfg *config.GatewayConfig, compactionModel string) (*catalog.CatalogRefreshResult, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("gateway configuration is missing")
+	}
+	compactionModel = strings.TrimSpace(compactionModel)
+	if compactionModel == "" {
+		return nil, fmt.Errorf("model_role_unavailable: compaction role is unavailable")
 	}
 	if strings.TrimSpace(cfg.WopalAI.BaseURL) == "" {
 		return nil, fmt.Errorf("Wopal AI base URL is not configured. Run: wopal-codex-gateway config wopal --base-url <url>")
@@ -46,8 +50,9 @@ func InstallIntoCodex(cfg *config.GatewayConfig) (*catalog.CatalogRefreshResult,
 	if err != nil {
 		return nil, err
 	}
-	gatewayBaseURL := fmt.Sprintf("http://%s:%d/v1", cfg.Listen.Host, cfg.Listen.Port)
+	gatewayBaseURL := GatewayBaseURL(cfg)
 	currentState := captureRestoreState(currentText)
+	currentState.ExposedExternalModels = mergeExposedExternalModels(currentState.ExposedExternalModels, refresh.ExternalNames)
 	alreadyManaged := currentState.OpenAIBaseURL.Value == gatewayBaseURL &&
 		currentState.ModelCatalogJSON.Value == config.CodexGatewayCatalogPath()
 
@@ -78,11 +83,50 @@ func InstallIntoCodex(cfg *config.GatewayConfig) (*catalog.CatalogRefreshResult,
 		}
 	}
 
-	nextText := applyGatewayConfig(currentText, config.CodexGatewayCatalogPath(), gatewayBaseURL)
+	nextText := applyGatewayConfigWithMemoryModel(currentText, config.CodexGatewayCatalogPath(), gatewayBaseURL, compactionModel)
 	if err := writeCodexFileAtomic(configFile, nextText); err != nil {
 		return nil, err
 	}
 	return refresh, nil
+}
+
+// GatewayBaseURL is the Codex-facing endpoint installed into config.toml.
+func GatewayBaseURL(cfg *config.GatewayConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d/v1", cfg.Listen.Host, cfg.Listen.Port)
+}
+
+// UpdateManagedMemoriesModel keeps Codex memories aligned with the current
+// compaction role without changing the pre-install restore snapshot.
+func UpdateManagedMemoriesModel(gatewayBaseURL, memoryModel string) (bool, error) {
+	memoryModel = strings.TrimSpace(memoryModel)
+	if memoryModel == "" {
+		return false, fmt.Errorf("model_role_unavailable: compaction role is unavailable")
+	}
+	configFile := config.CodexConfigPath()
+	currentText, err := readCodexFile(configFile)
+	if err != nil {
+		return false, err
+	}
+	if currentText == "" {
+		return false, nil
+	}
+	managedCatalog := getRootString(currentText, codexManagedModelCatalogJSONKey).Value == config.CodexGatewayCatalogPath()
+	managedBase := getRootString(currentText, codexManagedOpenAIBaseURLKey).Value == strings.TrimRight(strings.TrimSpace(gatewayBaseURL), "/")
+	if !managedCatalog || !managedBase {
+		return false, nil
+	}
+	nextText := setSectionString(currentText, codexManagedMemoriesSection, codexManagedMemoryExtractModelKey, memoryModel)
+	nextText = setSectionString(nextText, codexManagedMemoriesSection, codexManagedMemoryConsolidationKey, memoryModel)
+	if nextText == currentText {
+		return false, nil
+	}
+	if err := writeCodexFileAtomic(configFile, nextText); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RestoreCodex undoes `codex install` and stops the gateway service.
@@ -136,6 +180,34 @@ func writeCodexRestoreState(state CodexRestoreState) error {
 		return fmt.Errorf("encode codex restore state: %w", err)
 	}
 	return writeCodexFileAtomic(config.RestoreStatePath(), string(append(data, '\n')))
+}
+
+// RecordExposedExternalModels accumulates client-visible external model names
+// only while Codex is actively managed by the Gateway. A pre-install catalog
+// refresh must not create restore state on its own.
+func RecordExposedExternalModels(names []string) error {
+	state, found, err := readCodexRestoreState()
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	merged := mergeExposedExternalModels(state.ExposedExternalModels, names)
+	if len(merged) == len(state.ExposedExternalModels) {
+		same := true
+		for index := range merged {
+			if merged[index] != state.ExposedExternalModels[index] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return nil
+		}
+	}
+	state.ExposedExternalModels = merged
+	return writeCodexRestoreState(state)
 }
 
 func readCodexFile(path string) (string, error) {

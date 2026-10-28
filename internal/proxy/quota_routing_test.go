@@ -256,20 +256,80 @@ func TestQuotaFailoverWebsocketFrameChecksEverySamplingStep(t *testing.T) {
 
 	for _, messageType := range []string{"response.create", "response.append"} {
 		raw := []byte(`{"type":"` + messageType + `","model":"gpt-6.1-sol","input":[]}`)
-		rewritten, failback, changed := rewriteQuotaFailoverWebsocketFrame(raw, guard, "acct-step", "gpt-6.1-sol", now)
+		rewritten, failback, changed := rewriteQuotaFailoverWebsocketFrame(raw, guard, "acct-step", "gpt-6.1-sol", "vendor/fallback", now)
 		if failback || !changed {
 			t.Fatalf("%s failover decision = failback:%v changed:%v", messageType, failback, changed)
 		}
-		if !bytes.Contains(rewritten, []byte(`"model":"wopal-ai/deepseek-v4.1-flash"`)) {
+		if !bytes.Contains(rewritten, []byte(`"model":"vendor/fallback"`)) {
 			t.Fatalf("%s was not rewritten to fallback: %s", messageType, rewritten)
 		}
 	}
 
 	guard.ObserveRateLimitPayload("acct-step", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":0,"window_minutes":300,"reset_after_seconds":3600}}}`), now.Add(time.Second))
 	raw := []byte(`{"type":"response.append","model":"gpt-6.1-sol","input":[]}`)
-	_, failback, changed := rewriteQuotaFailoverWebsocketFrame(raw, guard, "acct-step", "gpt-6.1-sol", now.Add(time.Second))
+	_, failback, changed := rewriteQuotaFailoverWebsocketFrame(raw, guard, "acct-step", "gpt-6.1-sol", "vendor/fallback", now.Add(time.Second))
 	if !failback || changed {
 		t.Fatalf("quota reset decision = failback:%v changed:%v", failback, changed)
+	}
+}
+
+func TestProtectedOfficialWebsocketUsesConfiguredExternalFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	guard := quota.NewGuard(nil)
+	guard.ObserveRateLimitPayload("acct-external", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), time.Now())
+
+	table := routing.NewTable(map[string]routing.Route{
+		"vendor/fallback": {Kind: routing.External, ProviderID: "vendor"},
+	}, []string{"gpt-6.1-sol"}, nil)
+	roles := RuntimeRoles{
+		OfficialFallback: RoleTarget{ProviderID: "vendor", ClientModel: "vendor/fallback", Ready: true},
+		Compaction:       RoleTarget{ProviderID: "wopal-ai", ClientModel: "wopal-ai/deepseek-v4.1-flash", Ready: true},
+	}
+	models := make(chan string, 1)
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithRuntime(nil, mustURL("http://127.0.0.1:1"), mustURL("http://127.0.0.1:1"), guard, table.Resolve, roles))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		var body map[string]any
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		models <- strings.TrimSpace(routing.StringOrEmpty(body["model"]))
+		c.Header("Content-Type", "text/event-stream")
+		_, _ = c.Writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"fallback-result\",\"status\":\"completed\",\"output\":[]}}\n\n"))
+		c.Writer.Flush()
+	})
+	server := httptest.NewServer(engine)
+	defer server.Close()
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer official-token")
+	header.Set("ChatGPT-Account-ID", "acct-external")
+	header.Set("X-Codex-Routing-Hint", "model=gpt-6.1-sol")
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "gpt-6.1-sol", "input": []any{map[string]any{"type": "message", "role": "user", "content": "full replay"}}}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		var event map[string]any
+		if err := conn.ReadJSON(&event); err != nil {
+			t.Fatalf("configured fallback did not serve the turn: %v", err)
+		}
+		if event["type"] == "response.completed" {
+			break
+		}
+	}
+	select {
+	case model := <-models:
+		if model != "vendor/fallback" {
+			t.Fatalf("fallback model = %q", model)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("configured fallback did not receive the turn")
 	}
 }
 

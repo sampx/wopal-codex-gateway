@@ -27,18 +27,25 @@ var wopalWebsocketUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request)
 const maxWopalSessionStateBytes = 256 << 20
 
 type wopalWebsocketSession struct {
-	conn          *websocket.Conn
-	writeMu       sync.Mutex
-	activeMu      sync.Mutex
-	stateMu       sync.Mutex
-	cancel        context.CancelFunc
-	state         compaction.ConversationState
-	logger        *activity.Logger
-	model         string
-	request       *http.Request
-	nativeReplay  *compaction.NativeBridge
-	clientWatcher *clientfp.Watcher
-	emit          func([]byte) error
+	conn            *websocket.Conn
+	writeMu         sync.Mutex
+	activeMu        sync.Mutex
+	stateMu         sync.Mutex
+	cancel          context.CancelFunc
+	state           compaction.ConversationState
+	logger          *activity.Logger
+	model           string
+	providerID      string
+	resolveRoute    RouteResolver
+	compactionModel string
+	// compactionProvider is the provider that serves the compaction role. It is
+	// not always the foreground provider: a session can chat on one provider and
+	// summarise on another, and the log must name the one that ran the summary.
+	compactionProvider string
+	request            *http.Request
+	nativeReplay       *compaction.NativeBridge
+	clientWatcher      *clientfp.Watcher
+	emit               func([]byte) error
 }
 
 func isWebsocketUpgrade(req *http.Request) bool {
@@ -46,12 +53,24 @@ func isWebsocketUpgrade(req *http.Request) bool {
 }
 
 func serveWopalWebsocketBridge(c *gin.Context, logger *activity.Logger, model string) {
+	serveExternalWebsocketBridge(c, logger, model, "wopal-ai", legacyRouteResolver)
+}
+
+func serveExternalWebsocketBridge(c *gin.Context, logger *activity.Logger, model, providerID string, resolve RouteResolver) {
+	serveExternalWebsocketBridgeWithCompaction(c, logger, model, providerID, resolve, defaultCompactionRole())
+}
+
+func serveExternalWebsocketBridgeWithCompaction(c *gin.Context, logger *activity.Logger, model, providerID string, resolve RouteResolver, compactionRole RoleTarget) {
 	conn, err := wopalWebsocketUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		logger.Write(map[string]any{"event": "wopal_ws_upgrade_failed", "model": model, "error": err.Error()})
 		return
 	}
-	s := &wopalWebsocketSession{conn: conn, logger: logger, model: model, request: c.Request.Clone(c.Request.Context())}
+	s := &wopalWebsocketSession{
+		conn: conn, logger: logger, model: model, providerID: providerID, resolveRoute: resolve,
+		compactionModel: compactionRole.ClientModel, compactionProvider: compactionRole.ProviderID,
+		request: c.Request.Clone(c.Request.Context()),
+	}
 	if bridge, ok := c.Get("native_compaction_bridge"); ok {
 		s.nativeReplay, _ = bridge.(*compaction.NativeBridge)
 	}
@@ -90,7 +109,7 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activity.Logger, model st
 			continue
 		}
 		if requestedOfficialModel != "" && failoverGuard != nil {
-			rewritten, failback, changed := rewriteQuotaFailoverWebsocketFrame(payload, failoverGuard, failoverAccountID, requestedOfficialModel, time.Now())
+			rewritten, failback, changed := rewriteQuotaFailoverWebsocketFrame(payload, failoverGuard, failoverAccountID, requestedOfficialModel, s.model, time.Now())
 			if failback {
 				logger.Write(map[string]any{"event": "official_quota_failback", "requested_model": requestedOfficialModel, "transport": "websocket"})
 				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "official quota recovered; reconnect and resend full input"), time.Now().Add(time.Second))
@@ -100,7 +119,7 @@ func serveWopalWebsocketBridge(c *gin.Context, logger *activity.Logger, model st
 				payload = rewritten
 			}
 		}
-		if reconnectForWebsocketRouteChange(conn, routing.Wopal, payload, logger) {
+		if reconnectForWebsocketRouteChange(conn, s.providerID, payload, logger, s.resolveRoute) {
 			return
 		}
 		var message map[string]any
@@ -146,12 +165,27 @@ func (s *wopalWebsocketSession) prepareTurn(ctx context.Context, message map[str
 }
 
 func (s *wopalWebsocketSession) prepareCompactionTurn(ctx context.Context, message map[string]any) (compaction.PreparedTurn, error) {
+	compactionModel := strings.TrimSpace(s.compactionModel)
+	if compactionModel == "" {
+		return compaction.PreparedTurn{}, fmt.Errorf("model_role_unavailable: compaction role is unavailable")
+	}
 	if err := s.nativeReplay.Expand(ctx, s.request, message); err != nil {
 		return compaction.PreparedTurn{}, err
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	return compaction.PrepareSummaryTurn(message, compaction.DedicatedModel, s.state)
+	return compaction.PrepareSummaryTurn(message, compactionModel, s.state)
+}
+
+// compactionServingProvider names the provider that actually runs the summary
+// turn. The compaction role may point at a different provider than the
+// foreground model, so a compaction event that reported the session provider
+// would describe a request that never reached that provider.
+func (s *wopalWebsocketSession) compactionServingProvider() string {
+	if provider := strings.TrimSpace(s.compactionProvider); provider != "" {
+		return provider
+	}
+	return s.providerID
 }
 
 func validateWopalSessionStateSize(requestBytes, outputBytes int) error {
@@ -276,7 +310,7 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		inputItems = len(input)
 	}
 	turnFields := map[string]any{
-		"event": "turn_started", "turn_id": turnID, "provider": "wopal-ai", "client_model": model,
+		"event": "turn_started", "turn_id": turnID, "provider": s.providerID, "client_model": model,
 		"client_transport": "websocket", "upstream_transport": "http-sse", "input_items": inputItems,
 		"previous_response_id_present": routing.PreviousResponseID(message) != "",
 	}
@@ -309,14 +343,14 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		if ctx.Err() != nil {
 			return
 		}
-		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "error": err.Error(), "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": s.providerID, "error": err.Error(), "duration_ms": time.Since(started).Milliseconds()})
 		s.sendError(http.StatusBadGateway, "gateway_upstream_request_error", err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "upstream_status": resp.StatusCode, "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": s.providerID, "upstream_status": resp.StatusCode, "duration_ms": time.Since(started).Milliseconds()})
 		s.clearActive()
 		s.sendUpstreamError(resp.StatusCode, raw)
 		return
@@ -347,7 +381,7 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 			if errCommit := s.commitState(prepared.NextRequest, output, responseID, prepared.NextCompactionID); errCommit != nil {
 				released := s.releaseState()
 				s.logger.Write(map[string]any{
-					"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": "wopal-ai",
+					"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": s.providerID,
 					"error": errCommit.Error(), "released_bytes": released,
 				})
 			}
@@ -375,14 +409,19 @@ func (s *wopalWebsocketSession) forwardTurn(ctx context.Context, cancel context.
 		return
 	}
 	if terminalType == "response.completed" {
-		s.logger.Write(map[string]any{"event": "turn_completed", "turn_id": turnID, "provider": "wopal-ai", "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_completed", "turn_id": turnID, "provider": s.providerID, "duration_ms": time.Since(started).Milliseconds()})
 	} else {
-		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": "wopal-ai", "terminal_event": terminalType, "duration_ms": time.Since(started).Milliseconds()})
+		s.logger.Write(map[string]any{"event": "turn_failed", "turn_id": turnID, "provider": s.providerID, "terminal_event": terminalType, "duration_ms": time.Since(started).Milliseconds()})
 	}
 }
 
 func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnID string, started time.Time, message map[string]any) {
-	compactionModel := compaction.DedicatedModel
+	compactionModel := strings.TrimSpace(s.compactionModel)
+	if compactionModel == "" {
+		s.clearActive()
+		s.sendError(http.StatusServiceUnavailable, "model_role_unavailable", "compaction model role is unavailable")
+		return
+	}
 	prepared, err := s.prepareCompactionTurn(ctx, message)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -404,7 +443,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 		return
 	}
 	s.logger.Write(map[string]any{
-		"event": "compaction_started", "turn_id": turnID, "provider": "wopal-ai", "client_model": compactionModel,
+		"event": "compaction_started", "turn_id": turnID, "provider": s.compactionServingProvider(), "client_model": compactionModel,
 	})
 
 	target := "http://" + s.request.Host + "/v1/responses"
@@ -424,7 +463,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 			return
 		}
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.compactionServingProvider(),
 			"error": err.Error(), "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -435,7 +474,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.compactionServingProvider(),
 			"upstream_status": resp.StatusCode, "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -486,7 +525,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 			return
 		}
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.compactionServingProvider(),
 			"error": err.Error(), "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -495,7 +534,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	}
 	if !terminal || terminalFailed {
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.compactionServingProvider(),
 			"reason": "summary_generation_incomplete", "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -506,7 +545,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	summary := compaction.ExtractSummary(finalOutput, streamedText.String())
 	if err := compaction.ValidateSummary(summary); err != nil {
 		s.logger.Write(map[string]any{
-			"event": "compaction_failed", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "compaction_failed", "turn_id": turnID, "provider": s.compactionServingProvider(),
 			"reason": "invalid_summary", "duration_ms": time.Since(started).Milliseconds(),
 		})
 		s.clearActive()
@@ -537,7 +576,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 	if err := s.commitState(compactedRequest, []byte("[]"), responseID, compactionID); err != nil {
 		released := s.releaseState()
 		s.logger.Write(map[string]any{
-			"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": "wopal-ai",
+			"event": "wopal_ws_state_dropped", "turn_id": turnID, "provider": s.compactionServingProvider(),
 			"error": err.Error(), "released_bytes": released,
 		})
 		s.clearActive()
@@ -570,7 +609,7 @@ func (s *wopalWebsocketSession) forwardCompactionTurn(ctx context.Context, turnI
 		return
 	}
 	s.logger.Write(map[string]any{
-		"event": "compaction_completed", "turn_id": turnID, "provider": "wopal-ai",
+		"event": "compaction_completed", "turn_id": turnID, "provider": s.compactionServingProvider(),
 		"summary_bytes": len(summary), "duration_ms": time.Since(started).Milliseconds(),
 	})
 }

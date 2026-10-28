@@ -109,6 +109,26 @@ func TestApplyGatewayDoesNotWriteModel(t *testing.T) {
 	}
 }
 
+func TestApplyGatewayUsesConfiguredCompactionModel(t *testing.T) {
+	text := `[memories]
+extract_model = "old-extract"
+consolidation_model = "old-consolidation"
+`
+	applied := applyGatewayConfigWithMemoryModel(
+		text,
+		"/tmp/wopal-models.json",
+		"http://127.0.0.1:11435/v1",
+		"vendor/friendly",
+	)
+
+	if !strings.Contains(applied, `extract_model = "vendor/friendly"`) {
+		t.Fatalf("apply did not use compaction role for extract_model:\n%s", applied)
+	}
+	if !strings.Contains(applied, `consolidation_model = "vendor/friendly"`) {
+		t.Fatalf("apply did not use compaction role for consolidation_model:\n%s", applied)
+	}
+}
+
 func TestApplyGatewayQuotesStringsAsJSON(t *testing.T) {
 	applied := applyGatewayConfig("", "/tmp/models.json", `http://127.0.0.1:11435/v1?name="quoted"`)
 	state := captureRestoreState(applied)
@@ -156,6 +176,22 @@ func TestRestoreGatewayKeepsOfficialModel(t *testing.T) {
 	}
 }
 
+func TestRestoreGatewayRestoresRecordedExternalBareAlias(t *testing.T) {
+	original := "model = \"gpt-5.4\"\n"
+	state := captureRestoreState(original)
+	state.ExposedExternalModels = []string{"friendly", "vendor/model"}
+
+	restored := restoreGatewayConfig("model = \"friendly\"\n", state)
+	if captureRestoreState(restored).Model != (RestoreValue{HadValue: true, Value: "gpt-5.4"}) {
+		t.Fatalf("recorded external alias was not restored:\n%s", restored)
+	}
+
+	restored = restoreGatewayConfig("model = \"gpt-6.1-sol\"\n", state)
+	if captureRestoreState(restored).Model != (RestoreValue{HadValue: true, Value: "gpt-6.1-sol"}) {
+		t.Fatalf("official bare model was overwritten:\n%s", restored)
+	}
+}
+
 func TestRestoreGatewayRemovesMemoriesSectionWhenOriginallyAbsent(t *testing.T) {
 	original := "# top\nmodel = \"gpt-5.4\" # user choice\n"
 	state := captureRestoreState(original)
@@ -180,9 +216,10 @@ func TestRestoreGatewayRemovesMemoriesSectionWhenOriginallyAbsent(t *testing.T) 
 func TestRestoreGatewayMergeStatePrefersSavedValues(t *testing.T) {
 	existed := false
 	saved := CodexRestoreState{
-		Model:            RestoreValue{HadValue: true, Value: "saved-model"},
-		ModelCatalogJSON: RestoreValue{HadValue: true, Value: "/saved/catalog.json"},
-		OpenAIBaseURL:    RestoreValue{HadValue: true, Value: "https://saved.example/v1"},
+		Model:                 RestoreValue{HadValue: true, Value: "saved-model"},
+		ModelCatalogJSON:      RestoreValue{HadValue: true, Value: "/saved/catalog.json"},
+		OpenAIBaseURL:         RestoreValue{HadValue: true, Value: "https://saved.example/v1"},
+		ExposedExternalModels: []string{"old-alias"},
 	}
 	current := CodexRestoreState{
 		Model:                    RestoreValue{HadValue: true, Value: "current-model"},
@@ -191,6 +228,7 @@ func TestRestoreGatewayMergeStatePrefersSavedValues(t *testing.T) {
 		MemoriesSectionExisted:   &existed,
 		MemoryExtractModel:       &RestoreValue{HadValue: true, Value: "current-extract"},
 		MemoryConsolidationModel: &RestoreValue{HadValue: false},
+		ExposedExternalModels:    []string{"new-alias", "old-alias"},
 	}
 
 	merged := mergeGatewayRestoreState(saved, current)
@@ -205,5 +243,8 @@ func TestRestoreGatewayMergeStatePrefersSavedValues(t *testing.T) {
 	}
 	if merged.MemoryConsolidationModel == nil || merged.MemoryConsolidationModel.HadValue {
 		t.Fatalf("nil consolidation model was not filled from current: %#v", merged.MemoryConsolidationModel)
+	}
+	if got, want := strings.Join(merged.ExposedExternalModels, ","), "old-alias,new-alias"; got != want {
+		t.Fatalf("exposed external models = %q, want %q", got, want)
 	}
 }

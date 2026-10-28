@@ -16,9 +16,10 @@ import (
 	"wopal-codex-gateway/internal/routing"
 )
 
-// HTTP fallback must restore the same compacted history as the websocket path.
+// HTTP inference must restore the same compacted history as the websocket path,
+// whether the selected upstream is Wopal or another external provider.
 // Returns false when this function has handled the request (including errors).
-func prepareWopalHTTP(c *gin.Context, logger *activity.Logger, model string, nativeReplay *compaction.NativeBridge, inspection *requestInspection) bool {
+func prepareExternalHTTP(c *gin.Context, logger *activity.Logger, model, providerID string, compactionRole RoleTarget, nativeReplay *compaction.NativeBridge, inspection *requestInspection) bool {
 	var message map[string]any
 	var err error
 	if inspection == nil || inspection.payload == nil {
@@ -52,7 +53,11 @@ func prepareWopalHTTP(c *gin.Context, logger *activity.Logger, model string, nat
 		if compactEndpoint {
 			message["input"] = append(input, map[string]any{"type": "compaction_trigger"})
 		}
-		s := &wopalWebsocketSession{request: c.Request, model: model, logger: logger, nativeReplay: nativeReplay}
+		s := &wopalWebsocketSession{
+			request: c.Request, model: model, providerID: providerID,
+			compactionModel: compactionRole.ClientModel, compactionProvider: compactionRole.ProviderID,
+			logger: logger, nativeReplay: nativeReplay,
+		}
 		s.emit = func(payload []byte) error {
 			if !compactEndpoint {
 				c.Header("Content-Type", "text/event-stream")

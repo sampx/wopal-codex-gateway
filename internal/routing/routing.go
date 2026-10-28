@@ -6,6 +6,7 @@ package routing
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 )
@@ -25,8 +26,68 @@ const (
 	Unknown  Kind = "unknown"
 	Official Kind = "official"
 	Wopal    Kind = "wopal-ai"
+	External Kind = "external"
 	Disabled Kind = "disabled"
 )
+
+type Route struct {
+	Kind       Kind
+	ProviderID string
+}
+
+type Table struct {
+	external   map[string]Route
+	official   map[string]struct{}
+	verifyBare func() error
+}
+
+func NewTable(external map[string]Route, officialSlugs []string, verifyBare func() error) *Table {
+	table := &Table{
+		external:   make(map[string]Route, len(external)),
+		official:   make(map[string]struct{}, len(officialSlugs)),
+		verifyBare: verifyBare,
+	}
+	for name, route := range external {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			table.external[name] = route
+		}
+	}
+	for _, slug := range officialSlugs {
+		slug = strings.TrimSpace(slug)
+		if slug != "" {
+			table.official[slug] = struct{}{}
+		}
+	}
+	return table
+}
+
+func (t *Table) Resolve(model string) (Route, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return Route{}, fmt.Errorf("model is empty")
+	}
+	if route, ok := t.external[model]; ok {
+		if !strings.Contains(model, "/") && t.verifyBare != nil {
+			if err := t.verifyBare(); err != nil {
+				return Route{}, err
+			}
+		}
+		return route, nil
+	}
+	if strings.Contains(model, "/") {
+		return Route{}, fmt.Errorf("model %q is not registered", model)
+	}
+	if _, ok := t.official[model]; !ok {
+		return Route{}, fmt.Errorf("model %q is not registered", model)
+	}
+	if t.verifyBare != nil {
+		if err := t.verifyBare(); err != nil {
+			return Route{}, err
+		}
+	}
+	return Route{Kind: Official, ProviderID: "official"}, nil
+}
 
 // Classify maps a model name to its provider family. Values are part of the
 // routing contract and must stay stable.
