@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,6 +92,188 @@ func TestRoutingQuotaGuardFailsOverOfficialAndAllowsExemptions(t *testing.T) {
 	status, body = post("wopal-ai/deepseek-v4.1-flash-free")
 	if status != http.StatusOK {
 		t.Fatalf("wopal request was blocked: %d %s", status, body)
+	}
+}
+
+// Official quota protection is the only path allowed to replace an official
+// request with officialFallback. These HTTP cases run while the guard is open,
+// so returning the native upstream status is the full contract; an external
+// handler hit would mean a 429, auth error, or server error became a fallback.
+func TestOfficialNonQuotaHTTPFailuresNeverFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte("native failure"))
+			}))
+			defer upstream.Close()
+
+			var fallbackHits atomic.Int32
+			engine := gin.New()
+			engine.Use(routingMiddlewareWithTargetsAndQuotaGuard(nil, mustURL(upstream.URL), mustURL(upstream.URL), quota.NewGuard(nil)))
+			engine.POST("/v1/responses", func(c *gin.Context) {
+				fallbackHits.Add(1)
+				c.Status(http.StatusNoContent)
+			})
+			downstream := httptest.NewServer(engine)
+			defer downstream.Close()
+
+			req, err := http.NewRequest(http.MethodPost, downstream.URL+"/v1/responses", bytes.NewBufferString(`{"model":"gpt-6.1-sol","input":[]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer official-token")
+			req.Header.Set("ChatGPT-Account-ID", "acct-native-failure")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if resp.StatusCode != status || string(body) != "native failure" {
+				t.Fatalf("native response = %d %q, want %d %q", resp.StatusCode, body, status, "native failure")
+			}
+			if hits := fallbackHits.Load(); hits != 0 {
+				t.Fatalf("non-quota HTTP failure reached external fallback %d times", hits)
+			}
+		})
+	}
+}
+
+func TestOfficialConnectionFailureNeverFallsBack(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	unreachable := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	target := mustURL(unreachable.URL)
+	unreachable.Close()
+
+	var fallbackHits atomic.Int32
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithTargetsAndQuotaGuard(nil, target, target, quota.NewGuard(nil)))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		fallbackHits.Add(1)
+		c.Status(http.StatusNoContent)
+	})
+	downstream := httptest.NewServer(engine)
+	defer downstream.Close()
+
+	req, err := http.NewRequest(http.MethodPost, downstream.URL+"/v1/responses", bytes.NewBufferString(`{"model":"gpt-6.1-sol","input":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer official-token")
+	req.Header.Set("ChatGPT-Account-ID", "acct-connection-failure")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("connection failure status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	if hits := fallbackHits.Load(); hits != 0 {
+		t.Fatalf("connection failure reached external fallback %d times", hits)
+	}
+}
+
+func TestOfficialFailureAfterOutputNeverFallsBack(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"already visible\"}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n")
+	}))
+	defer upstream.Close()
+
+	var fallbackHits atomic.Int32
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithTargetsAndQuotaGuard(nil, mustURL(upstream.URL), mustURL(upstream.URL), quota.NewGuard(nil)))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		fallbackHits.Add(1)
+		c.Status(http.StatusNoContent)
+	})
+	downstream := httptest.NewServer(engine)
+	defer downstream.Close()
+
+	req, err := http.NewRequest(http.MethodPost, downstream.URL+"/v1/responses", bytes.NewBufferString(`{"model":"gpt-6.1-sol","stream":true,"input":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer official-token")
+	req.Header.Set("ChatGPT-Account-ID", "acct-post-output-failure")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	for _, want := range []string{"already visible", "response.failed"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("native stream missing %q: %s", want, body)
+		}
+	}
+	if hits := fallbackHits.Load(); hits != 0 {
+		t.Fatalf("failure after output reached external fallback %d times", hits)
+	}
+}
+
+func TestOfficialWebsocketHandshakeFailureNeverFallsBack(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "handshake rejected", http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	target, err := url.Parse(upstream.URL + "/backend-api/codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var fallbackHits atomic.Int32
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithTargetsAndQuotaGuard(nil, target, target, quota.NewGuard(nil)))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		fallbackHits.Add(1)
+		c.Status(http.StatusNoContent)
+	})
+	downstream := httptest.NewServer(engine)
+	defer downstream.Close()
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer official-token")
+	header.Set("ChatGPT-Account-ID", "acct-ws-handshake-failure")
+	header.Set("X-Codex-Routing-Hint", "model=gpt-6.1-sol")
+	conn, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", header)
+	if conn != nil {
+		conn.Close()
+		t.Fatal("gateway upgraded after upstream handshake failure")
+	}
+	if err == nil {
+		t.Fatal("gateway dial unexpectedly succeeded")
+	}
+	if response == nil || response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("handshake failure response = %#v, want 502", response)
+	}
+	if hits := fallbackHits.Load(); hits != 0 {
+		t.Fatalf("WebSocket handshake failure reached external fallback %d times", hits)
 	}
 }
 func TestOfficialWebsocketQuotaGuardStopsCurrentSocketBeforeFailover(t *testing.T) {
