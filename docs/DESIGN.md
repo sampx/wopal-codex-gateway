@@ -1,7 +1,7 @@
 # Wopal Codex Gateway
 
 > **Status**: Active
-> **Updated**: 2026-10-26
+> **Updated**: 2026-10-29
 > **Parent Architecture**: N/A
 > **Parent Product**: N/A
 
@@ -37,13 +37,13 @@ Wopal Codex Gateway 是 macOS 上的本地模型网关。
 | 上游协议 | `openai-chat`、`openai-responses`、`anthropic-messages`、`gemini`；协议转换由 CLIProxyAPI 承担 |
 | Provider Registry | 统一保存 provider、模型归属和运行时能力 |
 | 路由 | 只路由已注册的 client-visible model；官方 bare model 走官方链路 |
-| 模型目录 | 官方 bundled catalog + 所有已配置外部模型 |
+| 模型目录 | 官方 bundled catalog + 所有已配置外部模型；native Codex identity 漂移时自动安全重建 |
 | 模型属性 | models.dev 元数据；用户显式设置优先，非协议属性缺失时用 Gateway 默认值（protocol 无默认值） |
 | 额度保护 | 5 小时 97%、每周 99%；只有额度保护触发自动回退 |
 | Compaction | 统一使用 `compaction` role |
 | Codex memories | 与 Gateway compaction 共用 `compaction` role |
 | 安装与恢复 | 接管指定 Codex 配置并可完整恢复 |
-| 可观测性 | `/_health`、`/_status`、metadata-only 日志 |
+| 可观测性 | `/_health`、`/_status`、catalog freshness / recovery 状态、metadata-only 日志 |
 
 ## Key Decisions
 
@@ -58,6 +58,10 @@ Wopal Codex Gateway 是 macOS 上的本地模型网关。
 | `official` 是内建 provider | 官方 quota、native WebSocket、native compaction 和客户端凭据转发仍走专用链路 |
 | Provider Registry 是运行时真相源 | daemon、目录生成和 CLI 使用同一套 provider / model 解析结果 |
 | Route Table 只保存 exact route | namespace 不做运行时通配，减少隐式路由 |
+| native Codex 漂移走受保护的 catalog 自愈 | ChatGPT / Codex Desktop 自动升级是正常运行事件；自愈复用 H1 → bundled catalog → H2、collision 检查和原子提交，不降低 official bare route 的信任边界 |
+| external response model 名称不是路由正确性的判据 | provider 可以做稳定映射、版本别名或 canonicalization；Gateway 以请求前解析出的 provider / upstream model 为路由事实，不把响应里的 model 名称差异当 warning |
+| 官方额度保护使用固定阈值 | 上游 quota telemetry 是账户级整数百分比；相邻快照的增量可能同时包含多个请求、会话或子代理，不能可靠推断单请求消耗，因此不使用步长学习动态提前停止 |
+| fallback 转换不制造 reasoning 占位文本 | official Responses 历史切到 external provider 时，只传递可用的 reasoning 摘要；缺失摘要时省略该内容，不生成会进入模型上下文或客户端 UI 的占位字符串 |
 | provider id 同时作为名字空间 | 一个 provider 只有一套命名配置，默认名字由 id 加 upstream model 组成 |
 | 特殊模型用途保存 provider + upstream model | alias 改名不改变 role 的后端归属 |
 | 只保留两个 role | `officialFallback` 负责额度回退；`compaction` 同时服务 Gateway compaction 与 Codex memories，因此 memories 永不占用官方额度 |
@@ -236,16 +240,16 @@ Route Table 只保存已经配置的 client-visible model。模型状态分两�
 2. 其余 bare name 命中已验证的 official slug baseline → official。
 3. 其他一律 route error；未知 bare name 不回落到 official。
 
-CLI 变更（provider / model / alias / `catalog refresh`）先原子写配置与 baseline，再向运行中的 daemon 发 SIGHUP。daemon 重建整个 Registry + Route Table + baseline snapshot，构建成功才一次性替换；构建失败保留旧快照，把错误写进 `/_status`。新配置对之后到达的请求立即生效，进行中的请求不受影响，不需要重启进程。daemon 不监听配置文件；直接编辑 `runtime/config.json` 后执行 `service restart` 让改动生效。
+provider / model / alias 这类 CLI 配置变更先原子写配置，再向运行中的 daemon 发 SIGHUP。daemon 重建整个 Registry + Route Table + baseline snapshot，构建成功才一次性替换；构建失败保留旧快照，把错误写进 `/_status`。`catalog refresh` 使用下文 Catalog Self-Healing 定义的独立 refresh 协议，不复用普通配置变更的“写入后发信号”语义。新配置对之后到达的请求立即生效，进行中的请求不受影响，不需要重启进程。daemon 不监听配置文件；直接编辑 `runtime/config.json` 后执行 `service restart` 让改动生效。
 
 provider id 只负责生成默认名字，不是运行时 wildcard。
 例如 `openrouter/foo` 只有在 `foo` 已配置时才可路由。
 
-`serve` 只根据本地配置构建 Registry 和 Route Table，不执行 `codex debug models --bundled`。为了仍能兑现 bare alias 与官方 slug 的校验，`catalog refresh` 在写 catalog 的同时把 bundled 官方 slug 集合和 Codex catalog artifact 的 identity 写入 `runtime/official-models.json`。
+`serve` 根据本地配置和 official baseline 构建 Registry 与 Route Table。正常请求路径不读取 bundled catalog；只有 catalog refresh / recovery 能执行 `codex debug models --bundled`。`catalog refresh` 在写 catalog 的同时把 bundled 官方 slug 集合和 Codex catalog artifact 的 identity 写入 `runtime/official-models.json`。
 
 catalog artifact 指真正编入 bundled models 的 native 可执行文件，不是 npm 启动器。解析只读文件系统，不执行 Node 或 Codex。规则：`codex` 入口是 `codex-cli/bin/codex.js` 这类启动器时，按其 platform package 解析到 `vendor/<target-triple>/bin/codex`；入口本身是 native 二进制时直接使用。identity = canonical path + SHA-256；size、mtime、inode 只做快速比较，不作判据。
 
-校验规则：`serve` 启动时必算 SHA-256，baseline 缺失或哈希不一致时拒绝启动（fail closed），提示先运行 `catalog refresh`：official bare 路由依赖这份 baseline。运行期每次走 bare alias 的 external exact route 前先从当前 `codex` 入口重新解析 authoritative native artifact：canonical path 与 baseline 不同立即 fail closed；路径相同才把 stat tuple 当作已验证哈希的缓存键，stat 变化即重算 SHA-256 并以哈希为准；不一致时所有 bare name 路由立即 fail closed（返回 route error），含 `/` 的 external 路由不受影响，直到重新 `catalog refresh` 并完成一次 reload。这样 Codex 升级新增同名 official slug 时，不会在运行中被 external exact route 静默抢走。
+校验规则：official bare 路由始终依赖一份有效 baseline。baseline 缺失或损坏时 `serve` 拒绝启动并提示运行 `catalog refresh`。已有有效 baseline 时，启动和运行期的每次 bare-name 路由决策都先解析当前 authoritative native artifact；stat tuple 只做已验证哈希的缓存键，identity 仍以 canonical path + SHA-256 为准。identity 与 baseline 一致时继续使用当前 Route Table；发生漂移时进入 catalog recovery，而不是把旧 baseline 当作当前事实。含 `/` 的 external exact route 不依赖 official baseline，在 recovery 期间继续由当前 snapshot 服务。启动期 recovery 失败时 daemon 进入 degraded 模式：前门 listener 仍启动，含 `/` 的 external exact route 继续服务，所有 bare-name route 返回 `503 catalog_refresh_failed`，直到 recovery 成功。
 
 ## Model Roles
 
@@ -301,7 +305,31 @@ role 规则：
 - 非空 alias 直接成为该模型的 client-visible name。
 
 目录刷新前检查所有 client-visible name 与官方 slug 的碰撞。
-冲突时保留现有生成目录并返回错误。
+默认带 provider namespace 的 external model 不会与 bare official slug 冲突；只有用户显式配置了可能与 official slug 同名的 alias 时，这项检查才会命中。冲突时保留现有生成目录并返回错误。
+
+### Catalog Self-Healing
+
+ChatGPT / Codex Desktop 自动升级会改变 native Codex artifact。Gateway 把这种 identity 漂移视为可恢复的运行事件，同时保持 official baseline 的 fail-closed 边界。
+
+自动恢复只建立在一份已经有效的 baseline 上。baseline 缺失、损坏或无法解析时仍由操作者执行 `catalog refresh` 建立信任起点，此时 `serve` 拒绝启动。已有 baseline 与当前 artifact 不一致时，`serve` 在启动阶段先做一次有界 recovery；成功后正常启动，失败后以 degraded 模式启动。运行中则由第一个 bare-name 请求触发 recovery。
+
+daemon 内部使用 single-flight：同一 drift 同一时间只有一个自动 refresh 执行，其他 bare-name 请求等待同一结果。CLI 与 daemon 共同使用 `runtime/catalog-refresh.lock` 的跨进程 advisory lock 串行化 refresh，避免手工 refresh 与自动 recovery 同时发布 catalog。自动 refresh 有有界超时；一次失败后使用固定短退避避免客户端重试形成 refresh 风暴。手工 `catalog refresh` 绕过自动退避，但仍等待同一把跨进程锁。
+
+自动和手工 refresh 共用同一 refresh core 与磁盘提交协议：
+
+1. 取得 catalog refresh 跨进程锁。
+2. 解析当前 authoritative native artifact 并计算 H1。
+3. 用同一 native artifact 执行 `debug models --bundled`。
+4. 再计算 H2；只有 H1 = H2 才接受 bundled catalog。
+5. 用新 official slug 集合检查全部 external client-visible name collision，并生成完整 catalog / baseline candidate。
+6. candidate 全部可用后先原子替换 model catalog，再原子替换 official baseline；baseline 是 official routing 的 commit point。baseline 写入失败时恢复旧 catalog。若进程恰好在两个 rename 之间崩溃，最多留下“新 catalog + 旧 baseline”，official routing 仍只信任旧 baseline，并在下一次启动/请求中通过 drift 检测进入 recovery，不把跨文件原子性建立在不存在的文件系统事务上。
+7. daemon 自动 recovery 在磁盘提交成功后，用这份 baseline 构建新的 runtime snapshot，构建成功才原子 swap；进行中的请求和 WebSocket 继续使用它们进入时的 snapshot。手工 `catalog refresh` 在 daemon 运行时发送 SIGHUP，并有界等待 `/_status` 确认 active runtime baseline 已切到本次 refresh 的 identity；daemon 未运行时只完成磁盘提交。
+
+成功后，触发 recovery 的请求重新解析路由一次。新版本新增的 official slug 因此可以在同一次请求中生效，不需要用户手工 refresh 或重启 Gateway。
+
+在 baseline commit point 之前的正常写入失败会恢复旧 catalog；进程崩溃造成的 catalog-ahead-of-baseline 状态由下一次 drift 检测重新生成。baseline 已提交但 runtime snapshot 尚未激活时失败，新 catalog/baseline 保持为下一次 reload/recovery 的候选真相，daemon 继续使用旧 snapshot 服务含 `/` 的 external exact route，并把 bare-name route fail closed 为 `503 catalog_refresh_failed`，直到 active snapshot 与已验证 current artifact 再次一致。catalog recovery 不触发 `officialFallback`，自动 fallback 仍只由 quota protection 驱动。
+
+手工 `catalog refresh` 保留为强制刷新入口。它绕过自动 recovery 的退避，但不绕过 H1/H2、collision、跨进程锁或磁盘提交规则；daemon 运行时只有在 active runtime baseline 的切换得到确认后命令才报告完整成功。
 
 ### Model Attributes
 
@@ -432,6 +460,8 @@ Gateway 只管理四个 Codex 配置项：
 
 - 记录 Codex 版本、originator、User-Agent、Content-Encoding、beta feature 标识；请求体只提取字段名、工具数量、工具名称摘要和输入类型计数。
 - 同一客户端版本的请求形状变化记录一次 contract-change 事件。
+- external provider 返回的 `response.model` 可以与请求模型名不同。Gateway 可以把 served model 保留为 usage metadata，但名称差异本身不产生 warning，也不参与路由正确性或 provider 健康判定。
+- catalog recovery 只记录 `catalog_recovery_started`、`catalog_recovery_succeeded`、`catalog_recovery_failed` 这类结构化 metadata 事件；失败信息不得包含请求正文或 credential。
 - prompt、工具参数、工具输出、完整请求正文和凭证永不写盘。
 
 SDK request logger 保持关闭。
@@ -441,19 +471,47 @@ SDK request logger 保持关闭。
 
 官方额度保护合同：
 
-- 5 小时基础停止点：97%。
-- 每周基础停止点：99%。
-- 学习到的最大单步只会让实际停止点更早。
+- 5 小时停止点固定为 97%。
+- 每周停止点固定为 99%。
+- quota telemetry 只用于确认当前窗口、已用百分比、reset time、telemetry freshness 和是否跨过固定停止点。
+- quota telemetry 是账户级累计值；相邻采样之间的增量不用于估算单请求、单 turn、单 agent 或单推理 step 的额度消耗，也不改变停止点。
 - 额度窗口 reset time 允许小幅抖动，不因秒级差异丢弃整段 telemetry。
-- `/_status` 同时暴露基础状态、实际停止点、学习值和 telemetry 新鲜度。
+- `/_status` 报告固定停止点、当前窗口、telemetry 新鲜度和 failover 状态。为保持状态消费者兼容，`effective_five_hour_stop_percent` 与 `effective_weekly_stop_percent` 保留，但始终分别等于 97 和 99；不报告 learned-step 字段。
+- quota CLI 不提供 learning 管理命令；固定停止点不需要人工 reset 才能恢复。
 
 额度进入保护区后使用 `officialFallback`。
 额度恢复后回到用户原本请求的官方模型。
+`official_failover.since` 表示当前这一轮保护首次进入 failover 的时间；同一保护周期内后续 fallback 请求不得刷新它，保护解除后才清空。
+
+official 请求切到 external fallback 时，Responses 历史中的 reasoning 只有在存在可用摘要时才进入 external provider 请求。没有可用摘要的 reasoning 不生成 `[reasoning unavailable]` 或其他人工占位内容；工具调用和普通消息仍按既有协议转换。
 
 ## Status
 
-`/_status` 报告 provider、两个 role、官方 quota/failover、credential 是否配置以及服务状态。
+`/_status` 报告 provider、两个 role、官方 quota/failover、credential 是否配置、catalog freshness / recovery 以及服务状态。
 状态输出不包含 API key、prompt 或原始账号标识。
+
+`catalog` 字段使用稳定结构：
+
+```json
+{
+  "catalog": {
+    "status": "current|refreshing|refresh_failed",
+    "baseline_updated_at": "RFC3339",
+    "baseline_sha256": "...",
+    "current_sha256": "...",
+    "checked_at": "RFC3339",
+    "last_auto_refresh": {
+      "status": "ok|failed",
+      "updated_at": "RFC3339",
+      "error": "..."
+    }
+  }
+}
+```
+
+`baseline_sha256` 表示 active runtime snapshot 绑定的 official baseline identity，不在每次 status 请求时重新读取磁盘文件。`current_sha256` 只表示 daemon 最近一次实际验证过的 authoritative native artifact；它不要求 `/_status` 每次请求都重新哈希整个 binary。`last_auto_refresh` 在尚未发生自动恢复时可以省略。`refresh_failed` 表示 active runtime baseline 尚未与当前 artifact 安全收敛，bare-name route 处于 fail-closed；已有的含 `/` external exact route 仍可继续服务。
+
+现有 `reload` 字段只描述配置 / runtime snapshot reload。catalog recovery 有独立状态，不把两种故障混在同一个字段里。
 
 ## Data and State Model
 
@@ -464,10 +522,11 @@ SDK request logger 保持关闭。
 | SDK auth directory | `runtime/cliproxy-auth/` | daemon |
 | Provider metadata（除 wopal-ai 外的外部 provider） | `runtime/provider-model-metadata.json` | CLI |
 | Wopal metadata（仅 wopal-ai） | `runtime/model-metadata.json` | CLI |
-| Official slug baseline + catalog artifact identity（serve 校验用） | `runtime/official-models.json` | CLI（catalog refresh 写） |
+| Official slug baseline + catalog artifact identity（serve 校验用） | `runtime/official-models.json` | CLI + daemon catalog recovery |
+| Catalog refresh coordination lock | `runtime/catalog-refresh.lock` | CLI + daemon；只做跨进程互斥，不承载模型或恢复状态 |
 | Codex restore state | `runtime/codex-restore.json` | CLI |
 | Official quota state | `runtime/official-quota-state.json` | daemon |
-| Model catalog | `~/.codex/wopal-codex-gateway-models.json` | CLI |
+| Model catalog | `~/.codex/wopal-codex-gateway-models.json` | CLI + daemon catalog recovery |
 | Logs | `logs/*.log` | daemon |
 | Rollback material | `recovery/` | operator |
 
@@ -477,6 +536,7 @@ SDK request logger 保持关闭。
 ## Compatibility Contract
 
 - `runtime/config.json` 保持 `version: 1`。
+- version 1 配置中出现 `quota.maxStepCap` 时按扩展字段兼容读取和保留，但运行时额度决策不读取它；新的保护行为只使用固定 97% / 99% 停止点。
 - `wopalAi` 字段语义保持不变，它下面的模型全部是 `openai-chat`，升级时不需要补 `protocol`。
 - `wopalAi` 省略 `protocol` 时按 `openai-chat` 处理；`providers` 缺少协议且没有模型元数据时标记 `needs_protocol`，不猜。
 - Wopal client model 保持 `wopal-ai/<model>`。
