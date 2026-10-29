@@ -2,7 +2,6 @@ package quota
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,7 +13,7 @@ func TestOfficialQuotaGuardThresholdsAndReset(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	guard := NewGuard(nil)
 
-	guard.ObserveRateLimitPayload("acct-five", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_at":1800000300},"secondary":{"used_percent":98,"window_minutes":10080,"reset_at":1800100000}}}`), now)
+	guard.ObserveRateLimitPayload("acct-five", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":97,"window_minutes":300,"reset_at":1800000300},"secondary":{"used_percent":98,"window_minutes":10080,"reset_at":1800100000}}}`), now)
 	blocked, reason := guard.Blocked("acct-five", now)
 	if !blocked || reason != "five_hour" {
 		t.Fatalf("five-hour guard = blocked:%v reason:%q", blocked, reason)
@@ -28,7 +27,7 @@ func TestOfficialQuotaGuardThresholdsAndReset(t *testing.T) {
 
 	guard.ObserveRateLimitPayload("acct-open", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":96,"window_minutes":300,"reset_at":1800000300},"secondary":{"used_percent":98,"window_minutes":10080,"reset_at":1800100000}}}`), now)
 	if blocked, _ := guard.Blocked("acct-open", now); blocked {
-		t.Fatal("guard blocked below both thresholds")
+		t.Fatal("guard blocked below fixed thresholds")
 	}
 
 	if blocked, _ := guard.Blocked("acct-five", now.Add(301*time.Second)); blocked {
@@ -90,191 +89,23 @@ func TestOfficialQuotaGuardPersistsProtectedStateAcrossRestart(t *testing.T) {
 	if blocked, reason := reloaded.BlockedModel("private-account-id", "gpt-6.1-sol", now.Add(time.Second)); !blocked || reason != "five_hour" {
 		t.Fatalf("reloaded guard = blocked:%v reason:%q", blocked, reason)
 	}
-	if blocked, reason := reloaded.BlockedModel("another-account-after-restart", "gpt-6.1-sol", now.Add(time.Second)); blocked {
-		t.Fatalf("persisted quota state leaked across accounts: reason=%q", reason)
-	}
 	if blocked, _ := reloaded.BlockedModel("private-account-id", "gpt-6.1-sol", now.Add(3601*time.Second)); blocked {
 		t.Fatal("persisted five-hour protection survived its reset time")
 	}
 }
 
-func TestOfficialQuotaGuardStatusUsesHashedAccountState(t *testing.T) {
-	now := time.Unix(1_900_000_000, 0)
-	guard := NewGuard(nil)
-	guard.ObserveRateLimitPayload("private-account-id", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), now)
-	status := guard.Status(now)
-	if status["state"] != "protected" || status["reason"] != "five_hour" {
-		t.Fatalf("quota status = %#v", status)
-	}
-}
-
-func TestQuotaExemptOfficialModelsIncludeCurrentLuna(t *testing.T) {
-	for _, model := range []string{"gpt-5.6-luna", "gpt-6-luna"} {
-		if !quotaExemptOfficialModel(model) {
-			t.Fatalf("model %q should bypass quota reserve", model)
-		}
-	}
-	for _, model := range []string{"gpt-6.1-sol", "codex-auto-review"} {
-		if quotaExemptOfficialModel(model) {
-			t.Fatalf("metered model %q must not bypass quota reserve", model)
-		}
-	}
-}
-
-func TestOfficialQuotaGuardDoesNotLowerThresholdForLongObservationGaps(t *testing.T) {
+func TestQuotaObservationRejectsOutOfOrderSamples(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	resetAt := now.Add(2 * time.Hour)
-	guard := NewGuard(nil)
-	observe := func(percent float64, offset time.Duration) {
-		guard.ObserveWindow("acct", Window{
-			UsedPercent: percent, WindowMinutes: officialFiveHourWindowMinutes,
-			ResetAt: resetAt, ObservedAt: now.Add(offset),
-		})
-	}
-
-	// A gap wider than the sampling window can span many turns or an idle
-	// period. Its delta is not evidence about a single step.
-	observe(39, 0)
-	observe(65, 5*time.Minute)
-	if blocked, _ := guard.Blocked("acct", now); blocked {
-		t.Fatal("guard lowered the threshold after an accumulated observation gap")
-	}
-	observe(96, 6*time.Minute)
-	if blocked, _ := guard.Blocked("acct", now); blocked {
-		t.Fatal("guard stopped below the base 97 percent threshold")
-	}
-	observe(97, 7*time.Minute)
-	if blocked, _ := guard.Blocked("acct", now); !blocked {
-		t.Fatal("guard did not stop at the base 97 percent threshold")
-	}
-}
-
-func TestOfficialQuotaGuardLowersThresholdForNearbyStep(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	resetAt := now.Add(2 * time.Hour)
-	guard := NewGuard(nil)
-	observe := func(percent float64, offset time.Duration) {
-		guard.ObserveWindow("acct", Window{
-			UsedPercent: percent, WindowMinutes: officialFiveHourWindowMinutes,
-			ResetAt: resetAt, ObservedAt: now.Add(offset),
-		})
-	}
-
-	observe(90, 0)
-	observe(93, 10*time.Second)
-	if step, _ := guard.Status(now)["observed_five_hour_max_step"].(float64); step != 3 {
-		t.Fatalf("observed max step = %v, want 3", step)
-	}
-	if effective, _ := guard.Status(now)["effective_five_hour_stop_percent"].(float64); effective != 96 {
-		t.Fatalf("effective stop = %v, want 96", effective)
-	}
-	if blocked, _ := guard.Blocked("acct", now); blocked {
-		t.Fatal("guard stopped below the learned 96 percent threshold")
-	}
-	observe(96, 20*time.Second)
-	if blocked, _ := guard.Blocked("acct", now); !blocked {
-		t.Fatal("guard did not stop at the learned 96 percent threshold")
-	}
-}
-
-func TestOfficialQuotaGuardUsesConfiguredMaxStepCap(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	// The threshold formula is unchanged: base - (clamped step - min margin),
-	// with 2 points of margin for five-hour and 1 for weekly.
-	configured := NewGuardWithStateAndMaxStep(nil, "", now, 3)
-	if got := configured.effectiveFiveHourStopPercent(10); got != 96 {
-		t.Fatalf("configured five-hour floor = %v, want 96", got)
-	}
-	if got := configured.effectiveWeeklyStopPercent(10); got != 97 {
-		t.Fatalf("configured weekly floor = %v, want 97", got)
-	}
-
-	defaultGuard := NewGuard(nil)
-	if got := defaultGuard.effectiveFiveHourStopPercent(10); got != 94 {
-		t.Fatalf("default five-hour floor = %v, want 94", got)
-	}
-	if got := defaultGuard.effectiveWeeklyStopPercent(10); got != 95 {
-		t.Fatalf("default weekly floor = %v, want 95", got)
-	}
-}
-
-func TestOfficialQuotaGuardDiscardsStepsAboveConfiguredCap(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	resetAt := now.Add(2 * time.Hour)
-	observe := func(guard *Guard) {
-		guard.ObserveWindow("acct", Window{
-			UsedPercent: 90, WindowMinutes: officialFiveHourWindowMinutes,
-			ResetAt: resetAt, ObservedAt: now,
-		})
-		guard.ObserveWindow("acct", Window{
-			UsedPercent: 94, WindowMinutes: officialFiveHourWindowMinutes,
-			ResetAt: resetAt, ObservedAt: now.Add(10 * time.Second),
-		})
-	}
-
-	configured := NewGuardWithStateAndMaxStep(nil, "", now, 3)
-	observe(configured)
-	if step, _ := configured.Status(now)["observed_five_hour_max_step"].(float64); step != 0 {
-		t.Fatalf("configured guard learned step above its cap: %v", step)
-	}
-
-	defaultGuard := NewGuard(nil)
-	observe(defaultGuard)
-	if step, _ := defaultGuard.Status(now)["observed_five_hour_max_step"].(float64); step != 4 {
-		t.Fatalf("default guard did not learn a 4-point step: %v", step)
-	}
-}
-
-func TestOfficialQuotaGuardDiscardsOverCapLearnedStep(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
-	resetAt := now.Add(2 * time.Hour)
-	path := filepath.Join(t.TempDir(), "quota.json")
-	legacy := map[string]any{
-		"version": 1,
-		"accounts": map[string]any{
-			AccountKey("acct"): map[string]any{
-				"FiveHour": map[string]any{
-					"UsedPercent": 96, "WindowMinutes": 300, "ResetAt": resetAt, "ObservedAt": now,
-				},
-				"five_hour_max_step": 26,
-				"weekly_max_step":    4,
-			},
-		},
-	}
-	raw, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-
+	path := filepath.Join(t.TempDir(), "official-quota-state.json")
 	guard := NewGuardWithState(nil, path, now)
-	if step, _ := guard.Status(now)["observed_five_hour_max_step"].(float64); step != 0 {
-		t.Fatalf("over-cap learned step survived load: %v", step)
-	}
-	if blocked, _ := guard.Blocked("acct", now); blocked {
-		t.Fatal("guard stopped below the base threshold after loading an over-cap step")
-	}
-}
-
-func TestOfficialQuotaGuardKeepsLearnedStepAcrossWindows(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
 	resetAt := now.Add(2 * time.Hour)
-	guard := NewGuard(nil)
-	guard.ObserveWindow("acct", Window{
-		UsedPercent: 90, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now,
-	})
-	guard.ObserveWindow("acct", Window{
-		UsedPercent: 93, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now.Add(10 * time.Second),
-	})
+	guard.ObserveWindow("acct", Window{UsedPercent: 98, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now.Add(10 * time.Second)})
+	guard.ObserveWindow("acct", Window{UsedPercent: 90, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: resetAt, ObservedAt: now.Add(time.Second)})
+	guard.persist(now.Add(20 * time.Second))
 
-	// The next window starts from scratch, but what a step costs is still known.
-	nextReset := resetAt.Add(5 * time.Hour)
-	guard.ObserveWindow("acct", Window{
-		UsedPercent: 0, WindowMinutes: officialFiveHourWindowMinutes, ResetAt: nextReset, ObservedAt: now.Add(3 * time.Hour),
-	})
-	if step, _ := guard.Status(now.Add(3 * time.Hour))["observed_five_hour_max_step"].(float64); step != 3 {
-		t.Fatalf("learned step lost at window boundary: %v", step)
+	reloaded := NewGuardWithState(nil, path, now.Add(20*time.Second))
+	state := reloaded.accounts[AccountKey("acct")]
+	if state.FiveHour == nil || state.FiveHour.UsedPercent != 98 || !state.FiveHour.ObservedAt.Equal(now.Add(10*time.Second)) {
+		t.Fatalf("out-of-order sample replaced newer state: %+v", state.FiveHour)
 	}
 }

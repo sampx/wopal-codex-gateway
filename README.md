@@ -82,7 +82,7 @@ Base protection thresholds:
 
 The guard checks before each new sampling step (`response.create` / `response.append`), not only once per outer user turn.
 
-The upstream reports whole percentages, so one step can consume more than one point. To avoid overshooting, the guard lowers the stop point by however much the largest observed single step exceeds a minimum margin: 2 points for the 5-hour window and 1 point for the weekly window. The observed step is capped at 5 points by default (`quota.maxStepCap`, range 1–10), so with the default cap the lowest effective thresholds are 94% and 95%. With no large steps observed, the effective threshold equals the base threshold.
+The thresholds are fixed at 97% and 99%. Account-level quota snapshots are not interpreted as per-request or per-agent cost, so concurrent sessions and subagents do not dynamically move either stop point. The version-1 `quota.maxStepCap` field is still accepted and round-tripped for compatibility, but it no longer changes runtime behavior.
 
 When protected:
 
@@ -93,12 +93,6 @@ requested native model
 ```
 
 After the quota reset time, the next safe sampling step reconnects and returns to the originally requested native model.
-
-```sh
-bin/wopal-codex-gateway quota reset-learning
-```
-
-clears the learned step values, returning the effective thresholds to the base values until new steps are observed.
 
 ### Privacy by default
 
@@ -175,6 +169,12 @@ codex debug models --bundled
 
 The bundled catalog is the canonical source for official model definitions.
 
+After an initial trusted baseline has been created, a native Codex upgrade is recovered automatically: the gateway refreshes the bundled catalog under a cross-process lock and swaps in the verified runtime snapshot without restarting the stable front-door listener. If recovery cannot complete safely, bare-name model routes fail closed with `503 catalog_refresh_failed` while namespaced external routes such as `provider/model` remain available. A missing or damaged baseline still requires the explicit recovery command:
+
+```sh
+bin/wopal-codex-gateway catalog refresh
+```
+
 ## 4. Build from source
 
 Run these commands from the repository root.
@@ -209,7 +209,7 @@ The gateway reads `runtime/config.json`. A missing file means defaults; every wr
 }
 ```
 
-`version` must be `1`; anything else is rejected before startup. Absent `listen` defaults to `127.0.0.1:11435`; absent `logs` defaults to 10 MB with 5 backups; `quota.maxStepCap` defaults to `5` within `1–10`, with out-of-range values falling back to the default.
+`version` must be `1`; anything else is rejected before startup. Absent `listen` defaults to `127.0.0.1:11435`; absent `logs` defaults to 10 MB with 5 backups. `quota.maxStepCap` remains a version-1 compatibility field: it defaults to `5` within `1–10` and round-trips through config writes, but it no longer affects quota routing.
 
 When an older file lacks `version` or still carries an `ollama` block, use the migration command in [5.4](#54-upgrade-an-older-configuration) instead of editing by hand.
 
@@ -353,16 +353,16 @@ It reports sanitized operational state, including:
 
 - the listener and official route state;
 - 5-hour and weekly quota percentages, reset times, and failover state;
-- quota guard thresholds and observed steps:
+- fixed quota guard thresholds:
 
 ```text
 official_quota.five_hour_stop_percent
 official_quota.weekly_stop_percent
 official_quota.effective_five_hour_stop_percent
 official_quota.effective_weekly_stop_percent
-official_quota.observed_five_hour_max_step
-official_quota.observed_weekly_max_step
 ```
+
+- catalog freshness and recovery state under `catalog.status`, `catalog.baseline_sha256`, `catalog.current_sha256`, `catalog.checked_at`, and (after an automatic recovery attempt) `catalog.last_auto_refresh`;
 
 - `request_body_logging: "disabled"`.
 
@@ -772,13 +772,7 @@ Very old conversations can contain OpenAI native opaque compaction. The gateway 
 curl -fsS http://127.0.0.1:11435/_status
 ```
 
-Compare `official_quota.five_hour_stop_percent` / `weekly_stop_percent` (the base thresholds) with `effective_five_hour_stop_percent` / `effective_weekly_stop_percent` (the real stop points), then read `observed_five_hour_max_step` / `observed_weekly_max_step`. A large observed step moves the real stop point earlier; that is the safety margin working.
-
-Clear the learned values:
-
-```sh
-bin/wopal-codex-gateway quota reset-learning
-```
+The effective thresholds are fixed: `effective_five_hour_stop_percent` must remain `97` and `effective_weekly_stop_percent` must remain `99`. If a request appears to fail over earlier, inspect the current window's `used_percent`, reset time, telemetry freshness, and `official_failover` state; `quota.maxStepCap` does not lower the threshold and there is no learning state to reset.
 
 ### Gateway models remain visible after uninstall
 
@@ -835,7 +829,7 @@ Every routing record carries a client fingerprint (`client_version`, `originator
 | `runtime/cliproxy-runtime.json` | SDK config regenerated at each start, no secrets |
 | `runtime/cliproxy-auth/` | auth directory required by the SDK |
 | `runtime/model-metadata.json` | capability snapshot reported by the provider |
-| `runtime/official-quota-state.json` | quota windows and learned step sizes; account key is SHA-256 |
+| `runtime/official-quota-state.json` | current quota windows and reset times; account key is SHA-256; legacy learned-step fields are ignored |
 | `runtime/codex-restore.json` | pre-install Codex configuration, consumed by restore |
 
 Do not delete `codex-restore.json` while the gateway is enabled.

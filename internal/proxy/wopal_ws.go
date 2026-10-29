@@ -41,11 +41,12 @@ type wopalWebsocketSession struct {
 	// compactionProvider is the provider that serves the compaction role. It is
 	// not always the foreground provider: a session can chat on one provider and
 	// summarise on another, and the log must name the one that ran the summary.
-	compactionProvider string
-	request            *http.Request
-	nativeReplay       *compaction.NativeBridge
-	clientWatcher      *clientfp.Watcher
-	emit               func([]byte) error
+	compactionProvider   string
+	request              *http.Request
+	nativeReplay         *compaction.NativeBridge
+	clientWatcher        *clientfp.Watcher
+	emit                 func([]byte) error
+	quotaFallbackHistory bool
 }
 
 func isWebsocketUpgrade(req *http.Request) bool {
@@ -90,6 +91,7 @@ func serveExternalWebsocketBridgeWithCompaction(c *gin.Context, logger *activity
 	failoverAccountValue, _ := c.Get("quota_failover_account_id")
 	failoverAccountID, _ := failoverAccountValue.(string)
 	requestedOfficialModel, _ := failoverRequestedModel.(string)
+	s.quotaFallbackHistory = strings.TrimSpace(requestedOfficialModel) != ""
 
 	for {
 		messageType, payload, errRead := conn.ReadMessage()
@@ -159,6 +161,9 @@ func (s *wopalWebsocketSession) prepareTurn(ctx context.Context, message map[str
 	if err := s.nativeReplay.Expand(ctx, s.request, message); err != nil {
 		return compaction.PreparedTurn{}, err
 	}
+	if s.quotaFallbackHistory {
+		sanitizeQuotaFallbackHistory(message)
+	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	return compaction.PrepareTurn(message, s.model, s.state)
@@ -171,6 +176,9 @@ func (s *wopalWebsocketSession) prepareCompactionTurn(ctx context.Context, messa
 	}
 	if err := s.nativeReplay.Expand(ctx, s.request, message); err != nil {
 		return compaction.PreparedTurn{}, err
+	}
+	if s.quotaFallbackHistory {
+		sanitizeQuotaFallbackHistory(message)
 	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()

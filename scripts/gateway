@@ -47,7 +47,6 @@ External providers (add --provider <id> after the model names where relevant):
 Low-level passthrough:
   config ...         Run a gateway config command
   catalog refresh    Rebuild model catalog
-  quota ...          Quota learning state, e.g. quota reset-learning
   codex ...          Raw codex subcommands, e.g. codex install / codex restore
 
 Every command accepts -h / --help.
@@ -78,7 +77,7 @@ case "$cmd" in
     "$BIN" codex restore "$@"
     echo "Restart ChatGPT/Codex Desktop manually to reload the original configuration."
     ;;
-  models|service|auth|config|catalog|providers|quota|codex)
+  models|service|auth|config|catalog|providers|codex)
     require_bin
     exec "$BIN" "$cmd" "$@"
     ;;

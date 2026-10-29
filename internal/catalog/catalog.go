@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ type CatalogRefreshResult struct {
 	WopalAI       int
 	External      int
 	ExternalNames []string
+	Baseline      *OfficialModelsBaseline
 }
 
 // CatalogCommandOutput is the captured result of `codex debug models`.
@@ -313,6 +315,23 @@ func restoreOptionalFile(path string, data []byte, existed bool) error {
 // concurrent Codex upgrade: neither output is committed unless the artifact's
 // canonical path and SHA-256 remain identical around `debug models --bundled`.
 func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
+	return RefreshCatalogContext(context.Background(), cfg)
+}
+
+// RefreshCatalogContext serializes every manual and automatic refresh through
+// the same cross-process lock. Automatic recovery supplies a bounded context;
+// the operator-facing refresh waits for the lock and therefore remains a
+// force-recovery path rather than participating in daemon backoff.
+func RefreshCatalogContext(ctx context.Context, cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
+	lock, err := lockCatalogRefresh(ctx, config.CatalogRefreshLockPath())
+	if err != nil {
+		return nil, fmt.Errorf("acquire catalog refresh lock: %w", err)
+	}
+	defer lock.Unlock()
+	return refreshCatalogUnlocked(cfg)
+}
+
+func refreshCatalogUnlocked(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("refresh model catalog: gateway config is nil")
 	}
@@ -437,5 +456,6 @@ func RefreshCatalog(cfg *config.GatewayConfig) (*CatalogRefreshResult, error) {
 		WopalAI:       len(cfg.WopalAI.Models),
 		External:      len(external),
 		ExternalNames: append([]string(nil), externalNames...),
+		Baseline:      baseline,
 	}, nil
 }

@@ -25,8 +25,10 @@ const (
 	DefaultLogMaxSizeMB  = 10
 	DefaultLogMaxBackups = 5
 
-	// DefaultQuotaMaxStepCap is the default upper bound for one observed quota
-	// sampling step. Operators may lower or raise it within [1, 10].
+	// DefaultQuotaMaxStepCap is retained only for version-1 configuration
+	// compatibility. The runtime no longer learns or applies per-request quota
+	// steps; existing maxStepCap values continue to round-trip unchanged within
+	// the historical validation range.
 	DefaultQuotaMaxStepCap = 5
 	minQuotaMaxStepCap     = 1
 	maxQuotaMaxStepCap     = 10
@@ -417,9 +419,9 @@ func (c Logs) MarshalJSON() ([]byte, error) {
 	return marshalWithExtensions(plain(c), c.extensions)
 }
 
-// QuotaConfig tunes the learned quota guard. An absent or out-of-range value
-// falls back to DefaultQuotaMaxStepCap, so a malformed config never disables
-// the protection floor.
+// QuotaConfig retains the historical version-1 maxStepCap field so existing
+// configs load and save without migration. The field has no runtime effect:
+// quota protection uses fixed five-hour and weekly thresholds.
 type QuotaConfig struct {
 	MaxStepCap float64 `json:"maxStepCap,omitempty"`
 

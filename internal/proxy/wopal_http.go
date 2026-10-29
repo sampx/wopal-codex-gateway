@@ -20,6 +20,14 @@ import (
 // whether the selected upstream is Wopal or another external provider.
 // Returns false when this function has handled the request (including errors).
 func prepareExternalHTTP(c *gin.Context, logger *activity.Logger, model, providerID string, compactionRole RoleTarget, nativeReplay *compaction.NativeBridge, inspection *requestInspection) bool {
+	return prepareExternalHTTPWithOptions(c, logger, model, providerID, compactionRole, nativeReplay, inspection, false)
+}
+
+func prepareQuotaFallbackHTTP(c *gin.Context, logger *activity.Logger, model, providerID string, compactionRole RoleTarget, nativeReplay *compaction.NativeBridge, inspection *requestInspection) bool {
+	return prepareExternalHTTPWithOptions(c, logger, model, providerID, compactionRole, nativeReplay, inspection, true)
+}
+
+func prepareExternalHTTPWithOptions(c *gin.Context, logger *activity.Logger, model, providerID string, compactionRole RoleTarget, nativeReplay *compaction.NativeBridge, inspection *requestInspection, quotaFallback bool) bool {
 	var message map[string]any
 	var err error
 	if inspection == nil || inspection.payload == nil {
@@ -37,6 +45,9 @@ func prepareExternalHTTP(c *gin.Context, logger *activity.Logger, model, provide
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "compaction_replay_unavailable", "type": "invalid_request_error", "message": err.Error()}})
 		return false
+	}
+	if quotaFallback {
+		sanitizeQuotaFallbackHistory(message)
 	}
 	input, isArray := message["input"].([]any)
 	compactEndpoint := c.Request.URL.Path == "/v1/responses/compact"
@@ -56,7 +67,7 @@ func prepareExternalHTTP(c *gin.Context, logger *activity.Logger, model, provide
 		s := &wopalWebsocketSession{
 			request: c.Request, model: model, providerID: providerID,
 			compactionModel: compactionRole.ClientModel, compactionProvider: compactionRole.ProviderID,
-			logger: logger, nativeReplay: nativeReplay,
+			logger: logger, nativeReplay: nativeReplay, quotaFallbackHistory: quotaFallback,
 		}
 		s.emit = func(payload []byte) error {
 			if !compactEndpoint {

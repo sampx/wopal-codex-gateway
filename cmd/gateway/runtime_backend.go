@@ -95,6 +95,7 @@ func startGatewayBackendWithLoggerAndResolver(root, gatewayConfigPath, instance 
 		Roles:         roles,
 		Credentials:   credentials,
 		Reload:        reloadStatus,
+		Catalog:       reloadStatus.Catalog(),
 		StatusGateway: snapshot.gateway,
 	}
 	activeResolver := resolve
@@ -142,6 +143,8 @@ func startGatewayBackendWithLoggerAndResolver(root, gatewayConfigPath, instance 
 	backend.logger = logger
 	backend.target = target
 	backend.routes = snapshot.routes
+	backend.baseline = snapshot.baseline
+	backend.verifier = snapshot.artifactVerifier
 	return backend, snapshot, nil
 }
 

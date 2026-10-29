@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -141,6 +142,37 @@ func TestRoutingMiddlewareUsesExactRouteTableAndFailsBareOnVerifierDrift(t *test
 	}
 	if status, _ := post("vendor/model"); status != http.StatusNoContent {
 		t.Fatalf("namespaced external after drift status = %d", status)
+	}
+}
+
+func TestCatalogRefreshFailureReturns503WhileNamespacedExternalStillRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resolver := func(model string) (routing.Route, error) {
+		if model == "vendor/model" {
+			return routing.Route{Kind: routing.External, ProviderID: "vendor"}, nil
+		}
+		return routing.Route{}, &routing.CatalogRefreshError{Err: errors.New("refresh failed")}
+	}
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithResolverAndTargetsAndQuotaGuard(nil, mustURL("http://127.0.0.1:1"), mustURL("http://127.0.0.1:1"), quota.NewGuard(nil), resolver))
+	engine.POST("/v1/responses", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	post := func(model string) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"`+model+`","input":[]}`))
+		req.Header.Set("Content-Type", "application/json")
+		engine.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	bare := post("gpt-new")
+	if bare.Code != http.StatusServiceUnavailable || !strings.Contains(bare.Body.String(), `"code":"catalog_refresh_failed"`) {
+		t.Fatalf("bare refresh failure = %d %s", bare.Code, bare.Body.String())
+	}
+	namespaced := post("vendor/model")
+	if namespaced.Code != http.StatusNoContent {
+		t.Fatalf("namespaced external after refresh failure = %d %s", namespaced.Code, namespaced.Body.String())
 	}
 }
 

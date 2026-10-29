@@ -114,6 +114,13 @@ func LaunchAgentTarget() string {
 	return LaunchdDomain() + "/" + config.LaunchAgentLabel
 }
 
+// GatewayRunning reports whether the user LaunchAgent is currently loaded.
+// It is intentionally a read-only probe so control-plane commands can decide
+// whether they must wait for runtime adoption after committing state to disk.
+func GatewayRunning() bool {
+	return RunLaunchctl("print", LaunchAgentTarget()) == nil
+}
+
 // SignalReloadIfRunning asks a loaded LaunchAgent daemon to rebuild its runtime
 // snapshot. A missing/unloaded job is not an error: control-plane commands are
 // valid before the service has been installed or while it is stopped.

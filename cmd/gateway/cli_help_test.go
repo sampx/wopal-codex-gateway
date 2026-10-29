@@ -20,7 +20,6 @@ func TestCommandGroupsAnswerHelpFlags(t *testing.T) {
 		{"models", "--help"},
 		{"models", "add", "--help"},
 		{"config", "show", "-h"},
-		{"quota", "--help"},
 		{"codex", "install", "--help"},
 	}
 	for _, args := range cases {

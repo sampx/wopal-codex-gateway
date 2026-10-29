@@ -53,7 +53,7 @@ func run(args []string) error {
 			return err
 		}
 		return nil
-	case "config", "providers", "auth", "models", "catalog", "codex", "service", "quota":
+	case "config", "providers", "auth", "models", "catalog", "codex", "service":
 		if requestsHelp(rest) {
 			printHelp()
 			return nil
@@ -129,8 +129,6 @@ func runCommandGroup(group string, args []string) error {
 		return runCodexCommand(subcommand, rest)
 	case "service":
 		return runServiceCommand(subcommand, rest)
-	case "quota":
-		return runQuotaCommand(subcommand, rest)
 	}
 
 	return fmt.Errorf("unknown command group: %s", group)
@@ -189,7 +187,6 @@ Commands:
   service stop                                                                Stop the proxy service
   service restart                                                             Restart the proxy service
   service status                                                              Show install/load/health status
-  quota reset-learning                                                        Clear the learned max quota step
 
 Routing:
   wopal-ai/<model>   -> Wopal AI / New API

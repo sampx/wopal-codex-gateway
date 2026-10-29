@@ -20,12 +20,14 @@ type runtimeReloadSnapshot struct {
 type runtimeReloadStatus struct {
 	mu       sync.RWMutex
 	snapshot runtimeReloadSnapshot
+	catalog  *runtimeCatalogStatus
 }
 
 type gatewayServiceRuntime struct {
 	Roles         proxy.RuntimeRoles
 	Credentials   map[string]bool
 	Reload        *runtimeReloadStatus
+	Catalog       *runtimeCatalogStatus
 	StatusGateway *config.GatewayConfig
 }
 
@@ -67,6 +69,49 @@ func (s *runtimeReloadStatus) Snapshot() runtimeReloadSnapshot {
 	return s.snapshot
 }
 
+func sanitizeStatusError(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	const maxRunes = 400
+	runes := []rune(value)
+	if len(runes) > maxRunes {
+		value = string(runes[:maxRunes]) + "..."
+	}
+	return value
+}
+
+func catalogStatusPayload(snapshot runtimeCatalogSnapshot) map[string]any {
+	status := strings.TrimSpace(snapshot.Status)
+	if status == "" {
+		status = "current"
+	}
+	payload := map[string]any{"status": status}
+	if snapshot.Baseline != nil {
+		if !snapshot.Baseline.UpdatedAt.IsZero() {
+			payload["baseline_updated_at"] = snapshot.Baseline.UpdatedAt.UTC().Format(time.RFC3339)
+		}
+		if sha := strings.TrimSpace(snapshot.Baseline.Artifact.SHA256); sha != "" {
+			payload["baseline_sha256"] = sha
+		}
+	}
+	if sha := strings.TrimSpace(snapshot.CurrentSHA256); sha != "" {
+		payload["current_sha256"] = sha
+	}
+	if !snapshot.CheckedAt.IsZero() {
+		payload["checked_at"] = snapshot.CheckedAt.UTC().Format(time.RFC3339)
+	}
+	if snapshot.LastAutoStatus != "" {
+		last := map[string]any{"status": snapshot.LastAutoStatus}
+		if !snapshot.LastAutoUpdated.IsZero() {
+			last["updated_at"] = snapshot.LastAutoUpdated.UTC().Format(time.RFC3339)
+		}
+		if text := sanitizeStatusError(snapshot.LastAutoError); text != "" {
+			last["error"] = text
+		}
+		payload["last_auto_refresh"] = last
+	}
+	return payload
+}
+
 func roleStatusPayload(target proxy.RoleTarget) map[string]any {
 	status := strings.TrimSpace(target.Status)
 	if status == "" {
@@ -95,6 +140,7 @@ func buildRuntimeStatusPayload(
 	roles proxy.RuntimeRoles,
 	credentials map[string]bool,
 	reload runtimeReloadSnapshot,
+	catalogSnapshot runtimeCatalogSnapshot,
 	officialQuota map[string]any,
 	officialFailover map[string]any,
 	notifications map[string]any,
@@ -151,6 +197,7 @@ func buildRuntimeStatusPayload(
 		"official_failover":    officialFailover,
 		"notifications":        notifications,
 		"reload":               reloadPayload,
+		"catalog":              catalogStatusPayload(catalogSnapshot),
 		"wopal":                "cliproxy-responses-to-chat",
 		"request_body_logging": requestBodyLogging,
 	}

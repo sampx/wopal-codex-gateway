@@ -20,6 +20,7 @@ type gatewaySnapshot struct {
 	registry         *provider.Registry
 	routes           *routing.Table
 	baseline         *catalog.OfficialModelsBaseline
+	artifactVerifier *catalog.OfficialArtifactVerifier
 	officialFallback provider.ResolvedRole
 	compaction       provider.ResolvedRole
 }
@@ -81,6 +82,7 @@ func loadGatewaySnapshot(root, gatewayConfigPath string) (*gatewaySnapshot, erro
 		registry:         registry,
 		routes:           routes,
 		baseline:         baseline,
+		artifactVerifier: verifier,
 		officialFallback: officialFallback,
 		compaction:       compactionRole,
 	}, nil
@@ -92,6 +94,8 @@ type runtimeBackend struct {
 	logger   *activity.Logger
 	target   *url.URL
 	routes   *routing.Table
+	baseline *catalog.OfficialModelsBaseline
+	verifier *catalog.OfficialArtifactVerifier
 	active   atomic.Int64
 	draining atomic.Bool
 	stopOnce sync.Once

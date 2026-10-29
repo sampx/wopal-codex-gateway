@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,23 +22,6 @@ const (
 	officialWeeklyWindowMinutes   = 10080
 	FiveHourStopPercent           = 97.0
 	WeeklyStopPercent             = 99.0
-
-	// The upstream reports whole percentages, so one sampling step can consume
-	// more than one point. The guard stops earlier by the largest step it has
-	// actually observed, never less than these margins: with a 2-point five-hour
-	// margin the base 97 still leaves the app usable after a 2-point step.
-	officialFiveHourMinMargin = 2.0
-	officialWeeklyMinMargin   = 1.0
-
-	// defaultMaxStepCap is used when the caller does not inject a configured
-	// cap. A larger delta is treated as an accumulated gap rather than one step,
-	// so the quota can never be pulled arbitrarily low by one noisy sample.
-	defaultMaxStepCap = 5.0
-
-	// officialMaxStepSampleGap is how close two samples must be to count their
-	// delta as one sampling step. A wider gap can span many turns or an idle
-	// period, and its delta is not evidence about the next single step.
-	officialMaxStepSampleGap = 60 * time.Second
 
 	// officialResetAtJitterTolerance is how far the reported reset time of one
 	// window may drift between transports and still count as the same window.
@@ -65,11 +47,6 @@ type Window struct {
 type AccountState struct {
 	FiveHour *Window
 	Weekly   *Window
-	// Largest single-step increase ever observed for each window type. These
-	// live on the account, not the window, so a reset does not erase what the
-	// guard has learned about how much one sampling step can cost.
-	FiveHourMaxStep float64 `json:"five_hour_max_step,omitempty"`
-	WeeklyMaxStep   float64 `json:"weekly_max_step,omitempty"`
 }
 
 // Notifier surfaces automatic quota transitions to the user. Implementations
@@ -87,9 +64,6 @@ type Guard struct {
 	persistencePath string
 	logger          *activity.Logger
 	notifier        Notifier
-	// maxStepCap bounds how far one observed step may lower a stop point. It is
-	// injected at construction and never changes afterwards.
-	maxStepCap float64
 
 	// lastObserved deduplicates high-frequency quota telemetry by signature.
 	lastObservedMu sync.Mutex
@@ -124,22 +98,11 @@ type Guard struct {
 	// scheduleAfter is overridden in tests; production uses time.AfterFunc.
 	scheduleAfter func(time.Duration, func())
 
-	// beforeRename is a test-only seam: it runs after the snapshot payload is
-	// prepared and before it is renamed into place. Production leaves it nil.
-	beforeRename func()
-
 	// persistenceMu serializes the whole adopt -> snapshot -> write -> record
 	// cycle. Concurrent official traffic (HTTP responses, WebSocket frames and
 	// compaction replays) all reach persist, so without it two snapshots can be
 	// written in the opposite order and an older one can land last.
 	persistenceMu sync.Mutex
-
-	// lastPersistModTime is the state file's modification time this guard last
-	// observed, either from its own write or from loading the file. A newer file
-	// means `quota reset-learning` changed it from another process, so the guard
-	// adopts the cleared values instead of writing the in-memory ones back.
-	// Guarded by persistenceMu.
-	lastPersistModTime time.Time
 }
 
 type PersistedState struct {
@@ -149,27 +112,18 @@ type PersistedState struct {
 }
 
 func NewGuard(logger *activity.Logger) *Guard {
-	return newGuard(logger, defaultMaxStepCap)
+	return newGuard(logger)
 }
 
 func NewGuardWithState(logger *activity.Logger, statePath string, now time.Time) *Guard {
-	return NewGuardWithStateAndMaxStep(logger, statePath, now, defaultMaxStepCap)
-}
-
-// NewGuardWithStateAndMaxStep constructs a guard with an explicit single-step
-// cap. Values <= 0 fall back to the package default.
-func NewGuardWithStateAndMaxStep(logger *activity.Logger, statePath string, now time.Time, maxStepCap float64) *Guard {
-	guard := newGuard(logger, maxStepCap)
+	guard := newGuard(logger)
 	guard.persistencePath = strings.TrimSpace(statePath)
 	guard.loadPersisted(now)
 	return guard
 }
 
-func newGuard(logger *activity.Logger, maxStepCap float64) *Guard {
-	if maxStepCap <= 0 || math.IsNaN(maxStepCap) {
-		maxStepCap = defaultMaxStepCap
-	}
-	return &Guard{accounts: make(map[string]AccountState), logger: logger, maxStepCap: maxStepCap}
+func newGuard(logger *activity.Logger) *Guard {
+	return &Guard{accounts: make(map[string]AccountState), logger: logger}
 }
 
 // SetNotifier attaches the notification implementation after construction.
@@ -192,9 +146,8 @@ func AccountKey(accountID string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// activeQuotaState drops expired windows but keeps the learned per-step cost.
-// Losing that memory at a window boundary would reintroduce exactly the risk the
-// margin exists to prevent.
+// activeQuotaState drops expired windows. Quota protection is based only on the
+// current authoritative windows; there is no learned per-request cost state.
 func activeQuotaState(state AccountState, now time.Time) (AccountState, bool) {
 	if state.FiveHour != nil && !now.Before(state.FiveHour.ResetAt) {
 		state.FiveHour = nil
@@ -202,57 +155,13 @@ func activeQuotaState(state AccountState, now time.Time) (AccountState, bool) {
 	if state.Weekly != nil && !now.Before(state.Weekly.ResetAt) {
 		state.Weekly = nil
 	}
-	active := state.FiveHour != nil || state.Weekly != nil
-	if !active && state.FiveHourMaxStep == 0 && state.WeeklyMaxStep == 0 {
-		return state, false
-	}
-	return state, true
-}
-
-// clampMaxStep bounds a learned step to the configured cap. Anything above the
-// cap is not trustworthy evidence about a single sampling step.
-func (g *Guard) clampMaxStep(step float64) float64 {
-	if step <= 0 || math.IsNaN(step) {
-		return 0
-	}
-	cap := defaultMaxStepCap
-	if g != nil && g.maxStepCap > 0 {
-		cap = g.maxStepCap
-	}
-	if step > cap {
-		return cap
-	}
-	return step
-}
-
-// quotaWindowThreshold lowers a base stop point by however much more than the
-// minimum margin a single step has been seen to cost.
-func (g *Guard) quotaWindowThreshold(base, minMargin, maxStep float64) float64 {
-	margin := math.Max(minMargin, g.clampMaxStep(maxStep))
-	return base - (margin - minMargin)
-}
-
-func (g *Guard) effectiveFiveHourStopPercent(maxStep float64) float64 {
-	return g.quotaWindowThreshold(FiveHourStopPercent, officialFiveHourMinMargin, maxStep)
-}
-
-func (g *Guard) effectiveWeeklyStopPercent(maxStep float64) float64 {
-	return g.quotaWindowThreshold(WeeklyStopPercent, officialWeeklyMinMargin, maxStep)
+	return state, state.FiveHour != nil || state.Weekly != nil
 }
 
 func (g *Guard) loadPersisted(now time.Time) {
 	if g == nil || g.persistencePath == "" {
 		return
 	}
-	// Hold the cross-process lock across read + stat, so a reset that lands during
-	// startup cannot leave the guard with the old value and the new mtime.
-	fileLock, lockErr := lockStateFile(g.persistencePath)
-	if lockErr != nil {
-		g.logger.Write(map[string]any{"event": "official_quota_state_load_failed", "error": lockErr.Error()})
-		return
-	}
-	defer fileLock.Unlock()
-
 	raw, err := os.ReadFile(g.persistencePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -265,25 +174,7 @@ func (g *Guard) loadPersisted(now time.Time) {
 		g.logger.Write(map[string]any{"event": "official_quota_state_load_failed", "error": "invalid persisted quota state"})
 		return
 	}
-	// Record the file this state came from, so a reset written after startup is
-	// recognised as newer. Without this the first post-startup persist sees a
-	// zero lastPersistModTime, treats the already-reset file as its own baseline
-	// and writes the stale in-memory learned step straight back.
-	info, statErr := os.Stat(g.persistencePath)
-	if statErr != nil {
-		g.logger.Write(map[string]any{"event": "official_quota_state_load_failed", "error": statErr.Error()})
-		return
-	}
 	for key, state := range persisted.Accounts {
-		// A value above the cap can only come from the older accumulator logic
-		// that mistook an accumulated gap for one step; it is not evidence and
-		// must not permanently lower the stop point.
-		if state.FiveHourMaxStep > g.maxStepCap {
-			state.FiveHourMaxStep = 0
-		}
-		if state.WeeklyMaxStep > g.maxStepCap {
-			state.WeeklyMaxStep = 0
-		}
 		if active, ok := activeQuotaState(state, now); ok {
 			g.accounts[key] = active
 		}
@@ -297,10 +188,6 @@ func (g *Guard) loadPersisted(now time.Time) {
 			break
 		}
 	}
-	g.persistenceMu.Lock()
-	g.lastPersistModTime = info.ModTime()
-	g.persistenceMu.Unlock()
-
 	if len(g.accounts) > 0 {
 		g.logger.Write(map[string]any{"event": "official_quota_state_restored"})
 	}
@@ -310,20 +197,10 @@ func (g *Guard) persist(now time.Time) {
 	if g == nil || g.persistencePath == "" {
 		return
 	}
-	// One writer at a time: adopt, snapshot, write and record must not interleave
-	// with another persist, or the older snapshot can rename last.
+	// One writer at a time: snapshot and replace must not interleave with another
+	// persist, or the older snapshot can rename last.
 	g.persistenceMu.Lock()
 	defer g.persistenceMu.Unlock()
-	// The same cycle must also exclude `quota reset-learning`, a separate process.
-	// Its reset is only durable if a daemon snapshot taken before it cannot be
-	// renamed afterwards.
-	fileLock, lockErr := lockStateFile(g.persistencePath)
-	if lockErr != nil {
-		g.logger.Write(map[string]any{"event": "official_quota_state_persist_failed", "error": lockErr.Error()})
-		return
-	}
-	defer fileLock.Unlock()
-	g.adoptExternalLearningResetLocked(now)
 
 	g.mu.RLock()
 	accounts := make(map[string]AccountState, len(g.accounts))
@@ -360,19 +237,14 @@ func (g *Guard) persist(now time.Time) {
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
-	if hook := g.beforeRename; hook != nil {
-		hook()
-	}
 	if err == nil {
 		err = os.Rename(tmpPath, g.persistencePath)
 		ok = err == nil
 	}
 	if !ok {
+		_ = os.Remove(tmpPath)
 		g.logger.Write(map[string]any{"event": "official_quota_state_persist_failed", "error": err.Error()})
 		return
-	}
-	if info, statErr := os.Stat(g.persistencePath); statErr == nil {
-		g.lastPersistModTime = info.ModTime()
 	}
 }
 
@@ -430,7 +302,9 @@ func (g *Guard) enterFailover(requestedModel, effectiveModel, reason, accountID 
 	g.failoverMu.Lock()
 	firstEntry := !g.failoverActive
 	g.failoverActive = true
-	g.failoverSince = now
+	if firstEntry {
+		g.failoverSince = now
+	}
 	g.failoverModel = requestedModel
 	g.failoverTarget = effectiveModel
 	// Reuse the armed timer only when this really is the same failover generation:
@@ -573,9 +447,6 @@ func (g *Guard) Blocked(accountID string, now time.Time) (bool, string) {
 	if g == nil || strings.TrimSpace(accountID) == "" {
 		return false, ""
 	}
-	// A reset written by `quota reset-learning` must take effect on the very next
-	// routing decision, not on the next persist.
-	g.resetLearningFromDiskIfNewer(now)
 	key := AccountKey(accountID)
 	g.mu.RLock()
 	state, ok := g.accounts[key]
@@ -587,10 +458,10 @@ func (g *Guard) Blocked(accountID string, now time.Time) (bool, string) {
 }
 
 func (g *Guard) quotaStateBlocked(state AccountState, now time.Time) (bool, string) {
-	if quotaWindowBlocked(state.FiveHour, g.effectiveFiveHourStopPercent(state.FiveHourMaxStep), now) {
+	if quotaWindowBlocked(state.FiveHour, FiveHourStopPercent, now) {
 		return true, "five_hour"
 	}
-	if quotaWindowBlocked(state.Weekly, g.effectiveWeeklyStopPercent(state.WeeklyMaxStep), now) {
+	if quotaWindowBlocked(state.Weekly, WeeklyStopPercent, now) {
 		return true, "weekly"
 	}
 	return false, ""
@@ -722,7 +593,7 @@ func (g *Guard) ObserveWindow(accountID string, window Window) (accepted bool) {
 	// as the generation made a 2-second drift permanently fatal: once the stored
 	// value had moved forward, every sample from the other transport looked like an
 	// older window, was dropped, and the newest value could never be displaced. The
-	// guard then stopped learning while usage kept climbing.
+	// guard then stopped accepting fresh usage while the real window kept climbing.
 	sameWindow := current != nil && current.ResetAt.Equal(window.ResetAt)
 	if !sameWindow && current != nil && !current.ResetAt.IsZero() && !window.ResetAt.IsZero() {
 		drift := window.ResetAt.Sub(current.ResetAt)
@@ -766,43 +637,18 @@ func (g *Guard) ObserveWindow(accountID string, window Window) (accepted bool) {
 		return false
 	}
 	copy := window
-	// A positive delta between two nearby samples is the only evidence about how
-	// much one sampling step costs. A wider gap can span many turns or an idle
-	// period, and a delta above the cap cannot be one step at all; both are
-	// discarded rather than clamped, so a noisy sample never permanently lowers
-	// the stop point.
-	step := 0.0
-	if sameWindow && !window.ObservedAt.IsZero() && !current.ObservedAt.IsZero() {
-		// A zero or negative delta is not evidence about the next step: it means
-		// the samples are out of order or duplicated.
-		elapsed := window.ObservedAt.Sub(current.ObservedAt)
-		if elapsed > 0 && elapsed <= officialMaxStepSampleGap {
-			delta := window.UsedPercent - current.UsedPercent
-			if delta > 0 && delta <= g.maxStepCap {
-				step = delta
-			}
-		}
-	}
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
 		state.FiveHour = &copy
-		if step > state.FiveHourMaxStep {
-			state.FiveHourMaxStep = step
-		}
 	} else {
 		state.Weekly = &copy
-		if step > state.WeeklyMaxStep {
-			state.WeeklyMaxStep = step
-		}
 	}
 	g.accounts[key] = state
 	g.latestAccount = key
 	threshold := WeeklyStopPercent
 	windowName := "weekly"
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
-		threshold = g.effectiveFiveHourStopPercent(state.FiveHourMaxStep)
+		threshold = FiveHourStopPercent
 		windowName = "five_hour"
-	} else {
-		threshold = g.effectiveWeeklyStopPercent(state.WeeklyMaxStep)
 	}
 	g.mu.Unlock()
 	// Observe events fire on every upstream handshake, so only log a change in
@@ -836,16 +682,11 @@ func (g *Guard) Status(now time.Time) map[string]any {
 		"weekly_stop_percent":              WeeklyStopPercent,
 		"effective_five_hour_stop_percent": FiveHourStopPercent,
 		"effective_weekly_stop_percent":    WeeklyStopPercent,
-		"observed_five_hour_max_step":      0.0,
-		"observed_weekly_max_step":         0.0,
 		"state":                            "unknown",
 	}
 	if g == nil {
 		return result
 	}
-	// Report the state the daemon would actually use now, so a pending external
-	// reset is visible on /_status immediately.
-	g.resetLearningFromDiskIfNewer(now)
 	result["quota_telemetry"] = g.telemetryStatus(now)
 	result["failover"] = g.FailoverStatus()
 	g.mu.RLock()
@@ -855,10 +696,6 @@ func (g *Guard) Status(now time.Time) map[string]any {
 	if !ok || accountID == "" {
 		return result
 	}
-	result["observed_five_hour_max_step"] = state.FiveHourMaxStep
-	result["observed_weekly_max_step"] = state.WeeklyMaxStep
-	result["effective_five_hour_stop_percent"] = g.effectiveFiveHourStopPercent(state.FiveHourMaxStep)
-	result["effective_weekly_stop_percent"] = g.effectiveWeeklyStopPercent(state.WeeklyMaxStep)
 	result["state"] = "open"
 	if blocked, reason := g.quotaStateBlocked(state, now); blocked {
 		result["state"] = "protected"

@@ -73,7 +73,15 @@ func runServe(args []string) error {
 
 	reloadStatus := newRuntimeReloadStatus()
 	switcher := newBackendSwitcher(nil)
-	backend, snapshot, err := startGatewayBackendWithLoggerAndResolver(root, gatewayConfigPath, *instanceFlag, daemonLogger, reloadStatus, switcher.Resolve)
+	catalogStatus := newRuntimeCatalogStatus(initialSnapshot.baseline)
+	reloadStatus.SetCatalog(catalogStatus)
+	prepareInitialCatalog(root, gatewayConfigPath, initialSnapshot, catalogStatus, daemonLogger)
+	var recovery *catalogRecoveryController
+	recovery = newCatalogRecoveryController(switcher, catalogStatus, func() (*runtimeBackend, error) {
+		return recoverCatalogRuntime(root, gatewayConfigPath, *instanceFlag, initialSnapshot.gateway.Listen, daemonLogger, reloadStatus, recovery.Resolve)
+	})
+	recovery.logger = daemonLogger
+	backend, snapshot, err := startGatewayBackendWithLoggerAndResolver(root, gatewayConfigPath, *instanceFlag, daemonLogger, reloadStatus, recovery.Resolve)
 	if err != nil {
 		return err
 	}
@@ -106,13 +114,18 @@ func runServe(args []string) error {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				candidate, reloadErr := reloadGatewayBackendWithResolver(root, gatewayConfigPath, *instanceFlag, listen, daemonLogger, reloadStatus, switcher.Resolve)
+				candidate, reloadErr := reloadGatewayBackendWithResolver(root, gatewayConfigPath, *instanceFlag, listen, daemonLogger, reloadStatus, recovery.Resolve)
 				if reloadErr != nil {
 					reloadStatus.MarkFailure(reloadErr)
 					logBackend(switcher.Current(), map[string]any{"event": "gateway_reload_failed", "error": reloadErr.Error()})
 					continue
 				}
 				switcher.Swap(candidate)
+				if candidate.verifier != nil {
+					if current, verifyErr := candidate.verifier.Check(); verifyErr == nil {
+						catalogStatus.MarkCurrent(candidate.baseline, current.SHA256)
+					}
+				}
 				reloadStatus.MarkSuccess()
 				logBackend(candidate, map[string]any{"event": "gateway_reloaded"})
 			}
@@ -172,7 +185,7 @@ func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayCo
 		"event": "gateway_starting", "host": gateway.Listen.Host, "port": gateway.Listen.Port,
 		"wopal_models": len(gateway.WopalAI.Models), "relay_port": nil,
 	})
-	quotaGuard := quota.NewGuardWithStateAndMaxStep(logger, config.QuotaStatePathFor(root), time.Now(), gateway.Quota.MaxStepCap)
+	quotaGuard := quota.NewGuardWithState(logger, config.QuotaStatePathFor(root), time.Now())
 	quotaGuard.SetNotifier(notify.NewQuotaNotifier(logger, gateway.Notifications))
 	logger.Write(map[string]any{"event": "quota_notification_configured", "status": quotaGuard.NotificationStatus()})
 
@@ -211,6 +224,7 @@ func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayCo
 						runtimeState.Roles,
 						runtimeState.Credentials,
 						runtimeState.Reload.Snapshot(),
+						runtimeState.Catalog.Snapshot(),
 						quotaGuard.Status(time.Now()),
 						quotaGuard.FailoverStatus(),
 						quotaGuard.NotificationStatus(),
@@ -253,14 +267,16 @@ func redirectServiceLogs(root string, cfg config.Logs) (func(), error) {
 		}
 	}
 
-	stdout, err := captureStream(filepath.Join(logsDirectory, "service.log"), os.Stdout, nil, cfg)
+	stdout, err := captureStream(filepath.Join(logsDirectory, "service.log"), os.Stdout, newServiceLogFilter, cfg)
 	if err != nil {
 		closeAll()
 		return nil, fmt.Errorf("redirect stdout: %w", err)
 	}
 	cleanups = append(cleanups, stdout)
 
-	stderr, err := captureStream(filepath.Join(logsDirectory, "service-error.log"), os.Stderr, activity.NewAbortHandlerFilterWriter, cfg)
+	stderr, err := captureStream(filepath.Join(logsDirectory, "service-error.log"), os.Stderr, func(dst io.Writer) io.Writer {
+		return newServiceLogFilter(activity.NewAbortHandlerFilterWriter(dst))
+	}, cfg)
 	if err != nil {
 		closeAll()
 		return nil, fmt.Errorf("redirect stderr: %w", err)
@@ -287,10 +303,8 @@ func captureStream(path string, target *os.File, wrap func(io.Writer) io.Writer,
 
 	out := activity.NewRotatingWriter(path, cfg)
 	var sink io.Writer = out
-	var filtered *activity.AbortHandlerFilterWriter
 	if wrap != nil {
 		sink = wrap(out)
-		filtered, _ = sink.(*activity.AbortHandlerFilterWriter)
 	}
 	done := make(chan struct{})
 	go func() {
@@ -301,8 +315,8 @@ func captureStream(path string, target *os.File, wrap func(io.Writer) io.Writer,
 	return func() {
 		_ = reader.Close()
 		<-done
-		if filtered != nil {
-			filtered.Flush()
+		if flusher, ok := sink.(interface{ Flush() }); ok {
+			flusher.Flush()
 		}
 		_ = out.Close()
 	}, nil

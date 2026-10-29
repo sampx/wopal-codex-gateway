@@ -31,7 +31,7 @@ func TestTableResolvesExactExternalVerifiedOfficialAndRejectsUnknown(t *testing.
 		{model: "short", wantKind: External, wantID: "vendor", wantVerify: true},
 		{model: "gpt-official", wantKind: Official, wantID: "official", wantVerify: true},
 		{model: "vendor/missing", wantErr: true},
-		{model: "unknown-bare", wantErr: true},
+		{model: "unknown-bare", wantErr: true, wantVerify: true},
 	}
 
 	for _, tc := range cases {
@@ -40,6 +40,9 @@ func TestTableResolvesExactExternalVerifiedOfficialAndRejectsUnknown(t *testing.
 		if tc.wantErr {
 			if err == nil {
 				t.Fatalf("Resolve(%q) error = nil, want route error", tc.model)
+			}
+			if (verifyCalls > before) != tc.wantVerify {
+				t.Fatalf("Resolve(%q) verifier call mismatch: before=%d after=%d", tc.model, before, verifyCalls)
 			}
 			continue
 		}

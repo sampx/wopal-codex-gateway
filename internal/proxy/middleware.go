@@ -126,6 +126,15 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 
 		route, routeErr := resolve(model)
 		if routeErr != nil {
+			if routing.IsCatalogRefreshError(routeErr) {
+				logger.Write(withClient(map[string]any{"event": "route_rejected", "model": model, "path": path, "reason": "catalog_refresh_failed", "error": routeErr.Error()}, clientFields))
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+					"message": "official model catalog could not be refreshed safely; run catalog refresh and retry",
+					"type":    "server_error",
+					"code":    "catalog_refresh_failed",
+				}})
+				return
+			}
 			logger.Write(withClient(map[string]any{"event": "route_rejected", "model": model, "path": path, "reason": "not_registered", "error": routeErr.Error()}, clientFields))
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": gin.H{"message": routeErr.Error(), "type": "invalid_request_error", "code": "model_route_unavailable"}})
 			return
@@ -194,7 +203,7 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 							c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "quota_failover_rewrite_failed", "type": "invalid_request_error", "message": err.Error()}})
 							return
 						}
-						if !prepareExternalHTTP(c, logger, effectiveFallback, roles.OfficialFallback.ProviderID, readyRoleTarget(roles.Compaction), nativeReplay, inspection) {
+						if !prepareQuotaFallbackHTTP(c, logger, effectiveFallback, roles.OfficialFallback.ProviderID, readyRoleTarget(roles.Compaction), nativeReplay, inspection) {
 							return
 						}
 						c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)

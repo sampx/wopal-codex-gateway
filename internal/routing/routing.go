@@ -6,6 +6,7 @@ package routing
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -33,6 +34,32 @@ const (
 type Route struct {
 	Kind       Kind
 	ProviderID string
+}
+
+// CatalogRefreshError means a bare-name route could not be resolved because
+// the official catalog could not be safely recovered. Callers map this to a
+// 503 instead of treating it as an unknown model.
+type CatalogRefreshError struct {
+	Err error
+}
+
+func (e *CatalogRefreshError) Error() string {
+	if e == nil || e.Err == nil {
+		return "catalog refresh failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *CatalogRefreshError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func IsCatalogRefreshError(err error) bool {
+	var target *CatalogRefreshError
+	return errors.As(err, &target)
 }
 
 type Table struct {
@@ -67,24 +94,20 @@ func (t *Table) Resolve(model string) (Route, error) {
 	if model == "" {
 		return Route{}, fmt.Errorf("model is empty")
 	}
-	if route, ok := t.external[model]; ok {
-		if !strings.Contains(model, "/") && t.verifyBare != nil {
-			if err := t.verifyBare(); err != nil {
-				return Route{}, err
-			}
+	bare := !strings.Contains(model, "/")
+	if bare && t.verifyBare != nil {
+		if err := t.verifyBare(); err != nil {
+			return Route{}, err
 		}
+	}
+	if route, ok := t.external[model]; ok {
 		return route, nil
 	}
-	if strings.Contains(model, "/") {
+	if !bare {
 		return Route{}, fmt.Errorf("model %q is not registered", model)
 	}
 	if _, ok := t.official[model]; !ok {
 		return Route{}, fmt.Errorf("model %q is not registered", model)
-	}
-	if t.verifyBare != nil {
-		if err := t.verifyBare(); err != nil {
-			return Route{}, err
-		}
 	}
 	return Route{Kind: Official, ProviderID: "official"}, nil
 }

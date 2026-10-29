@@ -157,7 +157,11 @@ func TestOfficialArtifactVerifierRejectsCanonicalPathChange(t *testing.T) {
 		catalogResolveNativeArtifact = oldNative
 	})
 
-	if _, err := NewOfficialArtifactVerifier(baseline); err == nil {
-		t.Fatal("NewOfficialArtifactVerifier path drift = nil, want fail closed")
+	verifier, err := NewOfficialArtifactVerifier(baseline)
+	if err != nil {
+		t.Fatalf("NewOfficialArtifactVerifier path drift = %v, want valid baseline construction", err)
+	}
+	if err := verifier.Verify(); err == nil {
+		t.Fatal("Verify path drift = nil, want recoverable verification failure")
 	}
 }

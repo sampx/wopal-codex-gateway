@@ -87,6 +87,7 @@ func rewriteQuotaFailoverWebsocketFrame(payload []byte, quotaGuard *quota.Guard,
 		return payload, true, false
 	}
 	request["model"] = effectiveFallback
+	sanitizeQuotaFallbackHistory(request)
 	rewritten, err := json.Marshal(request)
 	if err != nil {
 		return payload, false, false

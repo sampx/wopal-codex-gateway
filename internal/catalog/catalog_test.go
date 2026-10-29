@@ -474,6 +474,7 @@ func catalogTestStubCommand(t *testing.T, output catalogCommandOutput, resolveEr
 // TestRefreshCatalogKeepsPreviousCatalogWhenCodexFails protects AC#5: a failed
 // refresh must report the cause and leave the last usable catalog in place.
 func TestRefreshCatalogKeepsPreviousCatalogWhenCodexFails(t *testing.T) {
+	t.Cleanup(config.SetProjectRootForTest(t.TempDir()))
 	oldResolve := catalogResolveCodex
 	oldExecute := catalogExecuteCodex
 	t.Cleanup(func() {

@@ -80,7 +80,7 @@ Codex 仍由该 Gateway 接管时，修改或重置 `compaction` 会同步更新
 
 保护粒度是每一次新的 sampling step，即每个 `response.create` / `response.append` 之前重新判断，而不是每个用户回合只判断一次。
 
-上游只上报整数百分比，一步可能消耗不止 1 个点。为避免越过阈值，Gateway 会按「已观测最大单步超出最小余量的部分」提前停：5 小时窗口最小余量 2 个点，每周窗口最小余量 1 个点。观测步长默认最多按 5 个点计算（`quota.maxStepCap`，范围 1–10），因此在默认上限下有效阈值最低分别为 94% 和 95%。没有观测到大步长时，有效阈值等于基础阈值。
+保护阈值固定为 97% / 99%。Gateway 不再把账户级 quota 快照差值解释成单请求、单 turn 或单 agent 成本，因此并发会话和子代理不会动态提前停止点。version 1 的 `quota.maxStepCap` 仍可读取并原样保存用于配置兼容，但不再影响运行时路由。
 
 进入保护区后：
 
@@ -91,12 +91,6 @@ Codex 仍由该 Gateway 接管时，修改或重置 `compaction` 会同步更新
 ```
 
 额度 reset 后，下一次安全的 sampling step 会重新连接并切回原来请求的官方模型。
-
-```sh
-bin/wopal-codex-gateway quota reset-learning
-```
-
-会清除已学习的单步值，让有效阈值回到基础值，直到再次观测到新的步长。
 
 ### 默认不落盘请求正文
 
@@ -173,6 +167,12 @@ codex debug models --bundled
 
 它使用 Codex 当前版本自带的 bundled catalog 作为官方模型目录真相源。
 
+建立第一份可信 baseline 后，后续 native Codex 升级会自动恢复：Gateway 在跨进程锁保护下刷新 bundled catalog，并在完整 runtime snapshot 验证成功后原子切换，不重启稳定前门 listener。若自动恢复不能安全完成，bare-name 模型路由会 fail closed 返回 `503 catalog_refresh_failed`，但 `provider/model` 这类带命名空间的 external exact route 仍可继续服务。baseline 缺失或损坏时仍使用显式恢复命令建立信任起点：
+
+```sh
+bin/wopal-codex-gateway catalog refresh
+```
+
 ## 4. 从源码构建
 
 以下命令都在项目根目录执行。
@@ -207,7 +207,7 @@ Gateway 读 `runtime/config.json`。文件不存在就用默认值；写入走�
 }
 ```
 
-`version` 必须是 `1`，其他值在启动前就被拒绝。缺 `listen` 默认 `127.0.0.1:11435`；缺 `logs` 默认 10 MB、留 5 份；`quota.maxStepCap` 默认 `5`，范围 `1–10`，越界按默认值处理。
+`version` 必须是 `1`，其他值在启动前就被拒绝。缺 `listen` 默认 `127.0.0.1:11435`；缺 `logs` 默认 10 MB、留 5 份。`quota.maxStepCap` 仅作为 version 1 兼容字段保留：默认 `5`、范围 `1–10`，配置读写仍会保留，但不再影响 quota 路由。
 
 旧版本的文件如果缺 `version` 或还带 `ollama` 段，用 [5.4](#54-升级旧配置) 的迁移命令处理，不要手工改。
 
@@ -351,16 +351,16 @@ curl -fsS http://127.0.0.1:11435/_status
 
 - 监听地址与官方线路状态；
 - 5 小时 / 每周 quota 百分比、reset 时间与 failover 状态；
-- quota guard 的阈值与已观测步长：
+- quota guard 的固定阈值：
 
 ```text
 official_quota.five_hour_stop_percent
 official_quota.weekly_stop_percent
 official_quota.effective_five_hour_stop_percent
 official_quota.effective_weekly_stop_percent
-official_quota.observed_five_hour_max_step
-official_quota.observed_weekly_max_step
 ```
+
+- `catalog.status`、`catalog.baseline_sha256`、`catalog.current_sha256`、`catalog.checked_at`，以及发生过自动恢复后出现的 `catalog.last_auto_refresh`，用于判断 official catalog freshness / recovery 状态；
 
 - `request_body_logging: "disabled"`。
 
@@ -731,7 +731,7 @@ bin/wopal-codex-gateway catalog refresh
 codex debug models --bundled
 ```
 
-官方基线只来自 `codex debug models --bundled`，不读 `~/.codex/models_cache.json`。刷新失败会说明是 `codex` 缺失、非 0 退出、非法 JSON 还是空目录，并保留上一份可用目录。刷新后完全退出并重启 ChatGPT/Codex Desktop。
+官方基线只来自 `codex debug models --bundled`，不读 `~/.codex/models_cache.json`。已有可信 baseline 后，正常 Codex 升级会由 Gateway 自动恢复；如果自动恢复失败，`/_status.catalog` 会显示 `refresh_failed`，bare-name 请求返回 `503 catalog_refresh_failed`，此时再手工执行 `catalog refresh`。刷新后如客户端模型选择器仍缓存旧目录，再完全退出并重启 ChatGPT/Codex Desktop。
 
 ### Wopal 模型没有显示
 
@@ -776,13 +776,7 @@ bin/wopal-codex-gateway catalog refresh
 curl -fsS http://127.0.0.1:11435/_status
 ```
 
-对比 `official_quota.five_hour_stop_percent` / `weekly_stop_percent`（基础阈值）与 `effective_five_hour_stop_percent` / `effective_weekly_stop_percent`（实际停止点），再看 `observed_five_hour_max_step` / `observed_weekly_max_step`。观测到大步长时实际停止点会提前，这是保护余量。
-
-清零学习值：
-
-```sh
-bin/wopal-codex-gateway quota reset-learning
-```
+有效阈值现在固定：`effective_five_hour_stop_percent` 必须始终是 `97`，`effective_weekly_stop_percent` 必须始终是 `99`。如果看起来更早发生 failover，请检查当前窗口的 `used_percent`、reset 时间、telemetry freshness 与 `official_failover` 状态；`quota.maxStepCap` 不会提前阈值，也不存在需要清零的 learning state。
 
 ### 卸载后客户端还显示 Gateway 模型
 
@@ -839,7 +833,7 @@ logs/service-error.log  daemon 的 stderr
 | `runtime/cliproxy-runtime.json` | 每次启动重生成的 SDK 配置，不含密钥 |
 | `runtime/cliproxy-auth/` | SDK 要求的认证目录 |
 | `runtime/model-metadata.json` | provider 返回的模型能力快照 |
-| `runtime/official-quota-state.json` | 额度窗口与学习值，account key 是 SHA-256 |
+| `runtime/official-quota-state.json` | 当前额度窗口与 reset 时间，account key 是 SHA-256；旧 learned-step 字段会被忽略 |
 | `runtime/codex-restore.json` | 安装前的 Codex 配置，restore 时用 |
 
 `codex-restore.json` 在网关启用期间不要手工删。
