@@ -181,10 +181,11 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 				provider = "chatgpt"
 				proxy = chatgptProxy
 				target = chatgptTarget
-				effectiveFallback := readyRoleModel(roles.OfficialFallback)
+				fallbackRole, fallbackName := quotaFallbackRole(roles, model)
+				effectiveFallback := readyRoleModel(fallbackRole)
 				if blocked, reason := quotaGuard.BlockedModelWithTarget(accountID, model, effectiveFallback, time.Now()); blocked {
 					if effectiveFallback == "" {
-						abortModelRoleUnavailable(c, "officialFallback")
+						abortModelRoleUnavailable(c, fallbackName)
 						return
 					}
 					logger.Write(map[string]any{"event": "official_quota_failover", "requested_model": model, "effective_model": effectiveFallback, "path": path, "reason": reason})
@@ -195,7 +196,7 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 						c.Set("quota_failover_guard", quotaGuard)
 						c.Set("quota_failover_account_id", accountID)
 						c.Abort()
-						serveExternalWebsocketBridgeWithCompaction(c, logger, effectiveFallback, roles.OfficialFallback.ProviderID, resolve, readyRoleTarget(roles.Compaction))
+						serveExternalWebsocketBridgeWithCompaction(c, logger, effectiveFallback, fallbackRole.ProviderID, resolve, readyRoleTarget(roles.Compaction))
 						return
 					}
 					if c.Request.Method == http.MethodPost {
@@ -203,7 +204,7 @@ func routingMiddlewareWithRuntime(logger *activity.Logger, chatgptTarget, openai
 							c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "quota_failover_rewrite_failed", "type": "invalid_request_error", "message": err.Error()}})
 							return
 						}
-						if !prepareQuotaFallbackHTTP(c, logger, effectiveFallback, roles.OfficialFallback.ProviderID, readyRoleTarget(roles.Compaction), nativeReplay, inspection) {
+						if !prepareQuotaFallbackHTTP(c, logger, effectiveFallback, fallbackRole.ProviderID, readyRoleTarget(roles.Compaction), nativeReplay, inspection) {
 							return
 						}
 						c.Request.Header.Set("Authorization", "Bearer "+config.LocalAccessKey)

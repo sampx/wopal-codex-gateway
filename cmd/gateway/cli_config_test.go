@@ -263,6 +263,39 @@ func TestConfigRoleSetListAndReset(t *testing.T) {
 	}
 }
 
+func TestApprovalRoleConfigIsIndependent(t *testing.T) {
+	setupConfigAuthTestRoot(t)
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.Providers["vendor"] = config.ProviderConfig{BaseURL: "https://vendor.test", Models: []config.ExternalModelConfig{{Name: "normal", Protocol: config.ProtocolOpenAIResponses}, {Name: "review", Protocol: config.ProtocolOpenAIResponses}}}
+	if err := config.SaveGatewayConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := runConfigCommand("role", []string{"set", "official-fallback", "--provider", "vendor", "--model", "normal"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runConfigCommand("role", []string{"set", "approval-fallback", "--provider", "vendor", "--model", "review"}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.LoadGatewayConfig(config.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.ModelRoles.OfficialFallback.Model != "normal" || saved.ModelRoles.ApprovalFallback.Model != "review" {
+		t.Fatalf("roles: %+v", saved.ModelRoles)
+	}
+	if saved.ModelRoles.ReferencedRole("vendor") == "" {
+		t.Fatal("provider reference lost")
+	}
+	if err := runConfigCommand("role", []string{"reset", "approval-fallback"}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err = config.LoadGatewayConfig(config.ConfigPath())
+	if err != nil || saved.ModelRoles.ApprovalFallback != nil || saved.ModelRoles.OfficialFallback.Model != "normal" {
+		t.Fatalf("reset: %+v err=%v", saved.ModelRoles, err)
+	}
+}
+
 func TestConfigRoleCompactionUpdatesInstalledCodexMemories(t *testing.T) {
 	setupConfigAuthTestRoot(t)
 	home := t.TempDir()

@@ -83,6 +83,11 @@ func rewriteQuotaFailoverWebsocketFrame(payload []byte, quotaGuard *quota.Guard,
 	if routing.Classify(model) != routing.Official {
 		return payload, false, false
 	}
+	// The socket is bound to the fallback selected for its first request.
+	// A review/ordinary model transition needs a new route and provider.
+	if (model == "codex-auto-review") != (strings.TrimSpace(requestedOfficialModel) == "codex-auto-review") {
+		return payload, true, false
+	}
 	if blocked, _ := quotaGuard.BlockedModelWithTarget(accountID, model, effectiveFallback, now); !blocked {
 		return payload, true, false
 	}

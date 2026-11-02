@@ -488,6 +488,7 @@ func (r ModelRoleRef) Clone() ModelRoleRef {
 
 type ModelRolesConfig struct {
 	OfficialFallback *ModelRoleRef `json:"officialFallback,omitempty"`
+	ApprovalFallback *ModelRoleRef `json:"approvalFallback,omitempty"`
 	Compaction       *ModelRoleRef `json:"compaction,omitempty"`
 
 	extensions extensionFields
@@ -499,7 +500,7 @@ func (c *ModelRolesConfig) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	extensions, err := decodeExtensionFields(data, "officialFallback", "compaction")
+	extensions, err := decodeExtensionFields(data, "officialFallback", "approvalFallback", "compaction")
 	if err != nil {
 		return err
 	}
@@ -523,6 +524,10 @@ func (c ModelRolesConfig) Clone() ModelRolesConfig {
 		value := c.Compaction.Clone()
 		clone.Compaction = &value
 	}
+	if c.ApprovalFallback != nil {
+		value := c.ApprovalFallback.Clone()
+		clone.ApprovalFallback = &value
+	}
 	clone.extensions = c.extensions.Clone()
 	return clone
 }
@@ -534,6 +539,9 @@ func (c ModelRolesConfig) ReferencedRole(providerID string) string {
 	}
 	if c.Compaction != nil && strings.TrimSpace(c.Compaction.Provider) == providerID {
 		return "compaction"
+	}
+	if c.ApprovalFallback != nil && strings.TrimSpace(c.ApprovalFallback.Provider) == providerID {
+		return "approvalFallback"
 	}
 	return ""
 }

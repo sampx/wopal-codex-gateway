@@ -179,6 +179,7 @@ func runtimeRolesForSnapshot(snapshot *gatewaySnapshot) proxy.RuntimeRoles {
 	}
 	return proxy.RuntimeRoles{
 		OfficialFallback: toTarget(snapshot.officialFallback),
+		ApprovalFallback: toTarget(snapshot.approvalFallback),
 		Compaction:       toTarget(snapshot.compaction),
 	}
 }

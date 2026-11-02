@@ -18,6 +18,7 @@ type RoleTarget struct {
 
 type RuntimeRoles struct {
 	OfficialFallback RoleTarget
+	ApprovalFallback RoleTarget
 	Compaction       RoleTarget
 }
 
@@ -42,6 +43,14 @@ func readyRoleTarget(role RoleTarget) RoleTarget {
 func defaultRuntimeRoles() RuntimeRoles {
 	return RuntimeRoles{
 		OfficialFallback: RoleTarget{ProviderID: "wopal-ai", ClientModel: routing.OfficialQuotaFailoverModel, Ready: true},
+		ApprovalFallback: RoleTarget{ProviderID: "wopal-ai", ClientModel: routing.OfficialQuotaFailoverModel, Ready: true},
 		Compaction:       RoleTarget{ProviderID: "wopal-ai", ClientModel: routing.OfficialQuotaFailoverModel, Ready: true},
 	}
+}
+
+func quotaFallbackRole(roles RuntimeRoles, model string) (RoleTarget, string) {
+	if strings.TrimSpace(model) == "codex-auto-review" {
+		return roles.ApprovalFallback, "approvalFallback"
+	}
+	return roles.OfficialFallback, "officialFallback"
 }

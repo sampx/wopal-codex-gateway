@@ -78,3 +78,28 @@ func TestResolveRoleRejectsOfficialAndNeedsProtocolTargets(t *testing.T) {
 		t.Fatalf("needs-protocol target = %+v", got)
 	}
 }
+
+func TestApprovalFallbackIsIndependentAndValidated(t *testing.T) {
+	cfg := config.DefaultGatewayConfig()
+	cfg.WopalAI.BaseURL = "https://wopal.test/v1"
+	cfg.Providers["vendor"] = config.ProviderConfig{BaseURL: "https://vendor.test", Models: []config.ExternalModelConfig{{Name: "review", Protocol: config.ProtocolOpenAIResponses}, {Name: "normal", Protocol: config.ProtocolOpenAIResponses}}}
+	cfg.ModelRoles.OfficialFallback = &config.ModelRoleRef{Provider: "vendor", Model: "normal"}
+	reg, err := Build(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveRole(cfg, reg, RoleApprovalFallback); got.UpstreamModel != "normal" || got.Status != RoleReady {
+		t.Fatalf("compatibility: %+v", got)
+	}
+	cfg.ModelRoles.ApprovalFallback = &config.ModelRoleRef{Provider: "vendor", Model: "review"}
+	if got := ResolveRole(cfg, reg, RoleApprovalFallback); got.UpstreamModel != "review" || got.Status != RoleReady {
+		t.Fatalf("approval: %+v", got)
+	}
+	if got := ResolveRole(cfg, reg, RoleOfficialFallback); got.UpstreamModel != "normal" {
+		t.Fatalf("normal: %+v", got)
+	}
+	cfg.ModelRoles.ApprovalFallback.Model = "missing"
+	if err := ValidateExplicitRoles(cfg, reg); err == nil {
+		t.Fatal("invalid approval role accepted")
+	}
+}

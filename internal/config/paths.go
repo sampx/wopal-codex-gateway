@@ -148,6 +148,9 @@ func CatalogRefreshLockPathFor(root string) string {
 func QuotaStatePathFor(root string) string {
 	return filepath.Join(StateDirFor(root), "official-quota-state.json")
 }
+func QuotaProtectionPathFor(root string) string {
+	return filepath.Join(StateDirFor(root), "quota-protection.json")
+}
 
 // BinDir owns the released executables. It holds build output, never program
 // state, so nothing else is written here.
@@ -160,6 +163,7 @@ func ConfigPath() string                { return ConfigPathFor(MustProjectRoot()
 func ProviderModelMetadataPath() string { return ProviderModelMetadataPathFor(MustProjectRoot()) }
 func OfficialModelsPath() string        { return OfficialModelsPathFor(MustProjectRoot()) }
 func CatalogRefreshLockPath() string    { return CatalogRefreshLockPathFor(MustProjectRoot()) }
+func QuotaProtectionPath() string       { return QuotaProtectionPathFor(MustProjectRoot()) }
 func RestoreStatePath() string          { return filepath.Join(StateDir(), "codex-restore.json") }
 func ActivityLogPath() string           { return filepath.Join(LogsDir(), "gateway.log") }
 func ServiceLogPath() string            { return filepath.Join(LogsDir(), "service.log") }

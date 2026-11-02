@@ -18,6 +18,66 @@ import (
 	"wopal-codex-gateway/internal/routing"
 )
 
+func TestQuotaSelectsSeparateApprovalFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	guard := quota.NewGuard(nil)
+	guard.ObserveRateLimitPayload("acct", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), time.Now())
+	roles := RuntimeRoles{
+		OfficialFallback: RoleTarget{ProviderID: "wopal-ai", ClientModel: "wopal-ai/deepseek-v4.1-flash", Ready: true},
+		ApprovalFallback: RoleTarget{ProviderID: "wopal-ai", ClientModel: "wopal-ai/gemini-3.8-flash", Ready: true},
+	}
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithRuntime(nil, mustURL("http://127.0.0.1:1"), mustURL("http://127.0.0.1:1"), guard, legacyRouteResolver, roles))
+	engine.POST("/v1/responses", func(c *gin.Context) {
+		if c.GetHeader("ChatGPT-Account-ID") != "" || c.GetHeader("Authorization") != "Bearer "+config.LocalAccessKey {
+			t.Error("official credentials were not replaced before external routing")
+		}
+		raw, _ := io.ReadAll(c.Request.Body)
+		c.Data(200, "application/json", raw)
+	})
+	for _, tc := range []struct{ model, want string }{{"codex-auto-review", "gemini-3.8-flash"}, {"gpt-6.1-sol", "deepseek-v4.1-flash"}} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"`+tc.model+`","input":[],"stream":true,"text":{"format":{"type":"json_schema","name":"review","schema":{"type":"object"}}}}`))
+		req.Header.Set("ChatGPT-Account-ID", "acct")
+		req.Header.Set("Authorization", "Bearer official-test-token")
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), tc.want) {
+			t.Fatalf("%s: status %d body %s", tc.model, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"json_schema"`) || !strings.Contains(rec.Body.String(), `"stream":true`) {
+			t.Fatal("fallback lost structured output or streaming")
+		}
+	}
+}
+
+func TestApprovalFallbackUnavailableFailsClosed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	guard := quota.NewGuard(nil)
+	guard.ObserveRateLimitPayload("acct", []byte(`{"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":98,"window_minutes":300,"reset_after_seconds":3600}}}`), time.Now())
+	roles := RuntimeRoles{OfficialFallback: RoleTarget{ProviderID: "wopal-ai", ClientModel: "wopal-ai/deepseek-v4.1-flash", Ready: true}}
+	engine := gin.New()
+	engine.Use(routingMiddlewareWithRuntime(nil, mustURL("http://127.0.0.1:1"), mustURL("http://127.0.0.1:1"), guard, legacyRouteResolver, roles))
+	engine.POST("/v1/responses", func(c *gin.Context) { c.Status(200) })
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"codex-auto-review","input":[]}`))
+	req.Header.Set("ChatGPT-Account-ID", "acct")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+	if rec.Code == 200 || !strings.Contains(rec.Body.String(), "approvalFallback") {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestQuotaFallbackSocketReconnectsForApprovalModelChange(t *testing.T) {
+	guard := quota.NewGuard(nil)
+	for _, tc := range []struct{ bound, incoming string }{{"gpt-6.1-sol", "codex-auto-review"}, {"codex-auto-review", "gpt-6.1-sol"}} {
+		payload := []byte(`{"type":"response.create","model":"` + tc.incoming + `"}`)
+		_, reconnect, _ := rewriteQuotaFailoverWebsocketFrame(payload, guard, "acct", tc.bound, "wopal-ai/gemini-3.8-flash", time.Now())
+		if !reconnect {
+			t.Fatalf("did not reconnect on %s -> %s", tc.bound, tc.incoming)
+		}
+	}
+}
+
 func TestRoutingQuotaGuardFailsOverOfficialAndAllowsExemptions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	guard := quota.NewGuard(nil)

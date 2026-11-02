@@ -53,7 +53,7 @@ func run(args []string) error {
 			return err
 		}
 		return nil
-	case "config", "providers", "auth", "models", "catalog", "codex", "service":
+	case "config", "providers", "auth", "models", "catalog", "codex", "service", "quota":
 		if requestsHelp(rest) {
 			printHelp()
 			return nil
@@ -129,6 +129,8 @@ func runCommandGroup(group string, args []string) error {
 		return runCodexCommand(subcommand, rest)
 	case "service":
 		return runServiceCommand(subcommand, rest)
+	case "quota":
+		return runQuotaCommand(subcommand, rest)
 	}
 
 	return fmt.Errorf("unknown command group: %s", group)
@@ -166,6 +168,9 @@ Commands:
   serve --project-root <dir>                                                  Run the gateway daemon
   config migrate --from <existing.json> --to <new.json>                         Prepare a separate version-1 config
   config show                                                                 Print the gateway configuration
+  config role                                                                 Show resolved model roles
+  config role set <official-fallback|approval-fallback|compaction> --provider <id> --model <name>
+  config role reset <official-fallback|approval-fallback|compaction>
   config wopal [--base-url <url>] [--tool-mode code_mode_only|code_mode|direct] [--model <name>...] [--context-window N] [--vision] [--no-reasoning]
   providers set <provider> --base-url <url> [--base-url-for <protocol>=<url>]... [--models-url <url>] [--models-auth none|provider-key] [--header <name>=<value>]... [--protocol <default>] [--tool-mode <mode>]
   providers remove <provider>                                                   Remove an unreferenced external provider
@@ -187,6 +192,7 @@ Commands:
   service stop                                                                Stop the proxy service
   service restart                                                             Restart the proxy service
   service status                                                              Show install/load/health status
+  quota protection [on|off]                                                   Show or switch official quota protection
 
 Routing:
   wopal-ai/<model>   -> Wopal AI / New API

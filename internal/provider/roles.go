@@ -11,6 +11,7 @@ type RoleName string
 
 const (
 	RoleOfficialFallback RoleName = "officialFallback"
+	RoleApprovalFallback RoleName = "approvalFallback"
 	RoleCompaction       RoleName = "compaction"
 )
 
@@ -51,6 +52,16 @@ func configuredRole(cfg *config.GatewayConfig, name RoleName) (*config.ModelRole
 			if cfg.ModelRoles.Compaction != nil {
 				value := cfg.ModelRoles.Compaction.Clone()
 				return &value, RoleExplicit
+			}
+		case RoleApprovalFallback:
+			if cfg.ModelRoles.ApprovalFallback != nil {
+				value := cfg.ModelRoles.ApprovalFallback.Clone()
+				return &value, RoleExplicit
+			}
+			// Keep existing installations compatible until this role is configured.
+			if cfg.ModelRoles.OfficialFallback != nil {
+				value := cfg.ModelRoles.OfficialFallback.Clone()
+				return &value, RoleDefault
 			}
 		}
 	}
@@ -113,7 +124,7 @@ func (r *Registry) ModelByProvider(providerID, upstreamModel string) (ModelRef, 
 }
 
 func ValidateExplicitRoles(cfg *config.GatewayConfig, registry *Registry) error {
-	for _, name := range []RoleName{RoleOfficialFallback, RoleCompaction} {
+	for _, name := range []RoleName{RoleOfficialFallback, RoleApprovalFallback, RoleCompaction} {
 		resolved := ResolveRole(cfg, registry, name)
 		if resolved.Source == RoleExplicit && resolved.Status != RoleReady {
 			return fmt.Errorf("model role %s is invalid: %s", name, resolved.Reason)

@@ -41,7 +41,7 @@ func runConfigRole(args []string) error {
 		if err != nil {
 			return err
 		}
-		for _, name := range []provider.RoleName{provider.RoleOfficialFallback, provider.RoleCompaction} {
+		for _, name := range []provider.RoleName{provider.RoleOfficialFallback, provider.RoleApprovalFallback, provider.RoleCompaction} {
 			role := provider.ResolveRole(resolvedCfg, registry, name)
 			fmt.Printf("%s provider=%s upstream=%s", role.Name, role.ProviderID, role.UpstreamModel)
 			if role.ClientModel != "" {
@@ -59,7 +59,7 @@ func runConfigRole(args []string) error {
 	switch args[0] {
 	case "set":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: %s config role set <official-fallback|compaction> --provider <id> --model <upstream-name>", binaryName)
+			return fmt.Errorf("usage: %s config role set <official-fallback|approval-fallback|compaction> --provider <id> --model <upstream-name>", binaryName)
 		}
 		name, err := parseConfigRoleName(args[1])
 		if err != nil {
@@ -77,6 +77,8 @@ func runConfigRole(args []string) error {
 		switch name {
 		case provider.RoleOfficialFallback:
 			cfg.ModelRoles.OfficialFallback = ref
+		case provider.RoleApprovalFallback:
+			cfg.ModelRoles.ApprovalFallback = ref
 		case provider.RoleCompaction:
 			cfg.ModelRoles.Compaction = ref
 		}
@@ -106,7 +108,7 @@ func runConfigRole(args []string) error {
 		return nil
 	case "reset":
 		if len(args) != 2 {
-			return fmt.Errorf("usage: %s config role reset <official-fallback|compaction>", binaryName)
+			return fmt.Errorf("usage: %s config role reset <official-fallback|approval-fallback|compaction>", binaryName)
 		}
 		name, err := parseConfigRoleName(args[1])
 		if err != nil {
@@ -115,6 +117,8 @@ func runConfigRole(args []string) error {
 		switch name {
 		case provider.RoleOfficialFallback:
 			cfg.ModelRoles.OfficialFallback = nil
+		case provider.RoleApprovalFallback:
+			cfg.ModelRoles.ApprovalFallback = nil
 		case provider.RoleCompaction:
 			cfg.ModelRoles.Compaction = nil
 		}
@@ -156,8 +160,10 @@ func parseConfigRoleName(value string) (provider.RoleName, error) {
 		return provider.RoleOfficialFallback, nil
 	case "compaction":
 		return provider.RoleCompaction, nil
+	case "approval-fallback":
+		return provider.RoleApprovalFallback, nil
 	default:
-		return "", fmt.Errorf("model role must be official-fallback or compaction")
+		return "", fmt.Errorf("model role must be official-fallback, approval-fallback or compaction")
 	}
 }
 

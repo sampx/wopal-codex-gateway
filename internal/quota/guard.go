@@ -80,12 +80,13 @@ type Guard struct {
 	lastAccepted  time.Time
 	rejectedCount int
 
-	failoverMu     sync.Mutex
-	failoverActive bool
-	failoverSince  time.Time
-	failoverModel  string
-	failoverTarget string
-	recoveryKey    string
+	failoverMu      sync.Mutex
+	failoverActive  bool
+	failoverSince   time.Time
+	failoverModel   string
+	failoverTarget  string
+	failoverAccount string
+	recoveryKey     string
 	// The generation tuple the current recoveryKey was minted for. A timer may only
 	// be reused when all three still match the incoming failover.
 	recoveryReason  string
@@ -103,6 +104,10 @@ type Guard struct {
 	// compaction replays) all reach persist, so without it two snapshots can be
 	// written in the opposite order and an older one can land last.
 	persistenceMu sync.Mutex
+
+	// protection holds the operator switch that can suspend the fixed stop
+	// points. It is read on each decision and re-read only when the file changes.
+	protection protectionCache
 }
 
 type PersistedState struct {
@@ -307,6 +312,7 @@ func (g *Guard) enterFailover(requestedModel, effectiveModel, reason, accountID 
 	}
 	g.failoverModel = requestedModel
 	g.failoverTarget = effectiveModel
+	g.failoverAccount = AccountKey(accountID)
 	// Reuse the armed timer only when this really is the same failover generation:
 	// a different reason (five-hour -> weekly), a different window or a different
 	// model needs its own key, or the old timer would later clear protection that
@@ -392,9 +398,12 @@ func (g *Guard) notifyRecovered(requestedModel, reason string, resetAt time.Time
 	g.failoverSince = time.Time{}
 	g.failoverModel = ""
 	g.failoverTarget = ""
+	g.failoverAccount = ""
 	g.recoveryKey = ""
 	g.failoverMu.Unlock()
-	if g.notifier == nil {
+	// A recovery timer that fires after the operator suspended protection has
+	// nothing to announce: official traffic was already flowing again.
+	if g.notifier == nil || !g.ProtectionEnabled(time.Now()) {
 		return
 	}
 	g.notifier.NotifyQuotaRecovered(requestedModel, reason, resetAt, time.Now())
@@ -406,6 +415,12 @@ func (g *Guard) FailoverStatus() map[string]any {
 	if g == nil {
 		return map[string]any{"active": false}
 	}
+	if !g.ProtectionEnabled(time.Now()) {
+		// Protection is suspended: official requests are no longer replaced, so no
+		// conversation is running on a fallback model even if an old cycle is still
+		// recorded here.
+		return map[string]any{"active": false, "protection": "disabled"}
+	}
 	g.failoverMu.Lock()
 	defer g.failoverMu.Unlock()
 	status := map[string]any{"active": g.failoverActive}
@@ -415,6 +430,17 @@ func (g *Guard) FailoverStatus() map[string]any {
 		status["effective_model"] = g.failoverTarget
 	}
 	return status
+}
+
+func (g *Guard) clearFailover() {
+	g.failoverMu.Lock()
+	defer g.failoverMu.Unlock()
+	g.failoverActive = false
+	g.failoverSince = time.Time{}
+	g.failoverModel = ""
+	g.failoverTarget = ""
+	g.failoverAccount = ""
+	g.recoveryKey = ""
 }
 
 func (g *Guard) windowResetAt(accountID, reason string) time.Time {
@@ -445,6 +471,9 @@ func (g *Guard) NotificationStatus() map[string]any {
 
 func (g *Guard) Blocked(accountID string, now time.Time) (bool, string) {
 	if g == nil || strings.TrimSpace(accountID) == "" {
+		return false, ""
+	}
+	if !g.ProtectionEnabled(now) {
 		return false, ""
 	}
 	key := AccountKey(accountID)
@@ -644,6 +673,20 @@ func (g *Guard) ObserveWindow(accountID string, window Window) (accepted bool) {
 	}
 	g.accounts[key] = state
 	g.latestAccount = key
+	// A fresh official reading can show an early reset. Clear only the cycle
+	// for this account and only after neither known window is protected.
+	if blocked, _ := g.quotaStateBlocked(state, window.ObservedAt); !blocked {
+		g.failoverMu.Lock()
+		if g.failoverActive && g.failoverAccount == key {
+			g.failoverActive = false
+			g.failoverSince = time.Time{}
+			g.failoverModel = ""
+			g.failoverTarget = ""
+			g.failoverAccount = ""
+			g.recoveryKey = ""
+		}
+		g.failoverMu.Unlock()
+	}
 	threshold := WeeklyStopPercent
 	windowName := "weekly"
 	if window.WindowMinutes == officialFiveHourWindowMinutes {
@@ -689,6 +732,7 @@ func (g *Guard) Status(now time.Time) map[string]any {
 	}
 	result["quota_telemetry"] = g.telemetryStatus(now)
 	result["failover"] = g.FailoverStatus()
+	result["protection"] = g.ProtectionStatus(now)
 	g.mu.RLock()
 	accountID := g.latestAccount
 	state, ok := g.accounts[accountID]
@@ -697,7 +741,7 @@ func (g *Guard) Status(now time.Time) map[string]any {
 		return result
 	}
 	result["state"] = "open"
-	if blocked, reason := g.quotaStateBlocked(state, now); blocked {
+	if blocked, reason := g.quotaStateBlocked(state, now); blocked && g.ProtectionEnabled(now) {
 		result["state"] = "protected"
 		result["reason"] = reason
 	}
@@ -758,6 +802,27 @@ func (g *Guard) telemetryStatus(now time.Time) map[string]any {
 		status["stale"] = age >= QuotaTelemetryStaleAfter
 	}
 	return status
+}
+
+// TelemetryStale reports whether the newest accepted sample is old enough that
+// protection may be resting on data from before a quota reset. Only an official
+// response refreshes that sample, and once native traffic is failed over there
+// is none, so a stale guard has to be able to ask for fresh numbers.
+func (g *Guard) TelemetryStale(now time.Time) bool {
+	if g == nil {
+		return false
+	}
+	g.blindMu.Lock()
+	last := g.lastAccepted
+	g.blindMu.Unlock()
+	if last.IsZero() {
+		return true
+	}
+	age := now.Sub(last)
+	if age < 0 {
+		age = 0
+	}
+	return age >= QuotaTelemetryStaleAfter
 }
 
 func quotaWindowStatus(window *Window) map[string]any {

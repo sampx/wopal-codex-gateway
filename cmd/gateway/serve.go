@@ -51,6 +51,11 @@ func runServe(args []string) error {
 	if err := config.SetProjectRoot(root); err != nil {
 		return err
 	}
+	// The operator override is temporary and belongs to one daemon lifetime.
+	// Reloads do not pass through runServe and therefore preserve the override.
+	if err := resetQuotaProtectionAtStartup(root); err != nil {
+		return fmt.Errorf("enable quota protection at startup: %w", err)
+	}
 	initialSnapshot, err := loadGatewaySnapshot(root, gatewayConfigPath)
 	if err != nil {
 		return err
@@ -149,6 +154,11 @@ func runServe(args []string) error {
 	return nil
 }
 
+func resetQuotaProtectionAtStartup(root string) error {
+	_, err := quota.WriteProtectionState(config.QuotaProtectionPathFor(root), true, time.Now())
+	return err
+}
+
 // buildGatewayService assembles the embedded CLIProxyAPI service exactly as the
 // daemon runs it. It is separate from runServe so integration tests can drive
 // the real assembly — the same server options, routing middleware and status
@@ -186,6 +196,7 @@ func buildGatewayServiceWithRuntimeLogger(root string, gateway *config.GatewayCo
 		"wopal_models": len(gateway.WopalAI.Models), "relay_port": nil,
 	})
 	quotaGuard := quota.NewGuardWithState(logger, config.QuotaStatePathFor(root), time.Now())
+	quotaGuard.SetProtectionPath(config.QuotaProtectionPathFor(root))
 	quotaGuard.SetNotifier(notify.NewQuotaNotifier(logger, gateway.Notifications))
 	logger.Write(map[string]any{"event": "quota_notification_configured", "status": quotaGuard.NotificationStatus()})
 

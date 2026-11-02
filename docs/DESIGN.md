@@ -26,7 +26,7 @@ Wopal Codex Gateway 是 macOS 上的本地模型网关。
 - 外部 provider 的每条模型按自己的上游协议路由：OpenAI Chat、OpenAI Responses、Anthropic Messages 或 Gemini。
 - prompt、请求正文、凭证和原始账号标识不写入磁盘。
 
-两个模型用途由用户通过 CLI 指定，不写死在代码里：官方额度保护触发时使用的备用模型（`officialFallback`），以及会话压缩与 Codex memories 使用的模型（`compaction`）。
+三个模型用途由用户通过 CLI 指定：普通官方请求的备用模型（`officialFallback`）、自动审批的备用模型（`approvalFallback`），以及会话压缩与 Codex memories 使用的模型（`compaction`）。
 
 ## Capability Scope
 
@@ -64,7 +64,7 @@ Wopal Codex Gateway 是 macOS 上的本地模型网关。
 | fallback 转换不制造 reasoning 占位文本 | official Responses 历史切到 external provider 时，只传递可用的 reasoning 摘要；缺失摘要时省略该内容，不生成会进入模型上下文或客户端 UI 的占位字符串 |
 | provider id 同时作为名字空间 | 一个 provider 只有一套命名配置，默认名字由 id 加 upstream model 组成 |
 | 特殊模型用途保存 provider + upstream model | alias 改名不改变 role 的后端归属 |
-| 只保留两个 role | `officialFallback` 负责额度回退；`compaction` 同时服务 Gateway compaction 与 Codex memories，因此 memories 永不占用官方额度 |
+| 三个 role 独立配置 | `officialFallback` 服务普通额度回退；`approvalFallback` 服务自动审批额度回退；`compaction` 服务 Gateway compaction 与 Codex memories |
 | `runtime/config.json` 保持 version 1 | `wopalAi` 与 `wopal-ai/*` 保持稳定；新增字段继续使用 version 1 |
 
 ## Module Architecture
@@ -108,19 +108,26 @@ Wopal Codex Gateway 是 macOS 上的本地模型网关。
 
 命令组：`config`、`auth`、`models`、`catalog`、`codex`、`service`、`quota`。
 
+额度保护开关：
+
+```text
+wopal-codex-gateway quota protection [on|off|status]
+```
+
+
 多 provider 新增 provider 管理与 role 管理命令：
 
 ```text
 wopal-codex-gateway providers set <provider> --base-url <url> [--base-url-for <protocol>=<url>]... [--models-url <url>] [--models-auth <none|provider-key>] [--header <name>=<value>]... [--protocol <default>] [--tool-mode <mode>]
 wopal-codex-gateway providers remove <provider>
 wopal-codex-gateway config role
-wopal-codex-gateway config role set <official-fallback|compaction> --provider <id> --model <upstream-name>
-wopal-codex-gateway config role reset <official-fallback|compaction>
+wopal-codex-gateway config role set <official-fallback|approval-fallback|compaction> --provider <id> --model <upstream-name>
+wopal-codex-gateway config role reset <official-fallback|approval-fallback|compaction>
 ```
 
 `providers set` 是 upsert，输出 `created` 或 `updated`，让用户看清这次是新建还是修改；创建时必须提供 `--base-url`；修改时省略即保持原值。`--base-url-for` 可以重复，用来写某个协议的专用地址，例如 OpenCode Go 的 messages 和 gemini。`--protocol` 是这个 provider 的最后兜底协议，不是必填项；不填时不猜协议，模型必须由单模型配置或同步元数据确定协议。`--models-url` 指定模型清单地址，省略时默认 `baseUrl + /models`。`--header` 可以重复，写入 provider 的非密钥 header 模板，用于向上游注入必需的常量头或 `$CPA-SESSION-ID`；允许的写法见配置规则。`providers remove` 在 role 仍引用它时拒绝执行。
 
-`config role` 不带参数时打印两个 role 的解析结果：provider、upstream model、client model、默认还是显式、ready/unavailable/invalid。它只读配置，不需要 daemon 运行——role 配错导致 `serve` 拒绝启动时，这正是要看的东西。
+`config role` 不带参数时打印三个 role 的解析结果：provider、upstream model、client model、默认还是显式、ready/unavailable/invalid。它只读配置，不需要 daemon 运行——role 配错导致 `serve` 拒绝启动时，这正是要看的东西。
 
 静态配置也可以直接看 `config show`；运行中的解析状态看 `/_status`。
 
@@ -197,7 +204,7 @@ wopal-codex-gateway config role reset <official-fallback|compaction>
 - alias 与官方 bundled slug 的冲突在写入 alias 和 `catalog refresh` 时检查。
 - 每个外部 provider 可配置 `toolMode` 和 `excludedModels`；tool mode 支持 `code_mode_only`、`code_mode`、`direct`，默认 `code_mode_only`。`excludedModels` 与 `wopal-ai` 同义：列在其中的 upstream model 不进入 `models sync` 结果，也不进入 catalog。
 - `modelRoles` 只保存 provider + upstream model，不保存 alias。
-- 两个 role 的默认值都指向 `wopal-ai/deepseek-v4.1-flash`。
+- `officialFallback` 和 `compaction` 默认指向 `wopal-ai/deepseek-v4.1-flash`；未配置 `approvalFallback` 时继承 `officialFallback`。
 - 未识别的 version 1 字段继续原样保留。
 - 配置写入使用原子 rename，文件权限 `0600`。
 
@@ -253,11 +260,12 @@ catalog artifact 指真正编入 bundled models 的 native 可执行文件，不
 
 ## Model Roles
 
-系统只保留两个 role：
+系统提供三个 role：
 
 | Role | Used by | Default | Validation |
 | --- | --- | --- | --- |
 | `officialFallback` | 官方额度保护触发后的执行目标 | `wopal-ai:deepseek-v4.1-flash` | 必须是外部 provider 的模型；四种已注册协议均可，因为对 Codex 暴露的都是 Responses |
+| `approvalFallback` | 自动审批在官方额度保护触发后的执行目标 | 继承 `officialFallback` | 必须是外部 provider 的模型 |
 | `compaction` | Gateway compaction、Codex memories extract / consolidation | `wopal-ai:deepseek-v4.1-flash` | 必须是外部 provider 的模型；四种已注册协议均可 |
 
 Codex memories 不单独配置：Codex install 把 `compaction` role 解析得到的 client-visible model 写入两个 memories model 字段。
@@ -269,13 +277,13 @@ Codex memories 不单独配置：Codex install 把 `compaction` role 解析得�
 role 规则：
 
 - `config role set` 在写入前验证 provider 和 model 存在。
-- 显式 `officialFallback` 或 `compaction` 悬空时，`serve` 拒绝启动。
+- 显式 `officialFallback`、`approvalFallback` 或 `compaction` 悬空时，`serve` 拒绝启动。
 - compatibility default 悬空时，普通推理仍可启动；实际使用该 role 时返回 `model_role_unavailable`。
 - role 自身执行失败后直接返回错误，不继续套用另一个 role。
 
 ### Official Fallback
 
-自动回退只有一个触发来源：官方额度保护。
+自动回退只有一个触发来源：官方额度保护。`codex-auto-review` 使用 `approvalFallback`，其他官方模型使用 `officialFallback`；所选角色不可用时返回错误。
 
 | Situation | Fallback |
 | --- | --- |
@@ -478,6 +486,10 @@ SDK request logger 保持关闭。
 - 额度窗口 reset time 允许小幅抖动，不因秒级差异丢弃整段 telemetry。
 - `/_status` 报告固定停止点、当前窗口、telemetry 新鲜度和 failover 状态。为保持状态消费者兼容，`effective_five_hour_stop_percent` 与 `effective_weekly_stop_percent` 保留，但始终分别等于 97 和 99；不报告 learned-step 字段。
 - quota CLI 不提供 learning 管理命令；固定停止点不需要人工 reset 才能恢复。
+- 操作员可以用 `quota protection off` 临时暂停保护：官方请求继续走官方线路，直到上游自己拒绝为止。`quota protection on` 恢复 97% / 99% 停止点。开关存放在 `runtime/quota-protection.json`，daemon 在下一次额度判定时读取文件变化；daemon 重启时恢复开启，配置 reload 保持当前状态。文件缺失或无法解析时保护开启。
+- 开关关闭期间 telemetry 继续采样并写入 `runtime/official-quota-state.json`，只是不参与拦截。`/_status` 的 `official_quota.protection` 报告 `enabled` 或 `disabled`，`official_quota.state` 只在保护开启且越过停止点时报告 `protected`。
+- 操作员可使用豁免保护的 Luna 模型获得新的官方额度数据。该账号的五小时和每周窗口均不再触发保护时，清除当前 failover 状态；正常官方请求按新额度路由。
+
 
 额度进入保护区后使用 `officialFallback`。
 额度恢复后回到用户原本请求的官方模型。
@@ -487,7 +499,7 @@ official 请求切到 external fallback 时，Responses 历史中的 reasoning �
 
 ## Status
 
-`/_status` 报告 provider、两个 role、官方 quota/failover、credential 是否配置、catalog freshness / recovery 以及服务状态。
+`/_status` 报告 provider、三个 role、官方 quota/failover、credential 是否配置、catalog freshness / recovery 以及服务状态。
 状态输出不包含 API key、prompt 或原始账号标识。
 
 `catalog` 字段使用稳定结构：
@@ -526,6 +538,7 @@ official 请求切到 external fallback 时，Responses 历史中的 reasoning �
 | Catalog refresh coordination lock | `runtime/catalog-refresh.lock` | CLI + daemon；只做跨进程互斥，不承载模型或恢复状态 |
 | Codex restore state | `runtime/codex-restore.json` | CLI |
 | Official quota state | `runtime/official-quota-state.json` | daemon |
+| Official quota protection switch | `runtime/quota-protection.json` | CLI + daemon |
 | Model catalog | `~/.codex/wopal-codex-gateway-models.json` | CLI + daemon catalog recovery |
 | Logs | `logs/*.log` | daemon |
 | Rollback material | `recovery/` | operator |

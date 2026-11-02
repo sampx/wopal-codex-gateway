@@ -22,6 +22,7 @@ type gatewaySnapshot struct {
 	baseline         *catalog.OfficialModelsBaseline
 	artifactVerifier *catalog.OfficialArtifactVerifier
 	officialFallback provider.ResolvedRole
+	approvalFallback provider.ResolvedRole
 	compaction       provider.ResolvedRole
 }
 
@@ -48,6 +49,7 @@ func loadGatewaySnapshot(root, gatewayConfigPath string) (*gatewaySnapshot, erro
 		return nil, fmt.Errorf("%s: %w", gatewayConfigPath, err)
 	}
 	officialFallback := provider.ResolveRole(resolved, registry, provider.RoleOfficialFallback)
+	approvalFallback := provider.ResolveRole(resolved, registry, provider.RoleApprovalFallback)
 	compactionRole := provider.ResolveRole(resolved, registry, provider.RoleCompaction)
 	baseline, err := catalog.LoadOfficialModelsBaseline()
 	if err != nil {
@@ -84,6 +86,7 @@ func loadGatewaySnapshot(root, gatewayConfigPath string) (*gatewaySnapshot, erro
 		baseline:         baseline,
 		artifactVerifier: verifier,
 		officialFallback: officialFallback,
+		approvalFallback: approvalFallback,
 		compaction:       compactionRole,
 	}, nil
 }

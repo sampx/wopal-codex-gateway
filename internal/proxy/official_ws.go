@@ -149,10 +149,11 @@ func pumpOfficialWebsocket(source, target *websocket.Conn, done chan struct{}, r
 				continue
 			}
 			if model, ok := officialInferenceModel(payload, boundModel); ok {
-				effectiveFallback := readyRoleModel(roles.OfficialFallback)
+				fallbackRole, fallbackName := quotaFallbackRole(roles, model)
+				effectiveFallback := readyRoleModel(fallbackRole)
 				if blocked, reason := quotaGuard.BlockedModelWithTarget(accountID, model, effectiveFallback, time.Now()); blocked {
 					if effectiveFallback == "" {
-						writeModelRoleUnavailableWebsocket(source, sourceWriteMu, "officialFallback")
+						writeModelRoleUnavailableWebsocket(source, sourceWriteMu, fallbackName)
 						continue
 					}
 					logger.Write(map[string]any{"event": "official_quota_guard_blocked", "transport": "websocket", "model": model, "reason": reason, "action": "failover", "effective_model": effectiveFallback})

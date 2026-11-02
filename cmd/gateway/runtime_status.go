@@ -190,6 +190,7 @@ func buildRuntimeStatusPayload(
 		"providers": providers,
 		"roles": map[string]any{
 			"officialFallback": roleStatusPayload(roles.OfficialFallback),
+			"approvalFallback": roleStatusPayload(roles.ApprovalFallback),
 			"compaction":       roleStatusPayload(roles.Compaction),
 		},
 		"official":             "native-pass-through",
